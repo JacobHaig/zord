@@ -198,10 +198,11 @@ fn App() -> Element {
                     SettingsPanel { settings, devices: devices.clone() }
                 }
 
-                // Level meters
+                // Level meters. Pass the signals (not their values) so frequent
+                // level ticks re-render only the meters, never the whole App.
                 div { class: "meters",
-                    Meter { label: "Me".to_string(), level: me_level(), kind: "me".to_string() }
-                    Meter { label: "Others".to_string(), level: others_level(), kind: "others".to_string() }
+                    Meter { label: "Me".to_string(), level: me_level, kind: "me".to_string() }
+                    Meter { label: "Others".to_string(), level: others_level, kind: "others".to_string() }
                 }
 
                 if let Some(n) = notice.read().clone() {
@@ -239,12 +240,13 @@ fn App() -> Element {
                     }
                 }
 
-                // Transcript / results
+                // Transcript / results. Pass signals so the list subscribes and
+                // re-renders itself; App is not re-rendered on each new segment.
                 div { class: "transcript",
                     if *view.read() == View::Search {
-                        SearchResultsView { results: search_results() }
+                        SearchResultsView { results: search_results }
                     } else {
-                        TranscriptView { segments: segments() }
+                        TranscriptView { segments }
                     }
                 }
             }
@@ -325,9 +327,10 @@ fn SettingsPanel(settings: Signal<Settings>, devices: Vec<String>) -> Element {
 }
 
 #[component]
-fn Meter(label: String, level: f32, kind: String) -> Element {
-    // Map a peak amplitude (0..1) to a friendlier visual width.
-    let pct = (level.sqrt() * 100.0).clamp(0.0, 100.0);
+fn Meter(label: String, level: Signal<f32>, kind: String) -> Element {
+    // Map a peak amplitude (0..1) to a friendlier visual width. Reading the
+    // signal here means only this component re-renders on level changes.
+    let pct = (level().sqrt() * 100.0).clamp(0.0, 100.0);
     rsx! {
         div { class: "meter",
             span { class: "meter-label", "{label}" }
@@ -339,13 +342,16 @@ fn Meter(label: String, level: f32, kind: String) -> Element {
 }
 
 #[component]
-fn TranscriptView(segments: Vec<Segment>) -> Element {
-    if segments.is_empty() {
+fn TranscriptView(segments: Signal<Vec<Segment>>) -> Element {
+    let segs = segments.read();
+    if segs.is_empty() {
         return rsx! { div { class: "empty", "Press Record, or pick a session." } };
     }
     rsx! {
-        for (i, seg) in segments.iter().enumerate() {
-            div { key: "{i}", class: "line {source_class(seg.source)}",
+        for seg in segs.iter() {
+            div {
+                key: "{seg.source.as_str()}-{seg.t_start_ms}",
+                class: "line {source_class(seg.source)}",
                 span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
                 span { class: "who", "{seg.source.label()}" }
                 span { class: "text", "{seg.text}" }
@@ -355,17 +361,20 @@ fn TranscriptView(segments: Vec<Segment>) -> Element {
 }
 
 #[component]
-fn SearchResultsView(results: Vec<(String, Segment)>) -> Element {
-    if results.is_empty() {
+fn SearchResultsView(results: Signal<Vec<(String, Segment)>>) -> Element {
+    let hits = results.read();
+    if hits.is_empty() {
         return rsx! { div { class: "empty", "No matches." } };
     }
     rsx! {
-        for (i, entry) in results.iter().enumerate() {
-            div { key: "{i}", class: "line {source_class(entry.1.source)}",
-                span { class: "ts", "{fmt_ts(entry.1.t_start_ms)}" }
-                span { class: "who", "{entry.1.source.label()}" }
-                span { class: "text", "{entry.1.text}" }
-                span { class: "src", "{short_id(&entry.0)}" }
+        for (sid, seg) in hits.iter() {
+            div {
+                key: "{sid}-{seg.t_start_ms}",
+                class: "line {source_class(seg.source)}",
+                span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
+                span { class: "who", "{seg.source.label()}" }
+                span { class: "text", "{seg.text}" }
+                span { class: "src", "{short_id(sid)}" }
             }
         }
     }
