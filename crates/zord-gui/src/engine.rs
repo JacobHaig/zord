@@ -19,12 +19,19 @@ use zord_core::{Segment, Session, Source};
 use zord_store::Store;
 use zord_transcribe::{ensure_model, ModelId, Transcriber};
 
-/// Level-meter ballistics (shared by both channels for consistent behavior).
-/// Gain lifts typical speech RMS (~0.02–0.1) into a visible range; attack is
-/// fast (meter jumps up), release is slow (meter eases down).
-const LEVEL_GAIN: f32 = 4.0;
-const LEVEL_ATTACK: f32 = 0.6;
-const LEVEL_RELEASE: f32 = 0.15;
+/// Level-meter design (shared by both channels for consistent behavior).
+///
+/// Two things make a meter feel right and behave the same for a quiet mic and
+/// loud system audio:
+/// 1. A **dB (log) scale**: map RMS → dBFS over [FLOOR_DB, 0] → [0, 1]. A linear
+///    bar makes loud media peg at 100% while speech barely moves; dB compresses
+///    that range so both move proportionally to perceived loudness.
+/// 2. **Time-based** attack/release: per-buffer exponential smoothing using each
+///    buffer's real duration, so the meter reacts at the same wall-clock speed
+///    no matter how big/frequent each source's buffers are (cpal vs SCK/WASAPI).
+const LEVEL_FLOOR_DB: f32 = -60.0;
+const LEVEL_ATTACK_S: f32 = 0.08;
+const LEVEL_RELEASE_S: f32 = 0.35;
 
 /// Recording lifecycle status shown in the UI.
 #[derive(Debug, Clone, PartialEq)]
@@ -406,19 +413,48 @@ fn spawn_proc(
         let mut segmenter = Segmenter::new(SegmenterConfig::default());
         let mut wav = wav_path.and_then(|p| WavWriter::create(p).ok());
         let mut base_ms: Option<u64> = None;
-        // Smoothed loudness state for the level meter (see constants below).
+        // Smoothed loudness state for the level meter (see constants above).
         let mut level = 0.0f32;
+        // Opt-in meter diagnostics (set ZORD_METER_DEBUG=1).
+        let debug = std::env::var("ZORD_METER_DEBUG").is_ok();
+        let (mut dbg_bufs, mut dbg_samps) = (0u64, 0u64);
+        let mut dbg_last = session_start.elapsed();
 
         while let Ok(frame) = rx.recv() {
             let base = *base_ms.get_or_insert_with(|| session_start.elapsed().as_millis() as u64);
-            // RMS loudness of this buffer, gained, with fast-attack/slow-decay
-            // smoothing so the meter rises promptly and falls gently.
+            // RMS loudness of this buffer, gained, smoothed with time-based
+            // exponential attack/release so both channels react at the same
+            // real-world speed regardless of their buffer size/cadence.
             let n = frame.len().max(1);
             let rms = (frame.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt();
-            let target = (rms * LEVEL_GAIN).min(1.0);
-            let coeff = if target > level { LEVEL_ATTACK } else { LEVEL_RELEASE };
-            level += (target - level) * coeff;
+            // RMS -> dBFS -> normalized [0,1] over [FLOOR_DB, 0 dB].
+            let db = 20.0 * rms.max(1e-6).log10();
+            let target = ((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB).clamp(0.0, 1.0);
+            let dt = n as f32 / sample_rate.max(1) as f32; // seconds this buffer spans (mono)
+            let tau = if target > level { LEVEL_ATTACK_S } else { LEVEL_RELEASE_S };
+            let alpha = 1.0 - (-dt / tau).exp();
+            level += (target - level) * alpha;
             let _ = ev.send(Event::Level { source, level });
+
+            if debug {
+                dbg_bufs += 1;
+                dbg_samps += n as u64;
+                let now = session_start.elapsed();
+                if now.saturating_sub(dbg_last).as_millis() >= 500 {
+                    let secs = (now - dbg_last).as_secs_f32().max(1e-3);
+                    eprintln!(
+                        "[meter {:?}] {:.0} buf/s, avg {} samp/buf, rms {:.3}, level {:.3}",
+                        source,
+                        dbg_bufs as f32 / secs,
+                        dbg_samps / dbg_bufs.max(1),
+                        rms,
+                        level
+                    );
+                    dbg_bufs = 0;
+                    dbg_samps = 0;
+                    dbg_last = now;
+                }
+            }
 
             let mono = match resampler.process(&frame) {
                 Ok(m) => m,
