@@ -96,3 +96,42 @@ jobs:
         with:
           name: zord-macos-arm64
           path: dist/*
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest # has MSVC, CMake, and WebView2 preinstalled
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dioxus-cli
+        run: cargo install dioxus-cli --version 0.7.9 --locked
+
+      - name: Bundle app (WASAPI loopback + cpal mic, CPU whisper)
+        working-directory: crates/zord-gui
+        run: dx bundle --release --platform desktop
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          find target -maxdepth 8 \( -name "*.msi" -o -name "*.exe" \) -path "*bundle*" -exec cp {} dist/ \; || true
+          ls -la dist
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+      - name: Upload artifact (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zord-windows-x64
+          path: dist/*

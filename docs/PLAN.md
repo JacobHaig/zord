@@ -269,8 +269,13 @@ platform; Windows-specific capture lands in Phase 2b.
 - [ ] **Live verification (user step):** grant Screen Recording permission, play
   audio while speaking, confirm Me/Others attribution. (Requires TCC grant +
   real audio — can't be automated.)
-- **2b (Windows):** `wasapi` loopback + `cpal` mic — not started (no Windows
-  host here; trait is structured so it slots in).
+- **2b (Windows):** ✅ implemented. Mic via `cpal` (already cross-platform);
+  system audio via the `wasapi` crate's render-device loopback
+  (`AUDCLNT_STREAMFLAGS_LOOPBACK`) on a dedicated COM thread, emitting mono f32
+  like macOS. Whisper runs CPU-only on Windows (no Metal). **Verified by
+  `cargo check --target x86_64-pc-windows-msvc` (type-checks clean)**; a
+  `windows-latest` CI job does the real compile/link/bundle (`.msi`). Runtime
+  verification needs a Windows host (no host in this build env).
 - **Build note:** macOS 13 deployment target + a Swift-lib search path are set in
   `.cargo/config.toml` for the ScreenCaptureKit Swift bridge (CLT-only setups).
 

@@ -27,6 +27,7 @@ pub trait AudioSource {
 }
 
 /// Reinterpret a little-endian byte slice as `f32` PCM samples.
+#[cfg(target_os = "macos")]
 pub(crate) fn bytes_as_f32(data: &[u8]) -> Vec<f32> {
     data.chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
