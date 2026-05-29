@@ -142,8 +142,8 @@ folder.
 ## 6. Package a distributable build
 
 ```bash
-cd crates/zord-gui
-dx bundle --release --platform desktop
+# from the repo root — -p/--package selects the workspace member
+dx bundle --release --package zord-gui --platform desktop
 ```
 
 Produces `ZordGui.app` + a `.dmg` (macOS) under

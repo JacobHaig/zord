@@ -36,8 +36,7 @@ jobs:
         run: cargo install dioxus-cli --version 0.7.9 --locked
 
       - name: Bundle app
-        working-directory: crates/zord-gui
-        run: dx bundle --release --platform desktop
+        run: dx bundle --release --package zord-gui --platform desktop
 
       # ---- Optional: code-sign + notarize (only if secrets are set) ----
       - name: Import signing certificate
@@ -113,8 +112,7 @@ jobs:
         run: cargo install dioxus-cli --version 0.7.9 --locked
 
       - name: Bundle app (WASAPI loopback + cpal mic, CPU whisper)
-        working-directory: crates/zord-gui
-        run: dx bundle --release --platform desktop
+        run: dx bundle --release --package zord-gui --platform desktop
 
       - name: Collect artifacts
         shell: bash
