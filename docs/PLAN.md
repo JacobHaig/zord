@@ -274,12 +274,20 @@ platform; Windows-specific capture lands in Phase 2b.
 - **Build note:** macOS 13 deployment target + a Swift-lib search path are set in
   `.cargo/config.toml` for the ScreenCaptureKit Swift bridge (CLT-only setups).
 
-### Phase 3 — Dioxus desktop UI
-- [ ] Record/stop control, live level meters, recording/transcribing status.
-- [ ] Session list + transcript view (Me/Others styling, timestamps).
-- [ ] **Full-text search** (FTS5) across all sessions.
-- [ ] Permission/error states (G9).
-- **Exit criteria:** Full GUI workflow with no terminal.
+### Phase 3 — Dioxus desktop UI  ✅ DONE (built + launches)
+- [x] `zord-gui` crate (Dioxus 0.7 desktop). Threaded `Engine`: a control thread
+  owns the `!Send` capture streams; a db thread answers queries; both push
+  events to the UI over a tokio channel, drained into signals by a `spawn`ed task.
+- [x] Record/Stop control, status indicator (idle/preparing/downloading/recording),
+  live Me/Others level meters.
+- [x] Session sidebar + transcript view (Me/Others colour + timestamps); click a
+  session to load it.
+- [x] **FTS5 search** box across all sessions (sanitized MATCH query).
+- [x] Permission/error states (G9): degradation notice banner, error status.
+- **Exit criteria MET (build/launch):** compiles, launches a window, event loop
+  runs, no panic. Live recording behaviour shares Phase 1/2 verified pipeline;
+  full click-through with real audio is the same interactive step as Phase 2.
+- CLI (`zord`) retained alongside the GUI.
 
 ### Phase 4 — Export + local web dashboard
 - [ ] Export Markdown / SRT / JSON per session.

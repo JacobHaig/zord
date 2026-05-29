@@ -111,6 +111,25 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// All sessions, newest first.
+    pub fn list_sessions(&self) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_at, ended_at, title, audio_path, model
+             FROM sessions ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Session {
+                id: r.get(0)?,
+                started_at: r.get(1)?,
+                ended_at: r.get(2)?,
+                title: r.get(3)?,
+                audio_path: r.get(4)?,
+                model: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// All segments for a session, ordered by time.
     pub fn segments(&self, session_id: &str) -> Result<Vec<Segment>> {
         let mut stmt = self.conn.prepare(

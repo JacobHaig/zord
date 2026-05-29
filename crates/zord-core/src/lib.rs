@@ -45,7 +45,7 @@ pub struct AudioConfig {
 }
 
 /// A single word with its timing, relative to the start of the session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Word {
     pub text: String,
     pub t_start_ms: u64,
@@ -53,7 +53,7 @@ pub struct Word {
 }
 
 /// A transcribed utterance segment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
     pub source: Source,
     /// Milliseconds from session start.
