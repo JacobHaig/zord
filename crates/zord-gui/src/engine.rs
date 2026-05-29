@@ -19,6 +19,13 @@ use zord_core::{Segment, Session, Source};
 use zord_store::Store;
 use zord_transcribe::{ensure_model, ModelId, Transcriber};
 
+/// Level-meter ballistics (shared by both channels for consistent behavior).
+/// Gain lifts typical speech RMS (~0.02–0.1) into a visible range; attack is
+/// fast (meter jumps up), release is slow (meter eases down).
+const LEVEL_GAIN: f32 = 4.0;
+const LEVEL_ATTACK: f32 = 0.6;
+const LEVEL_RELEASE: f32 = 0.15;
+
 /// Recording lifecycle status shown in the UI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
@@ -37,8 +44,9 @@ pub enum Event {
     Notice(String),
     /// A freshly transcribed segment (live).
     Segment(Segment),
-    /// Live input level (peak amplitude 0..1) for a channel.
-    Level { source: Source, peak: f32 },
+    /// Live loudness for a channel: gained RMS with attack/decay ballistics,
+    /// 0..1. Identical computation for mic and system so both bars behave alike.
+    Level { source: Source, level: f32 },
     /// Result of [`DbCmd::ListSessions`].
     Sessions(Vec<Session>),
     /// Result of [`DbCmd::Search`].
@@ -398,12 +406,19 @@ fn spawn_proc(
         let mut segmenter = Segmenter::new(SegmenterConfig::default());
         let mut wav = wav_path.and_then(|p| WavWriter::create(p).ok());
         let mut base_ms: Option<u64> = None;
+        // Smoothed loudness state for the level meter (see constants below).
+        let mut level = 0.0f32;
 
         while let Ok(frame) = rx.recv() {
             let base = *base_ms.get_or_insert_with(|| session_start.elapsed().as_millis() as u64);
-            // Live level: peak amplitude of this buffer.
-            let peak = frame.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-            let _ = ev.send(Event::Level { source, peak });
+            // RMS loudness of this buffer, gained, with fast-attack/slow-decay
+            // smoothing so the meter rises promptly and falls gently.
+            let n = frame.len().max(1);
+            let rms = (frame.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt();
+            let target = (rms * LEVEL_GAIN).min(1.0);
+            let coeff = if target > level { LEVEL_ATTACK } else { LEVEL_RELEASE };
+            level += (target - level) * coeff;
+            let _ = ev.send(Event::Level { source, level });
 
             let mono = match resampler.process(&frame) {
                 Ok(m) => m,

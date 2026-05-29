@@ -78,9 +78,9 @@ fn App() -> Element {
                             segments.write().push(seg);
                         }
                     }
-                    Event::Level { source, peak } => match source {
-                        Source::Me => me_level.set(peak),
-                        Source::Others => others_level.set(peak),
+                    Event::Level { source, level } => match source {
+                        Source::Me => me_level.set(level),
+                        Source::Others => others_level.set(level),
                     },
                     Event::Sessions(v) => sessions.set(v),
                     Event::SearchResults(v) => search_results.set(v),
@@ -351,9 +351,10 @@ fn SettingsPanel(settings: Signal<Settings>, devices: Vec<String>) -> Element {
 
 #[component]
 fn Meter(label: String, level: Signal<f32>, kind: String) -> Element {
-    // Map a peak amplitude (0..1) to a friendlier visual width. Reading the
-    // signal here means only this component re-renders on level changes.
-    let pct = (level().sqrt() * 100.0).clamp(0.0, 100.0);
+    // `level` is already a gained, smoothed RMS (0..1) from the engine; just
+    // map to a percentage. Reading the signal here means only this component
+    // re-renders on level changes.
+    let pct = (level() * 100.0).clamp(0.0, 100.0);
     rsx! {
         div { class: "meter",
             span { class: "meter-label", "{label}" }
