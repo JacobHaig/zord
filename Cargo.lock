@@ -6412,6 +6412,7 @@ dependencies = [
  "tracing-subscriber",
  "zord-audio",
  "zord-capture",
+ "zord-config",
  "zord-core",
  "zord-export",
  "zord-store",
@@ -6439,6 +6440,17 @@ dependencies = [
  "screencapturekit",
  "tracing",
  "zord-core",
+]
+
+[[package]]
+name = "zord-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -6470,6 +6482,7 @@ dependencies = [
  "tracing-subscriber",
  "zord-audio",
  "zord-capture",
+ "zord-config",
  "zord-core",
  "zord-export",
  "zord-store",

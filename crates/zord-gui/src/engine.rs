@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use zord_audio::{MonoResampler, Segmenter, SegmenterConfig};
+use zord_audio::{MonoResampler, Segmenter, SegmenterConfig, WavWriter};
 use zord_capture::{AudioSource, Microphone, SystemAudio};
 use zord_core::{Segment, Session, Source};
 use zord_store::Store;
@@ -51,7 +51,12 @@ pub enum Event {
 
 /// Commands controlling recording.
 pub enum RecorderCmd {
-    Start { model: ModelId, keep_audio: bool },
+    Start {
+        model: ModelId,
+        keep_audio: bool,
+        input_device: Option<String>,
+        audio_dir: PathBuf,
+    },
     Stop,
     Shutdown,
 }
@@ -183,8 +188,19 @@ fn sanitize_fts(q: &str) -> String {
 fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_path: PathBuf) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            RecorderCmd::Start { model, keep_audio } => {
-                if run_session(model, keep_audio, &rx, &ev, &db_path) {
+            RecorderCmd::Start {
+                model,
+                keep_audio,
+                input_device,
+                audio_dir,
+            } => {
+                let opts = SessionOpts {
+                    model,
+                    keep_audio,
+                    input_device,
+                    audio_dir,
+                };
+                if run_session(opts, &rx, &ev, &db_path) {
                     break; // session ended due to Shutdown
                 }
             }
@@ -199,14 +215,26 @@ struct Job {
     vad: zord_audio::VadSegment,
 }
 
+struct SessionOpts {
+    model: ModelId,
+    keep_audio: bool,
+    input_device: Option<String>,
+    audio_dir: PathBuf,
+}
+
 /// Run one recording session. Returns `true` if it ended because of `Shutdown`.
 fn run_session(
-    model: ModelId,
-    _keep_audio: bool,
+    opts: SessionOpts,
     rx: &mpsc::Receiver<RecorderCmd>,
     ev: &UnboundedSender<Event>,
     db_path: &PathBuf,
 ) -> bool {
+    let SessionOpts {
+        model,
+        keep_audio,
+        input_device,
+        audio_dir,
+    } = opts;
     let _ = ev.send(Event::Status(Status::PreparingModel));
     let model_path = {
         let ev = ev.clone();
@@ -233,14 +261,29 @@ fn run_session(
     };
     let started_at = now_ms();
     let session_id = format!("sess-{started_at}");
+    // When keeping audio, we store per-channel WAVs as <audio_dir>/<id>.<src>.wav;
+    // record the prefix so re-transcribe / playback can find them.
+    let audio_prefix = audio_dir.join(&session_id);
     let _ = store.create_session(&Session {
         id: session_id.clone(),
         started_at,
         ended_at: None,
         title: None,
-        audio_path: None,
+        audio_path: if keep_audio {
+            Some(audio_prefix.display().to_string())
+        } else {
+            None
+        },
         model: model.name().to_string(),
     });
+    let wav_path = |src: &str| -> Option<PathBuf> {
+        if keep_audio {
+            let _ = std::fs::create_dir_all(&audio_dir);
+            Some(audio_dir.join(format!("{session_id}.{src}.wav")))
+        } else {
+            None
+        }
+    };
 
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
@@ -248,14 +291,14 @@ fn run_session(
 
     // Microphone (required).
     let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
-    let mic = match Microphone::start(mic_tx) {
+    let mic = match Microphone::start_with(mic_tx, input_device.as_deref()) {
         Ok(m) => m,
         Err(e) => {
             let _ = ev.send(Event::Status(Status::Error(format!("microphone: {e}"))));
             return false;
         }
     };
-    procs.push(spawn_proc(mic_rx, mic.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone()));
+    procs.push(spawn_proc(mic_rx, mic.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me")));
 
     // System audio (optional).
     let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
@@ -267,7 +310,7 @@ fn run_session(
         }
     };
     if let Some(sys) = &system {
-        procs.push(spawn_proc(sys_rx, sys.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone()));
+        procs.push(spawn_proc(sys_rx, sys.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), wav_path("others")));
     }
     drop(job_tx);
 
@@ -342,6 +385,7 @@ fn spawn_proc(
     session_start: Instant,
     job_tx: mpsc::Sender<Job>,
     ev: UnboundedSender<Event>,
+    wav_path: Option<PathBuf>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut resampler = match MonoResampler::new(sample_rate, 1) {
@@ -349,6 +393,7 @@ fn spawn_proc(
             Err(_) => return,
         };
         let mut segmenter = Segmenter::new(SegmenterConfig::default());
+        let mut wav = wav_path.and_then(|p| WavWriter::create(p).ok());
         let mut base_ms: Option<u64> = None;
 
         while let Ok(frame) = rx.recv() {
@@ -361,6 +406,9 @@ fn spawn_proc(
                 Ok(m) => m,
                 Err(_) => continue,
             };
+            if let Some(w) = wav.as_mut() {
+                let _ = w.write(&mono);
+            }
             for mut seg in segmenter.push(&mono) {
                 seg.t_start_ms += base;
                 seg.t_end_ms += base;
@@ -372,6 +420,9 @@ fn spawn_proc(
             seg.t_start_ms += base;
             seg.t_end_ms += base;
             let _ = job_tx.send(Job { source, vad: seg });
+        }
+        if let Some(w) = wav {
+            let _ = w.finalize();
         }
     })
 }

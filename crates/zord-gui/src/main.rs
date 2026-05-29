@@ -8,11 +8,15 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{DbCmd, Engine, Event, RecorderCmd, Status};
 use std::path::PathBuf;
+use zord_config::Settings;
 use zord_core::{Segment, Session, Source};
 use zord_export::Format;
 use zord_transcribe::ModelId;
 
 const CSS: &str = include_str!("style.css");
+
+/// Whisper models offered in the settings dropdown.
+const MODELS: &[&str] = &["large-v3-turbo-q5_0", "large-v3-turbo", "small.en"];
 
 fn main() {
     tracing_subscriber::fmt()
@@ -29,18 +33,6 @@ fn main() {
     LaunchBuilder::desktop()
         .with_cfg(Config::new().with_window(window))
         .launch(App);
-}
-
-/// Default DB path: alongside the model cache, under the app data dir.
-fn db_path() -> PathBuf {
-    match zord_transcribe::model_cache_dir() {
-        Ok(models) => models
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or(models)
-            .join("zord.db"),
-        Err(_) => PathBuf::from("zord.db"),
-    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -60,10 +52,19 @@ fn App() -> Element {
     let mut sessions = use_signal(Vec::<Session>::new);
     let mut search_results = use_signal(Vec::<(String, Segment)>::new);
     let mut view = use_signal(|| View::Live);
+    let mut settings = use_signal(Settings::load);
+    let mut show_settings = use_signal(|| false);
+    let devices = use_hook(zord_capture::input_devices);
 
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
-        let (engine, mut ev_rx) = Engine::spawn(db_path());
+        let initial = settings.peek().clone();
+        // Apply audio retention on startup.
+        if let Ok(dir) = initial.audio_dir() {
+            zord_config::apply_retention(&dir, initial.auto_delete_days);
+        }
+        let db = initial.db_path().unwrap_or_else(|_| PathBuf::from("zord.db"));
+        let (engine, mut ev_rx) = Engine::spawn(db);
         spawn(async move {
             while let Some(ev) = ev_rx.recv().await {
                 match ev {
@@ -112,9 +113,14 @@ fn App() -> Element {
                 segments.write().clear();
                 notice.set(None);
                 view.set(View::Live);
+                let s = settings.peek().clone();
+                let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
+                let audio_dir = s.audio_dir().unwrap_or_else(|_| PathBuf::from("audio"));
                 let _ = engine.rec_tx.send(RecorderCmd::Start {
-                    model: ModelId::LargeV3TurboQ5,
-                    keep_audio: false,
+                    model,
+                    keep_audio: s.keep_audio,
+                    input_device: s.input_device.clone(),
+                    audio_dir,
                 });
             }
         }
@@ -173,11 +179,23 @@ fn App() -> Element {
                         span { class: if recording { "dot rec" } else { "dot" } }
                         span { "{status_text}" }
                     }
-                    button {
-                        class: if recording { "record stop" } else { "record" },
-                        onclick: on_record,
-                        if recording { "■ Stop" } else { "● Record" }
+                    div { class: "topbar-actions",
+                        button {
+                            class: "gear",
+                            title: "Settings",
+                            onclick: move |_| { let v = *show_settings.peek(); show_settings.set(!v); },
+                            "⚙"
+                        }
+                        button {
+                            class: if recording { "record stop" } else { "record" },
+                            onclick: on_record,
+                            if recording { "■ Stop" } else { "● Record" }
+                        }
                     }
+                }
+
+                if *show_settings.read() {
+                    SettingsPanel { settings, devices: devices.clone() }
                 }
 
                 // Level meters
@@ -228,6 +246,78 @@ fn App() -> Element {
                     } else {
                         TranscriptView { segments: segments() }
                     }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SettingsPanel(settings: Signal<Settings>, devices: Vec<String>) -> Element {
+    let s = settings.read().clone();
+
+    let set_model = move |e: FormEvent| {
+        let mut s = settings.peek().clone();
+        s.model = e.value();
+        let _ = s.save();
+        settings.set(s);
+    };
+    let toggle_keep = move |_| {
+        let mut s = settings.peek().clone();
+        s.keep_audio = !s.keep_audio;
+        let _ = s.save();
+        settings.set(s);
+    };
+    let set_days = move |e: FormEvent| {
+        let mut s = settings.peek().clone();
+        s.auto_delete_days = e.value().trim().parse::<u32>().ok().filter(|n| *n > 0);
+        let _ = s.save();
+        settings.set(s);
+    };
+    let set_device = move |e: FormEvent| {
+        let mut s = settings.peek().clone();
+        let v = e.value();
+        s.input_device = if v == "__default__" { None } else { Some(v) };
+        let _ = s.save();
+        settings.set(s);
+    };
+
+    rsx! {
+        div { class: "settings",
+            div { class: "setting",
+                label { "Model" }
+                select { onchange: set_model,
+                    for m in MODELS {
+                        option { value: "{m}", selected: s.model == *m, "{m}" }
+                    }
+                }
+            }
+            div { class: "setting",
+                label { "Microphone" }
+                select { onchange: set_device,
+                    option { value: "__default__", selected: s.input_device.is_none(), "System default" }
+                    for d in devices.iter() {
+                        option { value: "{d}", selected: s.input_device.as_deref() == Some(d.as_str()), "{d}" }
+                    }
+                }
+            }
+            div { class: "setting",
+                label { "Keep audio" }
+                button {
+                    class: if s.keep_audio { "toggle on" } else { "toggle" },
+                    onclick: toggle_keep,
+                    if s.keep_audio { "On" } else { "Off" }
+                }
+            }
+            div { class: "setting",
+                label { "Auto-delete audio after (days)" }
+                input {
+                    r#type: "number",
+                    min: "0",
+                    class: "days",
+                    placeholder: "never",
+                    value: s.auto_delete_days.map(|n| n.to_string()).unwrap_or_default(),
+                    oninput: set_days,
                 }
             }
         }

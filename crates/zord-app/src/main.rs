@@ -77,6 +77,14 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Re-transcribe a session from its kept audio with a (possibly new) model.
+    Retranscribe {
+        session_id: String,
+        #[arg(long, default_value = "large-v3-turbo")]
+        model: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -109,7 +117,44 @@ fn main() -> Result<()> {
             db,
         } => cmd_export(&session_id, &format, out, db),
         Cmd::Serve { port, db } => cmd_serve(port, db),
+        Cmd::Retranscribe {
+            session_id,
+            model,
+            db,
+        } => cmd_retranscribe(&session_id, &model, db),
     }
+}
+
+fn cmd_retranscribe(session_id: &str, model: &str, db: Option<PathBuf>) -> Result<()> {
+    let model_id = ModelId::parse(model)
+        .with_context(|| format!("unknown model '{model}'"))?;
+    let db_path = match db {
+        Some(p) => p,
+        None => default_db_path()?,
+    };
+    let store = Store::open(&db_path)?;
+    let session = store
+        .get_session(session_id)?
+        .with_context(|| format!("no such session '{session_id}'"))?;
+    let prefix = session
+        .audio_path
+        .as_ref()
+        .map(PathBuf::from)
+        .context("this session has no kept audio (record with keep-audio enabled)")?;
+    drop(store);
+
+    eprintln!("Preparing model '{}'...", model_id.name());
+    let model_path = zord_transcribe::ensure_model(model_id, &mut |done, total| {
+        if let Some(total) = total {
+            let pct = done as f64 / total as f64 * 100.0;
+            eprint!("\r  downloading: {:.1}%   ", pct);
+        }
+    })?;
+    eprintln!("\r  model ready.                    ");
+
+    let count = pipeline::run_retranscribe(model_path, model_id, db_path, session_id, &prefix)?;
+    eprintln!("\nRe-transcribed {count} segment(s) with {}.", model_id.name());
+    Ok(())
 }
 
 fn cmd_export(
@@ -192,18 +237,7 @@ fn cmd_file(path: PathBuf, model: &str, db: Option<PathBuf>) -> Result<()> {
 }
 
 fn default_db_path() -> Result<PathBuf> {
-    let dirs = directories_data_dir()?;
-    std::fs::create_dir_all(&dirs)?;
-    Ok(dirs.join("zord.db"))
-}
-
-/// Reuse the same data dir convention as the model cache.
-fn directories_data_dir() -> Result<PathBuf> {
-    let parent = zord_transcribe::model_cache_dir()?; // .../zord/models
-    Ok(parent
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or(parent))
+    zord_config::Settings::load().db_path()
 }
 
 fn now_ms() -> u64 {

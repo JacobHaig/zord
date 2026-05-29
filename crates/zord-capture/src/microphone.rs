@@ -13,12 +13,36 @@ pub struct Microphone {
     sample_rate: u32,
 }
 
+/// Names of available input (microphone) devices.
+pub fn input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(devs) => devs.filter_map(|d| d.name().ok()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 impl Microphone {
+    /// Start the default input device.
     pub fn start(sink: FrameSink) -> Result<Self> {
+        Self::start_with(sink, None)
+    }
+
+    /// Start a specific input device by name, falling back to the default if
+    /// `name` is `None` or no match is found.
+    pub fn start_with(sink: FrameSink, name: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .context("no default input (microphone) device")?;
+        let device = match name {
+            Some(want) => host
+                .input_devices()
+                .ok()
+                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == want).unwrap_or(false)))
+                .or_else(|| host.default_input_device())
+                .context("no input (microphone) device")?,
+            None => host
+                .default_input_device()
+                .context("no default input (microphone) device")?,
+        };
         let supported = device
             .default_input_config()
             .context("querying default input config")?;

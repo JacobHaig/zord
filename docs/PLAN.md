@@ -301,12 +301,25 @@ platform; Windows-specific capture lands in Phase 2b.
   timestamps, clean MD, full JSON); launched `zord serve` and curled every
   endpoint successfully; GUI builds with export bar.
 
-### Phase 5 — Settings, retention & polish
-- [ ] Settings: model choice, audio retention toggle + auto-delete-after-N-days,
-      device selection, storage location.
-- [ ] Optional encryption-at-rest (SQLCipher).
-- [ ] Re-transcribe a kept session with a different model.
-- **Exit criteria:** Configurable, privacy-respecting, robust to bad inputs.
+### Phase 5 — Settings, retention & polish  ✅ DONE (encryption deferred)
+- [x] `zord-config` crate: persisted `Settings` (JSON in app data dir) + path
+      helpers (storage_dir / db / exports / audio); `apply_retention()`.
+- [x] Settings: model choice, audio-retention toggle, auto-delete-after-N-days,
+      input-device selection, storage location override.
+- [x] GUI settings panel (gear button): model + mic dropdowns, keep-audio toggle,
+      auto-delete days; persists on change.
+- [x] Audio retention: per-channel WAVs written when keep-audio is on; old audio
+      auto-deleted on startup per `auto_delete_days`.
+- [x] Re-transcribe a kept session with a different model — `zord retranscribe
+      <id> --model X` (verified: regenerated the jfk transcript, bumped the
+      stored model).
+- [~] **Encryption-at-rest (SQLCipher): DEFERRED** to its own pass. Rationale:
+      requires the `bundled-sqlcipher` feature (touches every DB open across
+      CLI/GUI/web), a passphrase-entry UX + key PRAGMA per connection, migration
+      of the existing plaintext DB, and carries irreversible data-loss risk on a
+      lost passphrase. Not a safe tail-end add.
+- **Exit criteria MET** (minus encryption): configurable, retention works,
+  robust to missing config/audio.
 
 ### Phase 6 — Packaging & distribution
 - [ ] macOS: `.app` bundle, entitlements, codesign + notarize.

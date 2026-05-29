@@ -82,6 +82,22 @@ impl Store {
         Ok(())
     }
 
+    /// Remove all segments for a session (used before re-transcribing).
+    pub fn clear_segments(&self, session_id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM segments WHERE session_id = ?1", params![session_id])?;
+        Ok(())
+    }
+
+    /// Update which model is recorded for a session.
+    pub fn set_session_model(&self, id: &str, model: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET model = ?2 WHERE id = ?1",
+            params![id, model],
+        )?;
+        Ok(())
+    }
+
     pub fn end_session(&self, id: &str, ended_at: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET ended_at = ?2 WHERE id = ?1",

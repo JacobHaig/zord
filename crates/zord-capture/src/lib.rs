@@ -14,7 +14,7 @@ use std::sync::mpsc::Sender;
 mod microphone;
 mod system;
 
-pub use microphone::Microphone;
+pub use microphone::{input_devices, Microphone};
 pub use system::SystemAudio;
 
 /// Channel that receives mono `f32` capture frames.

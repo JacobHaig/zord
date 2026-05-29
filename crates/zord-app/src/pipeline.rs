@@ -161,7 +161,51 @@ pub fn run_file(
     source: Source,
     wav_path: PathBuf,
 ) -> Result<usize> {
-    let mut reader = hound::WavReader::open(&wav_path)?;
+    let transcriber = Transcriber::load(&model_path, model_id.name())?;
+    let store = Store::open(&db_path)?;
+    transcribe_wav(&transcriber, &store, session_id, source, &wav_path)
+}
+
+/// Re-transcribe a session from its kept per-channel WAVs (`<prefix>.me.wav` /
+/// `<prefix>.others.wav`), replacing its existing segments. Used to upgrade an
+/// old recording to a better model without re-recording.
+pub fn run_retranscribe(
+    model_path: PathBuf,
+    model_id: ModelId,
+    db_path: PathBuf,
+    session_id: &str,
+    prefix: &Path,
+) -> Result<usize> {
+    let transcriber = Transcriber::load(&model_path, model_id.name())?;
+    let store = Store::open(&db_path)?;
+    store.clear_segments(session_id)?;
+    store.set_session_model(session_id, model_id.name())?;
+
+    let mut count = 0usize;
+    for (suffix, source) in [("me", Source::Me), ("others", Source::Others)] {
+        let path = prefix.with_file_name(format!(
+            "{}.{suffix}.wav",
+            prefix.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+        ));
+        if path.exists() {
+            count += transcribe_wav(&transcriber, &store, session_id, source, &path)?;
+        }
+    }
+    if count == 0 {
+        anyhow::bail!("no kept audio found for session (expected {prefix:?}.me/others.wav)");
+    }
+    Ok(count)
+}
+
+/// Load a WAV, resample to 16 kHz mono, VAD-segment, transcribe, and insert.
+fn transcribe_wav(
+    transcriber: &Transcriber,
+    store: &Store,
+    session_id: &str,
+    source: Source,
+    wav_path: &Path,
+) -> Result<usize> {
+    let mut reader = hound::WavReader::open(wav_path)?;
     let spec = reader.spec();
     let interleaved: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
@@ -173,24 +217,16 @@ pub fn run_file(
                 .collect::<Result<Vec<_>, _>>()?
         }
     };
-    tracing::info!(
-        rate = spec.sample_rate,
-        channels = spec.channels,
-        samples = interleaved.len(),
-        "loaded WAV"
-    );
+    tracing::info!(rate = spec.sample_rate, channels = spec.channels, ?source, "loaded WAV");
 
     let mut resampler = MonoResampler::new(spec.sample_rate, spec.channels)?;
     let mono = resampler.process(&interleaved)?;
-
     let mut segmenter = Segmenter::new(SegmenterConfig::default());
     let mut segments = segmenter.push(&mono);
     if let Some(seg) = segmenter.flush() {
         segments.push(seg);
     }
 
-    let transcriber = Transcriber::load(&model_path, model_id.name())?;
-    let store = Store::open(&db_path)?;
     let mut count = 0usize;
     for vad in segments {
         for seg in transcriber.transcribe(&vad.samples, source, vad.t_start_ms)? {
