@@ -1,0 +1,12 @@
+[package]
+name = "zord-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zord-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+rubato = "0.16"
+hound = "3.5"

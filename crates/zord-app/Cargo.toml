@@ -1,0 +1,21 @@
+[package]
+name = "zord-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zord"
+path = "src/main.rs"
+
+[dependencies]
+zord-core = { workspace = true }
+zord-audio = { workspace = true }
+zord-transcribe = { workspace = true }
+zord-store = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+cpal = "0.15"
+clap = { version = "4", features = ["derive"] }
+hound = "3.5"

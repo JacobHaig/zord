@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zord-core",
+    "crates/zord-audio",
+    "crates/zord-transcribe",
+    "crates/zord-store",
+    "crates/zord-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Zord"]
+
+[workspace.dependencies]
+# internal
+zord-core = { path = "crates/zord-core" }
+zord-audio = { path = "crates/zord-audio" }
+zord-transcribe = { path = "crates/zord-transcribe" }
+zord-store = { path = "crates/zord-store" }
+
+# shared third-party
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
