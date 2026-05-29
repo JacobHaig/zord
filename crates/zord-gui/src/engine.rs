@@ -62,6 +62,31 @@ pub enum Event {
     Transcript(Vec<Segment>),
     /// A transcript was exported to this path.
     Exported(String),
+    /// The model catalog with current download status.
+    Models(Vec<ModelInfo>),
+    /// Download progress for a model (0..100).
+    ModelProgress { name: String, pct: u8 },
+}
+
+/// A model in the catalog plus whether it's downloaded locally.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelInfo {
+    pub name: String,
+    pub size: String,
+    pub description: String,
+    pub downloaded: bool,
+}
+
+fn catalog() -> Vec<ModelInfo> {
+    ModelId::ALL
+        .iter()
+        .map(|&m| ModelInfo {
+            name: m.name().to_string(),
+            size: m.size_label().to_string(),
+            description: m.description().to_string(),
+            downloaded: zord_transcribe::is_downloaded(m),
+        })
+        .collect()
 }
 
 /// Commands controlling recording.
@@ -90,19 +115,30 @@ pub enum DbCmd {
     },
 }
 
+/// Model-management commands (download/delete can take minutes, so they run on
+/// their own worker thread, separate from recording and DB queries).
+pub enum ModelCmd {
+    List,
+    Download(String),
+    Delete(String),
+}
+
 /// Handle the GUI keeps to drive the engine. Cheaply clonable.
 #[derive(Clone)]
 pub struct Engine {
     pub rec_tx: mpsc::Sender<RecorderCmd>,
     pub db_tx: mpsc::Sender<DbCmd>,
+    pub model_tx: mpsc::Sender<ModelCmd>,
 }
 
 impl Engine {
-    /// Spawn the control + db threads. Returns the handle and the event stream.
+    /// Spawn the control + db + model worker threads. Returns the handle and
+    /// the event stream.
     pub fn spawn(db_path: PathBuf) -> (Engine, UnboundedReceiver<Event>) {
         let (ev_tx, ev_rx) = unbounded_channel::<Event>();
         let (rec_tx, rec_rx) = mpsc::channel::<RecorderCmd>();
         let (db_tx, db_rx) = mpsc::channel::<DbCmd>();
+        let (model_tx, model_rx) = mpsc::channel::<ModelCmd>();
 
         {
             let ev = ev_tx.clone();
@@ -110,10 +146,57 @@ impl Engine {
             thread::spawn(move || control_loop(rec_rx, ev, dbp));
         }
         {
-            let ev = ev_tx;
+            let ev = ev_tx.clone();
             thread::spawn(move || db_loop(db_rx, ev, db_path));
         }
-        (Engine { rec_tx, db_tx }, ev_rx)
+        {
+            let ev = ev_tx;
+            thread::spawn(move || model_loop(model_rx, ev));
+        }
+        (
+            Engine {
+                rec_tx,
+                db_tx,
+                model_tx,
+            },
+            ev_rx,
+        )
+    }
+}
+
+/// Worker for model list / download / delete.
+fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            ModelCmd::List => {
+                let _ = ev.send(Event::Models(catalog()));
+            }
+            ModelCmd::Download(name) => {
+                if let Some(model) = ModelId::parse(&name) {
+                    let ev2 = ev.clone();
+                    let name2 = name.clone();
+                    let res = ensure_model(model, &mut |done, total| {
+                        if let Some(total) = total.filter(|t| *t > 0) {
+                            let pct = (done * 100 / total) as u8;
+                            let _ = ev2.send(Event::ModelProgress {
+                                name: name2.clone(),
+                                pct,
+                            });
+                        }
+                    });
+                    if let Err(e) = res {
+                        let _ = ev.send(Event::Notice(format!("download failed: {e}")));
+                    }
+                }
+                let _ = ev.send(Event::Models(catalog()));
+            }
+            ModelCmd::Delete(name) => {
+                if let Some(model) = ModelId::parse(&name) {
+                    let _ = zord_transcribe::delete_model(model);
+                }
+                let _ = ev.send(Event::Models(catalog()));
+            }
+        }
     }
 }
 

@@ -3,46 +3,91 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
-/// A selectable model. Defaults to the turbo q5_0 quant: ~95% of large-v3
-/// accuracy, a fraction of the size and several times faster.
+/// A selectable Whisper model. Defaults to the turbo q5_0 quant: ~95% of
+/// large-v3 accuracy, a fraction of the size and several times faster.
+///
+/// (Future: a `Parakeet*` family lands here behind a transcription-backend
+/// trait — Phase 10.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelId {
-    /// large-v3-turbo, q5_0 quantized (~574 MB). Default.
-    LargeV3TurboQ5,
-    /// large-v3-turbo, full precision (~1.5 GB). Highest accuracy.
-    LargeV3Turbo,
-    /// Small English-only model (~466 MB). Good CPU fallback.
+    TinyEn,
+    BaseEn,
     SmallEn,
+    MediumEn,
+    LargeV3,
+    LargeV3Turbo,
+    /// large-v3-turbo, q5_0 quantized. Default — best size/speed/accuracy.
+    LargeV3TurboQ5,
 }
 
 impl ModelId {
+    /// Every model in the catalog, ordered light → heavy.
+    pub const ALL: &'static [ModelId] = &[
+        ModelId::TinyEn,
+        ModelId::BaseEn,
+        ModelId::SmallEn,
+        ModelId::MediumEn,
+        ModelId::LargeV3TurboQ5,
+        ModelId::LargeV3Turbo,
+        ModelId::LargeV3,
+    ];
+
     pub fn filename(self) -> &'static str {
         match self {
-            ModelId::LargeV3TurboQ5 => "ggml-large-v3-turbo-q5_0.bin",
-            ModelId::LargeV3Turbo => "ggml-large-v3-turbo.bin",
+            ModelId::TinyEn => "ggml-tiny.en.bin",
+            ModelId::BaseEn => "ggml-base.en.bin",
             ModelId::SmallEn => "ggml-small.en.bin",
+            ModelId::MediumEn => "ggml-medium.en.bin",
+            ModelId::LargeV3 => "ggml-large-v3.bin",
+            ModelId::LargeV3Turbo => "ggml-large-v3-turbo.bin",
+            ModelId::LargeV3TurboQ5 => "ggml-large-v3-turbo-q5_0.bin",
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            ModelId::LargeV3TurboQ5 => "large-v3-turbo-q5_0",
-            ModelId::LargeV3Turbo => "large-v3-turbo",
+            ModelId::TinyEn => "tiny.en",
+            ModelId::BaseEn => "base.en",
             ModelId::SmallEn => "small.en",
+            ModelId::MediumEn => "medium.en",
+            ModelId::LargeV3 => "large-v3",
+            ModelId::LargeV3Turbo => "large-v3-turbo",
+            ModelId::LargeV3TurboQ5 => "large-v3-turbo-q5_0",
+        }
+    }
+
+    /// Approximate on-disk size, for the download UI.
+    pub fn size_label(self) -> &'static str {
+        match self {
+            ModelId::TinyEn => "75 MB",
+            ModelId::BaseEn => "142 MB",
+            ModelId::SmallEn => "466 MB",
+            ModelId::MediumEn => "1.5 GB",
+            ModelId::LargeV3 => "3.1 GB",
+            ModelId::LargeV3Turbo => "1.6 GB",
+            ModelId::LargeV3TurboQ5 => "574 MB",
+        }
+    }
+
+    /// One-line description for the settings UI.
+    pub fn description(self) -> &'static str {
+        match self {
+            ModelId::TinyEn => "Fastest, lowest accuracy (English). Great on weak CPUs.",
+            ModelId::BaseEn => "Fast, modest accuracy (English).",
+            ModelId::SmallEn => "Balanced (English). Solid CPU fallback.",
+            ModelId::MediumEn => "High accuracy (English), heavier.",
+            ModelId::LargeV3 => "Highest accuracy, multilingual. Largest/slowest.",
+            ModelId::LargeV3Turbo => "Near large-v3 accuracy, much faster. Multilingual.",
+            ModelId::LargeV3TurboQ5 => "Quantized turbo — best all-round. Default.",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "large-v3-turbo-q5_0" => Some(ModelId::LargeV3TurboQ5),
-            "large-v3-turbo" => Some(ModelId::LargeV3Turbo),
-            "small.en" => Some(ModelId::SmallEn),
-            _ => None,
-        }
+        Self::ALL.iter().copied().find(|m| m.name() == s)
     }
 }
 
@@ -106,5 +151,22 @@ pub fn model_path_if_present(model: ModelId) -> Result<Option<PathBuf>> {
     Ok(if path.exists() { Some(path) } else { None })
 }
 
-#[allow(dead_code)]
-fn _assert_path_send(_p: &Path) {}
+/// Whether a model is already downloaded locally.
+pub fn is_downloaded(model: ModelId) -> bool {
+    model_path_if_present(model)
+        .ok()
+        .flatten()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Delete a downloaded model file (no-op if absent).
+pub fn delete_model(model: ModelId) -> Result<()> {
+    let path = model_cache_dir()?.join(model.filename());
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("deleting {path:?}"))?;
+        tracing::info!(?path, "deleted model");
+    }
+    Ok(())
+}

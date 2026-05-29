@@ -3,7 +3,9 @@
 
 mod model;
 
-pub use model::{ensure_model, model_cache_dir, model_path_if_present, ModelId};
+pub use model::{
+    delete_model, ensure_model, is_downloaded, model_cache_dir, model_path_if_present, ModelId,
+};
 
 use anyhow::Result;
 use zord_core::{Segment, Source};

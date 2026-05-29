@@ -7,7 +7,7 @@ mod osutil;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
-use engine::{DbCmd, Engine, Event, RecorderCmd, Status};
+use engine::{DbCmd, Engine, Event, ModelCmd, ModelInfo, RecorderCmd, Status};
 use std::path::PathBuf;
 use zord_config::Settings;
 use zord_core::{Segment, Session, Source};
@@ -15,9 +15,6 @@ use zord_export::Format;
 use zord_transcribe::ModelId;
 
 const CSS: &str = include_str!("style.css");
-
-/// Whisper models offered in the settings dropdown.
-const MODELS: &[&str] = &["large-v3-turbo-q5_0", "large-v3-turbo", "small.en"];
 
 fn main() {
     tracing_subscriber::fmt()
@@ -55,9 +52,12 @@ fn App() -> Element {
     let mut view = use_signal(|| View::Live);
     // Path of the most recently exported file (drives the Reveal/Open buttons).
     let mut last_export = use_signal(|| Option::<String>::None);
-    let settings = use_signal(Settings::load);
+    let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
+    let mut models = use_signal(Vec::<ModelInfo>::new);
+    // (model name currently downloading, percent).
+    let mut model_progress = use_signal(|| Option::<(String, u8)>::None);
 
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
@@ -89,10 +89,18 @@ fn App() -> Element {
                         notice.set(Some(format!("Exported to {p}")));
                         last_export.set(Some(p));
                     }
+                    Event::Models(v) => {
+                        models.set(v);
+                        model_progress.set(None);
+                    }
+                    Event::ModelProgress { name, pct } => {
+                        model_progress.set(Some((name, pct)));
+                    }
                 }
             }
         });
         let _ = engine.db_tx.send(DbCmd::ListSessions);
+        let _ = engine.model_tx.send(ModelCmd::List);
         engine
     });
 
@@ -201,10 +209,6 @@ fn App() -> Element {
                     }
                 }
 
-                if *show_settings.read() {
-                    SettingsPanel { settings, devices: devices.clone() }
-                }
-
                 // Level meters. Pass the signals (not their values) so frequent
                 // level ticks re-render only the meters, never the whole App.
                 div { class: "meters",
@@ -274,75 +278,136 @@ fn App() -> Element {
                 }
             }
         }
-    }
-}
 
-#[component]
-fn SettingsPanel(settings: Signal<Settings>, devices: Vec<String>) -> Element {
-    let s = settings.read().clone();
+        // ---- Full-screen settings overlay ----
+        if *show_settings.read() {
+            {
+                let current = settings.read().model.clone();
+                let progress = model_progress.read().clone();
+                rsx! {
+                    div { class: "overlay",
+                        div { class: "overlay-card",
+                            div { class: "overlay-head",
+                                h2 { "Settings" }
+                                button { class: "close-btn", onclick: move |_| show_settings.set(false), "✕" }
+                            }
+                            div { class: "overlay-body",
+                                section { class: "settings-section",
+                                    h3 { "Transcription model" }
+                                    p { class: "field-note", "Pick a downloaded model, or download another. Bigger = more accurate but slower; the quantized turbo is the best all-round." }
+                                    for m in models.read().iter() {
+                                        {
+                                            let name = m.name.clone();
+                                            let selected = name == current;
+                                            let dl = match &progress {
+                                                Some((n, p)) if *n == name => Some(*p),
+                                                _ => None,
+                                            };
+                                            let eng_dl = engine.clone();
+                                            let eng_del = engine.clone();
+                                            let (n_sel, n_dl, n_del) = (name.clone(), name.clone(), name.clone());
+                                            rsx! {
+                                                div { key: "{name}", class: if selected { "model-row sel" } else { "model-row" },
+                                                    div { class: "model-main",
+                                                        div { class: "model-name", "{m.name}" }
+                                                        div { class: "model-desc", "{m.description} · {m.size}" }
+                                                    }
+                                                    div { class: "model-actions",
+                                                        if m.downloaded {
+                                                            button {
+                                                                class: "mbtn",
+                                                                disabled: selected,
+                                                                onclick: move |_| {
+                                                                    let mut s = settings.peek().clone();
+                                                                    s.model = n_sel.clone();
+                                                                    let _ = s.save();
+                                                                    settings.set(s);
+                                                                },
+                                                                if selected { "Selected" } else { "Select" }
+                                                            }
+                                                            button {
+                                                                class: "mbtn ghost",
+                                                                disabled: selected,
+                                                                onclick: move |_| { let _ = eng_del.model_tx.send(ModelCmd::Delete(n_del.clone())); },
+                                                                "Delete"
+                                                            }
+                                                        } else if let Some(p) = dl {
+                                                            div { class: "dl-prog",
+                                                                div { class: "dl-bar", style: "width: {p}%" }
+                                                                span { class: "dl-txt", "Downloading… {p}%" }
+                                                            }
+                                                        } else {
+                                                            button {
+                                                                class: "mbtn",
+                                                                onclick: move |_| { let _ = eng_dl.model_tx.send(ModelCmd::Download(n_dl.clone())); },
+                                                                "Download"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
 
-    let set_model = move |e: FormEvent| {
-        let mut s = settings.peek().clone();
-        s.model = e.value();
-        let _ = s.save();
-        settings.set(s);
-    };
-    let toggle_keep = move |_| {
-        let mut s = settings.peek().clone();
-        s.keep_audio = !s.keep_audio;
-        let _ = s.save();
-        settings.set(s);
-    };
-    let set_days = move |e: FormEvent| {
-        let mut s = settings.peek().clone();
-        s.auto_delete_days = e.value().trim().parse::<u32>().ok().filter(|n| *n > 0);
-        let _ = s.save();
-        settings.set(s);
-    };
-    let set_device = move |e: FormEvent| {
-        let mut s = settings.peek().clone();
-        let v = e.value();
-        s.input_device = if v == "__default__" { None } else { Some(v) };
-        let _ = s.save();
-        settings.set(s);
-    };
+                                section { class: "settings-section",
+                                    h3 { "Audio input" }
+                                    div { class: "field",
+                                        label { "Microphone" }
+                                        select {
+                                            onchange: move |e: FormEvent| {
+                                                let mut s = settings.peek().clone();
+                                                let v = e.value();
+                                                s.input_device = if v == "__default__" { None } else { Some(v) };
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            option { value: "__default__", selected: settings.read().input_device.is_none(), "System default" }
+                                            for d in devices.iter() {
+                                                option { value: "{d}", selected: settings.read().input_device.as_deref() == Some(d.as_str()), "{d}" }
+                                            }
+                                        }
+                                    }
+                                    p { class: "field-note", "Desktop / system audio (the “Others” channel) is captured automatically." }
+                                }
 
-    rsx! {
-        div { class: "settings",
-            div { class: "setting",
-                label { "Model" }
-                select { onchange: set_model,
-                    for m in MODELS {
-                        option { value: "{m}", selected: s.model == *m, "{m}" }
+                                section { class: "settings-section",
+                                    h3 { "Recording & retention" }
+                                    div { class: "field row",
+                                        label { "Keep audio after transcription" }
+                                        button {
+                                            class: if settings.read().keep_audio { "toggle on" } else { "toggle" },
+                                            onclick: move |_| {
+                                                let mut s = settings.peek().clone();
+                                                s.keep_audio = !s.keep_audio;
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            if settings.read().keep_audio { "On" } else { "Off" }
+                                        }
+                                    }
+                                    div { class: "field",
+                                        label { "Auto-delete kept audio after (days)" }
+                                        input {
+                                            r#type: "number", min: "0", class: "days", placeholder: "never",
+                                            value: settings.read().auto_delete_days.map(|n| n.to_string()).unwrap_or_default(),
+                                            oninput: move |e: FormEvent| {
+                                                let mut s = settings.peek().clone();
+                                                s.auto_delete_days = e.value().trim().parse::<u32>().ok().filter(|n| *n > 0);
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                        }
+                                    }
+                                }
+
+                                section { class: "settings-section",
+                                    h3 { "About" }
+                                    p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
+                                }
+                            }
+                        }
                     }
-                }
-            }
-            div { class: "setting",
-                label { "Microphone" }
-                select { onchange: set_device,
-                    option { value: "__default__", selected: s.input_device.is_none(), "System default" }
-                    for d in devices.iter() {
-                        option { value: "{d}", selected: s.input_device.as_deref() == Some(d.as_str()), "{d}" }
-                    }
-                }
-            }
-            div { class: "setting",
-                label { "Keep audio" }
-                button {
-                    class: if s.keep_audio { "toggle on" } else { "toggle" },
-                    onclick: toggle_keep,
-                    if s.keep_audio { "On" } else { "Off" }
-                }
-            }
-            div { class: "setting",
-                label { "Auto-delete audio after (days)" }
-                input {
-                    r#type: "number",
-                    min: "0",
-                    class: "days",
-                    placeholder: "never",
-                    value: s.auto_delete_days.map(|n| n.to_string()).unwrap_or_default(),
-                    oninput: set_days,
                 }
             }
         }

@@ -346,12 +346,31 @@ platform; Windows-specific capture lands in Phase 2b.
 - **Exit criteria (build) MET:** a runnable, correctly-identified `.app`/`.dmg`
   is produced locally and in CI. Signing is a documented user step.
 
-### Phase 7 — Future (explicitly out of v1 scope)
+### Phase 9 — Settings overhaul + full model management  ✅ DONE (built + launches)
+- [x] Replaced the small top dropdown with a **full-screen settings overlay**
+  (gear opens, ✕ closes): Models, Audio input, Recording & retention, About.
+- [x] Expanded Whisper catalog to 7 models (tiny.en → large-v3) with size +
+  description; `is_downloaded` / `delete_model` helpers.
+- [x] **Model management** in the overlay: every model is listed; not-downloaded
+  ones show **Download** (with a live progress bar), downloaded ones show
+  **Select** / **Delete** (can't delete the active one). Driven by a dedicated
+  engine **model worker thread** (List/Download/Delete + `ModelProgress` events).
+- [x] Mic device dropdown, keep-audio toggle, auto-delete-days — all in the
+  overlay, persisted to config.
+- **Next (Phase 10):** Parakeet via `sherpa-rs` behind a transcription-backend
+  trait (lets the catalog include non-Whisper engines).
+
+### Phase 10 — Parakeet / multi-backend transcription (planned)
+- Transcription-backend trait abstracting Whisper (whisper-rs) and Parakeet
+  (sherpa-onnx via `sherpa-rs`, ONNX). Extend the model catalog + download to
+  Parakeet TDT models; multilingual.
+
+### Phase 7/Future — backlog (explicitly out of v1 scope)
 - Auto-detect active meeting apps (Teams/Zoom) → prompt/auto-start.
 - Local AI summaries / action items via a local LLM (llama.cpp).
 - Custom vocabulary (whisper `initial_prompt` / hotword biasing).
 - Per-speaker diarization within the "Others" channel.
-- Multilingual support.
+- SQLCipher at-rest encryption; app icon.
 
 ---
 
