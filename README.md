@@ -29,7 +29,7 @@ storage happen on your machine.
 | **Rust** (stable, ≥1.80) | builds everything | <https://rustup.rs> |
 | **CMake** | compiles the bundled whisper.cpp | macOS: `brew install cmake` · Windows: ships with Visual Studio / `winget install Kitware.CMake` |
 | **C/C++ toolchain** | whisper.cpp | macOS: Xcode Command Line Tools (`xcode-select --install`) · Windows: Visual Studio Build Tools (MSVC) |
-| **dioxus-cli** *(only for packaging)* | `dx bundle` builds the `.app`/`.msi` | `cargo install dioxus-cli --version 0.7.9 --locked` |
+| **dioxus-cli** *(optional)* | `dx serve/run` dev loop + `dx bundle` packaging | `cargo install dioxus-cli --version 0.7.9 --locked` |
 
 > First build compiles whisper.cpp **and** the Dioxus stack — expect a few
 > minutes. Subsequent builds are fast.
@@ -58,6 +58,25 @@ cargo run -p zord-gui
 # or, after a release build:
 ./target/release/zord-gui
 ```
+
+### Or run it with `dx` (the Dioxus CLI)
+
+If you've installed `dioxus-cli` (§1), you can build/run through `dx` instead of
+cargo. `dx` selects the workspace member with `-p/--package`, so run these from
+the **repo root**:
+
+```bash
+dx serve --package zord-gui --platform desktop   # build + run with hot-reload (dev)
+dx run   --package zord-gui --platform desktop    # build + run, no hot-reload
+dx build --release --package zord-gui --platform desktop   # compile only (no bundle)
+```
+
+- **`dx serve`** is the nicest dev loop: edit the RSX/Rust and the running app
+  hot-patches without a full restart.
+- **`dx build`** just compiles (artifacts under `target/dx/…`); use
+  **`dx bundle`** (§6) when you want a shippable `.app`/`.dmg`/`.msi`.
+- Plain `cargo run -p zord-gui` works too and needs no `dx` — use whichever you
+  prefer.
 
 In the window:
 
