@@ -58,6 +58,9 @@ pub enum RecorderCmd {
         audio_dir: PathBuf,
     },
     Stop,
+    /// Stop the engine entirely (process exit normally handles this; kept for
+    /// completeness / future graceful shutdown).
+    #[allow(dead_code)]
     Shutdown,
 }
 

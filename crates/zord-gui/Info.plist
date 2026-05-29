@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Complete Info.plist for the bundle. dx/tauri's `info_plist_path` REPLACES the
+  generated plist (it does not merge), so every required key must live here.
+
+  CFBundleIdentifier must match the directories-crate id (io.zord.zord) so the
+  app's data dir is the same in dev and bundled builds, and so macOS TCC keys
+  the mic / Screen Recording grants to the right identity.
+
+  NSMicrophoneUsageDescription is mandatory. Screen Recording (ScreenCaptureKit,
+  the "Others" channel) is TCC-managed with no Info.plist key — granted by the
+  user in System Settings > Privacy & Security.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Zord</string>
+    <key>CFBundleDisplayName</key>
+    <string>Zord</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.zord.zord</string>
+    <key>CFBundleExecutable</key>
+    <string>zord-gui</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Zord records your microphone to transcribe your side of the conversation, locally on this device.</string>
+</dict>
+</plist>

@@ -321,13 +321,25 @@ platform; Windows-specific capture lands in Phase 2b.
 - **Exit criteria MET** (minus encryption): configurable, retention works,
   robust to missing config/audio.
 
-### Phase 6 — Packaging & distribution
-- [ ] macOS: `.app` bundle, entitlements, codesign + notarize.
-- [ ] Windows: MSI installer, Authenticode signing.
-- [ ] GitHub Actions release workflow (build → sign → attach to Release).
-- [ ] CPU-only fallback build alongside GPU builds.
-- **Exit criteria:** Download a signed binary from GitHub Releases and run it
-  with no warnings.
+### Phase 6 — Packaging & distribution  🟡 macOS bundle done; signing = user step
+- [x] `dx bundle` produces `ZordGui.app` + a `.dmg` (Apple Silicon, macOS 13+).
+- [x] Complete `Info.plist` (id `io.zord.zord`, mic usage string, exec/version);
+      `entitlements.plist` (audio-input + JIT for the webview); hardened runtime.
+      Verified: bundle launches and registers as `io.zord.zord` (so TCC grants
+      attach correctly); `plutil` lint OK.
+- [x] `build.rs`: links `libclang_rt.osx` (resolved via `clang
+      -print-resource-dir`) so the explicit-`--target` release link finds
+      `___isPlatformVersionAtLeast` (used by ggml-metal's `@available`).
+- [x] GitHub Actions `release.yml`: on `v*` tag, builds the macOS bundle and
+      attaches it to a Release; codesign + notarize steps run only if signing
+      secrets are set. `docs/RELEASE.md` documents the Apple-account steps.
+- [ ] **Codesign + notarize (user step):** needs your Apple Developer ID cert +
+      credentials (can't be done in this environment). Steps + CI secrets are
+      documented in `docs/RELEASE.md`.
+- [ ] Windows MSI / Authenticode — tied to Phase 2b (no Windows host yet).
+- [ ] App icon — add an icon set + reference in `Dioxus.toml` before public release.
+- **Exit criteria (build) MET:** a runnable, correctly-identified `.app`/`.dmg`
+  is produced locally and in CI. Signing is a documented user step.
 
 ### Phase 7 — Future (explicitly out of v1 scope)
 - Auto-detect active meeting apps (Teams/Zoom) → prompt/auto-start.

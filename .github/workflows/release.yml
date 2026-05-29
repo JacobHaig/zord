@@ -1,0 +1,98 @@
+name: Release
+
+# Build (and optionally sign/notarize) the macOS app on a version tag, then
+# attach the artifacts to a GitHub Release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-14 # Apple Silicon runner
+    env:
+      # macOS 13 deployment target for the ScreenCaptureKit Swift bridge.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      # True only when signing secrets are configured; gates the sign/notarize steps.
+      HAS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_SIGNING_IDENTITY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build tools
+        run: brew install cmake
+
+      - name: Install dioxus-cli
+        run: cargo install dioxus-cli --version 0.7.9 --locked
+
+      - name: Bundle app
+        working-directory: crates/zord-gui
+        run: dx bundle --release --platform desktop
+
+      # ---- Optional: code-sign + notarize (only if secrets are set) ----
+      - name: Import signing certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN=build.keychain
+          security create-keychain -p actions "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > cert.p12
+          security import cert.p12 -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions "$KEYCHAIN"
+          rm cert.p12
+
+      - name: Sign, notarize & staple
+        if: env.HAS_SIGNING == 'true'
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          APP=$(find target -name "Zord.app" -maxdepth 6 -type d | head -1)
+          echo "Signing $APP"
+          codesign --deep --force --options runtime \
+            --entitlements crates/zord-gui/entitlements.plist \
+            --sign "$SIGNING_IDENTITY" "$APP"
+          # Notarize via a zip, then staple the ticket onto the .app.
+          ditto -c -k --keepParent "$APP" Zord.zip
+          xcrun notarytool submit Zord.zip \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$APP"
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          # .app (zipped) and any .dmg dx produced.
+          APP=$(find target -name "Zord.app" -maxdepth 6 -type d | head -1)
+          if [ -n "$APP" ]; then ditto -c -k --keepParent "$APP" "dist/Zord-macos-arm64.zip"; fi
+          find target -name "*.dmg" -maxdepth 6 -exec cp {} dist/ \;
+          ls -la dist
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+      - name: Upload artifact (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zord-macos-arm64
+          path: dist/*

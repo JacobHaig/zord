@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for codesign + notarization.
+
+  - audio-input: microphone capture (cpal).
+  - allow-jit / allow-unsigned-executable-memory: required by the WKWebView
+    (wry) JavaScript engine that Dioxus Desktop renders into.
+  ScreenCaptureKit needs no entitlement for a non-sandboxed app — it is gated
+  by the user's Screen Recording TCC grant at runtime.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

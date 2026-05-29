@@ -1,0 +1,18 @@
+[application]
+name = "Zord"
+
+[bundle]
+identifier = "io.zord.zord"
+publisher = "Zord"
+copyright = "Copyright © 2026 Zord"
+category = "public.app-category.productivity"
+# icon = ["icons/icon.png"]   # add an icon set before public release
+
+[bundle.macos]
+# Matches .cargo/config.toml's deployment target and our Apple-Silicon minimum.
+minimum_system_version = "13.0"
+# Required for notarization; pairs with entitlements below.
+hardened_runtime = true
+# Merge custom keys (mic usage string) into the generated Info.plist.
+info_plist_path = "Info.plist"
+entitlements = "entitlements.plist"

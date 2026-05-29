@@ -52,7 +52,7 @@ fn App() -> Element {
     let mut sessions = use_signal(Vec::<Session>::new);
     let mut search_results = use_signal(Vec::<(String, Segment)>::new);
     let mut view = use_signal(|| View::Live);
-    let mut settings = use_signal(Settings::load);
+    let settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
 
