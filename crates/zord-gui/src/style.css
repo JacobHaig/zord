@@ -110,6 +110,9 @@ body {
   padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 12px;
 }
 .export-btn:hover { background: var(--panel-2); border-color: var(--me); }
+.export-btn.ghost { color: var(--muted); }
+.export-btn.ghost:hover { color: var(--text); }
+.export-sep { color: var(--line); padding: 0 2px; }
 
 /* Transcript */
 .transcript { flex: 1; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }

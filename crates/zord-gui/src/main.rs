@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod engine;
+mod osutil;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
@@ -52,6 +53,8 @@ fn App() -> Element {
     let mut sessions = use_signal(Vec::<Session>::new);
     let mut search_results = use_signal(Vec::<(String, Segment)>::new);
     let mut view = use_signal(|| View::Live);
+    // Path of the most recently exported file (drives the Reveal/Open buttons).
+    let mut last_export = use_signal(|| Option::<String>::None);
     let settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
@@ -82,7 +85,10 @@ fn App() -> Element {
                     Event::Sessions(v) => sessions.set(v),
                     Event::SearchResults(v) => search_results.set(v),
                     Event::Transcript(v) => segments.set(v),
-                    Event::Exported(p) => notice.set(Some(format!("Exported to {p}"))),
+                    Event::Exported(p) => {
+                        notice.set(Some(format!("Exported to {p}")));
+                        last_export.set(Some(p));
+                    }
                 }
             }
         });
@@ -161,6 +167,7 @@ fn App() -> Element {
                                     class: if active { "session active" } else { "session" },
                                     onclick: move |_| {
                                         view.set(View::Session(id.clone()));
+                                        last_export.set(None);
                                         let _ = engine.db_tx.send(DbCmd::Load(id.clone()));
                                     },
                                     div { class: "session-title", "{session_title(&s)}" }
@@ -235,6 +242,22 @@ fn App() -> Element {
                                 button { class: "export-btn", onclick: mk(Format::Markdown), "Markdown" }
                                 button { class: "export-btn", onclick: mk(Format::Srt), "SRT" }
                                 button { class: "export-btn", onclick: mk(Format::Json), "JSON" }
+                                if let Some(path) = last_export.read().clone() {
+                                    span { class: "export-sep", "·" }
+                                    button {
+                                        class: "export-btn ghost",
+                                        onclick: {
+                                            let p = path.clone();
+                                            move |_| osutil::reveal_in_file_manager(&p)
+                                        },
+                                        "📂 Reveal"
+                                    }
+                                    button {
+                                        class: "export-btn ghost",
+                                        onclick: move |_| osutil::open_in_editor(&path),
+                                        "📝 Open"
+                                    }
+                                }
                             }
                         }
                     }
