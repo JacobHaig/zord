@@ -78,6 +78,15 @@ body {
 }
 .search:focus { border-color: var(--me); }
 
+/* Export bar */
+.export-bar { display: flex; align-items: center; gap: 8px; }
+.export-label { color: var(--muted); font-size: 12px; }
+.export-btn {
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 12px;
+}
+.export-btn:hover { background: var(--panel-2); border-color: var(--me); }
+
 /* Transcript */
 .transcript { flex: 1; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
 .empty { color: var(--muted); padding: 24px; text-align: center; }

@@ -111,6 +111,28 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Fetch a single session by id.
+    pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_at, ended_at, title, audio_path, model
+             FROM sessions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], |r| {
+            Ok(Session {
+                id: r.get(0)?,
+                started_at: r.get(1)?,
+                ended_at: r.get(2)?,
+                title: r.get(3)?,
+                audio_path: r.get(4)?,
+                model: r.get(5)?,
+            })
+        })?;
+        Ok(match rows.next() {
+            Some(s) => Some(s?),
+            None => None,
+        })
+    }
+
     /// All sessions, newest first.
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(

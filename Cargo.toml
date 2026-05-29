@@ -6,6 +6,8 @@ members = [
     "crates/zord-capture",
     "crates/zord-transcribe",
     "crates/zord-store",
+    "crates/zord-export",
+    "crates/zord-web",
     "crates/zord-app",
     "crates/zord-gui",
 ]
@@ -23,6 +25,8 @@ zord-audio = { path = "crates/zord-audio" }
 zord-capture = { path = "crates/zord-capture" }
 zord-transcribe = { path = "crates/zord-transcribe" }
 zord-store = { path = "crates/zord-store" }
+zord-export = { path = "crates/zord-export" }
+zord-web = { path = "crates/zord-web" }
 
 # shared third-party
 anyhow = "1"

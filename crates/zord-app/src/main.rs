@@ -58,6 +58,25 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Export a session transcript to a file or stdout.
+    Export {
+        session_id: String,
+        /// Output format: md | srt | json.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Write to this path. Omit to print to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Serve the read-only review dashboard on 127.0.0.1.
+    Serve {
+        #[arg(long, default_value_t = 7777)]
+        port: u16,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -83,7 +102,51 @@ fn main() -> Result<()> {
         Cmd::File { path, model, db } => cmd_file(path, &model, db),
         Cmd::Show { session_id, db } => cmd_show(&session_id, db),
         Cmd::Search { query, db } => cmd_search(&query, db),
+        Cmd::Export {
+            session_id,
+            format,
+            out,
+            db,
+        } => cmd_export(&session_id, &format, out, db),
+        Cmd::Serve { port, db } => cmd_serve(port, db),
     }
+}
+
+fn cmd_export(
+    session_id: &str,
+    format: &str,
+    out: Option<PathBuf>,
+    db: Option<PathBuf>,
+) -> Result<()> {
+    let fmt = zord_export::Format::parse(format)
+        .with_context(|| format!("unknown format '{format}' (use md|srt|json)"))?;
+    let db_path = match db {
+        Some(p) => p,
+        None => default_db_path()?,
+    };
+    let store = Store::open(&db_path)?;
+    let session = store
+        .get_session(session_id)?
+        .with_context(|| format!("no such session '{session_id}'"))?;
+    let segments = store.segments(session_id)?;
+    let rendered = zord_export::render(&session, &segments, fmt);
+
+    match out {
+        Some(path) => {
+            std::fs::write(&path, rendered)?;
+            eprintln!("Wrote {} ({} segments) to {}", fmt.extension(), segments.len(), path.display());
+        }
+        None => print!("{rendered}"),
+    }
+    Ok(())
+}
+
+fn cmd_serve(port: u16, db: Option<PathBuf>) -> Result<()> {
+    let db_path = match db {
+        Some(p) => p,
+        None => default_db_path()?,
+    };
+    zord_web::serve_blocking(db_path, port)
 }
 
 fn cmd_file(path: PathBuf, model: &str, db: Option<PathBuf>) -> Result<()> {

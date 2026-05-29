@@ -289,11 +289,17 @@ platform; Windows-specific capture lands in Phase 2b.
   full click-through with real audio is the same interactive step as Phase 2.
 - CLI (`zord`) retained alongside the GUI.
 
-### Phase 4 — Export + local web dashboard
-- [ ] Export Markdown / SRT / JSON per session.
-- [ ] `zord-web`: `127.0.0.1` axum dashboard to browse/search/read transcripts
-      in a browser (read-only review surface).
-- **Exit criteria:** Export a transcript three ways; review it at `localhost`.
+### Phase 4 — Export + local web dashboard  ✅ DONE (verified)
+- [x] `zord-export` crate: Markdown / SRT / JSON renderers (pure functions).
+- [x] CLI `zord export <id> --format md|srt|json [--out]`.
+- [x] `zord-web` crate: axum dashboard bound to `127.0.0.1`; routes `/`,
+      `/api/sessions`, `/api/session/:id`, `/api/search?q=`; DB reads via
+      `spawn_blocking`. CLI `zord serve [--port]`.
+- [x] GUI export buttons (MD/SRT/JSON) when viewing a session → writes to the
+      app data `exports/` dir, shows a notice.
+- **Exit criteria MET:** exported jfk session to all three formats (valid SRT
+  timestamps, clean MD, full JSON); launched `zord serve` and curled every
+  endpoint successfully; GUI builds with export bar.
 
 ### Phase 5 — Settings, retention & polish
 - [ ] Settings: model choice, audio retention toggle + auto-delete-after-N-days,

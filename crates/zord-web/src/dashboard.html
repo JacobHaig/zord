@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Zord Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#262b36;
+    --text:#e6e9ef; --muted:#8a93a6; --me:#4cc2ff; --others:#ffb454; --accent:#ff4d6d;
+  }
+  body { background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; }
+  .app { display:flex; height:100vh; }
+  .sidebar { width:260px; background:var(--panel); border-right:1px solid var(--line); padding:16px 12px; overflow-y:auto; }
+  .brand { font-weight:800; letter-spacing:3px; color:var(--accent); font-size:18px; padding:4px 6px 12px; }
+  .label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:1px; padding:0 6px 6px; }
+  .session { padding:8px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; }
+  .session:hover { background:var(--panel2); }
+  .session.active { background:var(--panel2); border-color:var(--line); }
+  .session .meta { font-size:11px; color:var(--muted); }
+  .main { flex:1; display:flex; flex-direction:column; padding:20px 24px; gap:14px; overflow:hidden; }
+  .search { width:100%; padding:10px 14px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--text); font-size:14px; outline:none; }
+  .search:focus { border-color:var(--me); }
+  .transcript { flex:1; overflow-y:auto; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:8px; }
+  .line { display:grid; grid-template-columns:56px 64px 1fr auto; gap:10px; align-items:baseline; padding:7px 10px; border-radius:8px; }
+  .line:hover { background:var(--panel2); }
+  .ts { color:var(--muted); font-variant-numeric:tabular-nums; font-size:12px; }
+  .who { font-size:12px; font-weight:700; }
+  .line.me .who { color:var(--me); } .line.others .who { color:var(--others); }
+  .src { color:var(--muted); font-size:11px; }
+  .empty { color:var(--muted); padding:24px; text-align:center; }
+  h2 { font-size:15px; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">ZORD</div>
+    <div class="label">Sessions</div>
+    <div id="sessions"></div>
+  </aside>
+  <main class="main">
+    <input id="search" class="search" type="text" placeholder="Search all transcripts…" />
+    <h2 id="heading">Pick a session</h2>
+    <div id="transcript" class="transcript"><div class="empty">Select a session on the left, or search above.</div></div>
+  </main>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const clock = (ms) => { const s = Math.floor(ms/1000); return String(Math.floor(s/60)).padStart(2,'0')+":"+String(s%60).padStart(2,'0'); };
+const cls = (src) => src === 'me' ? 'me' : 'others';
+const who = (src) => src === 'me' ? 'Me' : 'Others';
+let active = null;
+
+function renderLines(segs, withSrc) {
+  if (!segs.length) return '<div class="empty">No lines.</div>';
+  return segs.map(s => {
+    const seg = withSrc ? s.segment : s;
+    const tail = withSrc ? `<span class="src">${s.session_id.slice(0,12)}</span>` : '';
+    return `<div class="line ${cls(seg.source)}"><span class="ts">${clock(seg.t_start_ms)}</span>`
+      + `<span class="who">${who(seg.source)}</span><span class="text">${escapeHtml(seg.text)}</span>${tail}</div>`;
+  }).join('');
+}
+function escapeHtml(t){ return t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadSessions() {
+  const r = await fetch('/api/sessions'); const list = await r.json();
+  $('sessions').innerHTML = list.length ? list.map(s =>
+    `<div class="session" data-id="${s.id}"><div>${s.title || ('Recording '+Math.floor(s.started_at/1000))}</div><div class="meta">${s.model}</div></div>`
+  ).join('') : '<div class="empty">No recordings yet.</div>';
+  document.querySelectorAll('.session').forEach(el =>
+    el.onclick = () => openSession(el.dataset.id));
+}
+async function openSession(id) {
+  active = id;
+  document.querySelectorAll('.session').forEach(el => el.classList.toggle('active', el.dataset.id === id));
+  const r = await fetch('/api/session/'+encodeURIComponent(id)); const segs = await r.json();
+  $('heading').textContent = 'Transcript — ' + id;
+  $('transcript').innerHTML = renderLines(segs, false);
+}
+let timer = null;
+$('search').addEventListener('input', (e) => {
+  clearTimeout(timer);
+  const q = e.target.value.trim();
+  timer = setTimeout(async () => {
+    if (!q) { $('heading').textContent = active ? ('Transcript — '+active) : 'Pick a session'; if (active) openSession(active); return; }
+    const r = await fetch('/api/search?q='+encodeURIComponent(q)); const hits = await r.json();
+    $('heading').textContent = `Search: "${q}" — ${hits.length} result(s)`;
+    $('transcript').innerHTML = renderLines(hits, true);
+  }, 200);
+});
+loadSessions();
+</script>
+</body>
+</html>

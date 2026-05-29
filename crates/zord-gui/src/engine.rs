@@ -45,6 +45,8 @@ pub enum Event {
     SearchResults(Vec<(String, Segment)>),
     /// Result of [`DbCmd::Load`] — a session's full transcript.
     Transcript(Vec<Segment>),
+    /// A transcript was exported to this path.
+    Exported(String),
 }
 
 /// Commands controlling recording.
@@ -54,11 +56,15 @@ pub enum RecorderCmd {
     Shutdown,
 }
 
-/// Read-only database queries.
+/// Read-only database queries (plus export, which reads then writes a file).
 pub enum DbCmd {
     ListSessions,
     Search(String),
     Load(String),
+    Export {
+        id: String,
+        format: zord_export::Format,
+    },
 }
 
 /// Handle the GUI keeps to drive the engine. Cheaply clonable.
@@ -124,8 +130,39 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     let _ = ev.send(Event::Transcript(v));
                 }
             }
+            DbCmd::Export { id, format } => match export_session(&store, &id, format) {
+                Ok(path) => {
+                    let _ = ev.send(Event::Exported(path));
+                }
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!("export failed: {e}")));
+                }
+            },
         }
     }
+}
+
+/// Render a session and write it to the app data `exports/` directory.
+fn export_session(
+    store: &Store,
+    id: &str,
+    format: zord_export::Format,
+) -> anyhow::Result<String> {
+    let session = store
+        .get_session(id)?
+        .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+    let segments = store.segments(id)?;
+    let rendered = zord_export::render(&session, &segments, format);
+
+    let dir = zord_transcribe::model_cache_dir()?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("exports");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.{}", format.extension()));
+    std::fs::write(&path, rendered)?;
+    Ok(path.display().to_string())
 }
 
 /// Turn free-text into a safe FTS5 MATCH expression: each whitespace token

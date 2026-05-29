@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use engine::{DbCmd, Engine, Event, RecorderCmd, Status};
 use std::path::PathBuf;
 use zord_core::{Segment, Session, Source};
+use zord_export::Format;
 use zord_transcribe::ModelId;
 
 const CSS: &str = include_str!("style.css");
@@ -80,6 +81,7 @@ fn App() -> Element {
                     Event::Sessions(v) => sessions.set(v),
                     Event::SearchResults(v) => search_results.set(v),
                     Event::Transcript(v) => segments.set(v),
+                    Event::Exported(p) => notice.set(Some(format!("Exported to {p}"))),
                 }
             }
         });
@@ -194,6 +196,29 @@ fn App() -> Element {
                     r#type: "text",
                     placeholder: "Search all transcripts…",
                     oninput: on_search,
+                }
+
+                // Export bar (only when viewing a saved session)
+                if let View::Session(id) = &*view.read() {
+                    {
+                        let id = id.clone();
+                        let engine = engine.clone();
+                        let mk = move |fmt: Format| {
+                            let id = id.clone();
+                            let engine = engine.clone();
+                            move |_| {
+                                let _ = engine.db_tx.send(DbCmd::Export { id: id.clone(), format: fmt });
+                            }
+                        };
+                        rsx! {
+                            div { class: "export-bar",
+                                span { class: "export-label", "Export:" }
+                                button { class: "export-btn", onclick: mk(Format::Markdown), "Markdown" }
+                                button { class: "export-btn", onclick: mk(Format::Srt), "SRT" }
+                                button { class: "export-btn", onclick: mk(Format::Json), "JSON" }
+                            }
+                        }
+                    }
                 }
 
                 // Transcript / results
