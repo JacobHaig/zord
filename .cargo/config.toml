@@ -1,0 +1,11 @@
+# ScreenCaptureKit's Swift bridge requires a macOS 13 deployment target.
+# Targeting 13.0 (our minimum — runs on all Apple Silicon).
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.0"
+
+# The transitive Swift bridges (apple-metal / apple-cf) FORCE_LOAD the Swift
+# back-compat static libs, but the linker only searches the full-Xcode path.
+# Add the Command Line Tools Swift lib dir so they resolve on a CLT-only setup.
+# NOTE: Phase 6 (packaging) will detect this path instead of hardcoding it.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift/macosx"]

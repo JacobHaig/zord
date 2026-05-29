@@ -1,0 +1,14 @@
+[package]
+name = "zord-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zord-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+cpal = "0.15"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "6.1"

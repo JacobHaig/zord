@@ -259,13 +259,20 @@ platform; Windows-specific capture lands in Phase 2b.
   search returns correct segments. Live mic path (`zord record`) uses the
   identical pipeline; needs an interactive run (macOS mic-permission prompt).
 
-### Phase 2 — Dual-channel capture + sync
-- **2a (macOS):** capture mic + system simultaneously, wall-clock timestamps,
-  two transcription streams labeled Me/Others.
-- **2b (Windows):** same via `wasapi` loopback + `cpal` mic.
-- [ ] Clock-drift handling; interleave segments into one timeline.
-- **Exit criteria:** Play a YouTube video while talking → transcript correctly
-  attributes lines to "Me" vs "Others" on both OSes.
+### Phase 2 — Dual-channel capture + sync  🟡 macOS impl done; live-verify pending
+- **2a (macOS):** ✅ `zord-capture` crate — `Microphone` (cpal) + `SystemAudio`
+  (ScreenCaptureKit 6.1). Both emit mono f32; system audio via `SCStream` with
+  `captures_audio`. Graceful degradation if Screen Recording permission absent.
+- [x] Dual-channel pipeline: per-channel resample+VAD, fan-in to one transcribe
+  stage, per-channel first-frame base offset → single interleaved timeline.
+- [x] Builds + runs; mic-only fallback path verified (clean degradation message).
+- [ ] **Live verification (user step):** grant Screen Recording permission, play
+  audio while speaking, confirm Me/Others attribution. (Requires TCC grant +
+  real audio — can't be automated.)
+- **2b (Windows):** `wasapi` loopback + `cpal` mic — not started (no Windows
+  host here; trait is structured so it slots in).
+- **Build note:** macOS 13 deployment target + a Swift-lib search path are set in
+  `.cargo/config.toml` for the ScreenCaptureKit Swift bridge (CLT-only setups).
 
 ### Phase 3 — Dioxus desktop UI
 - [ ] Record/stop control, live level meters, recording/transcribing status.

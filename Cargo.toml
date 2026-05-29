@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/zord-core",
     "crates/zord-audio",
+    "crates/zord-capture",
     "crates/zord-transcribe",
     "crates/zord-store",
     "crates/zord-app",
@@ -18,6 +19,7 @@ authors = ["Zord"]
 # internal
 zord-core = { path = "crates/zord-core" }
 zord-audio = { path = "crates/zord-audio" }
+zord-capture = { path = "crates/zord-capture" }
 zord-transcribe = { path = "crates/zord-transcribe" }
 zord-store = { path = "crates/zord-store" }
 

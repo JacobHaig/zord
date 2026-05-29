@@ -4,7 +4,6 @@
 //! Dioxus desktop UI, and the localhost review dashboard. For now this proves
 //! the full local transcription pipeline end-to-end.
 
-mod capture;
 mod pipeline;
 
 use anyhow::{Context, Result};
@@ -187,7 +186,7 @@ fn cmd_record(
         model: model_id.name().to_string(),
     })?;
 
-    eprintln!("Session {session_id} — recording from default microphone.");
+    eprintln!("Session {session_id} — recording microphone (Me) + system audio (Others).");
     if seconds == 0 {
         eprintln!("Press Enter to stop.");
     } else {
@@ -199,7 +198,6 @@ fn cmd_record(
         model_id,
         db_path.clone(),
         &session_id,
-        zord_core::Source::Me,
         seconds,
         keep_audio,
     )?;

@@ -1,75 +1,85 @@
-//! Orchestrates the recording pipeline across three stages, each decoupled by
-//! a channel so the slow stage (transcription) never stalls audio capture:
+//! Recording pipeline. Two capture sources (mic = "Me", system = "Others") each
+//! feed an independent resample+VAD stage; both fan into one transcription stage
+//! that tags segments by source and writes them to a single timeline in SQLite.
 //!
-//!   cpal callback ──Vec<f32>──▶ [proc thread] ──VadSegment──▶ [transcribe thread]
-//!   (audio thread)              resample+VAD                  whisper + SQLite
+//!   Microphone ─mono f32─▶ [proc: resample+VAD] ─┐
+//!                                                 ├─Job─▶ [transcribe + store]
+//!   SystemAudio ─mono f32─▶ [proc: resample+VAD] ─┘
 //!
-//! The cpal `Stream` is not `Send` on macOS, so it stays on the calling thread;
-//! we stop recording by dropping it, which cascades channel closes downstream.
+//! Capture handles (cpal `Stream`, `SCStream`) are not `Send`, so they live on
+//! this thread; dropping them stops capture and cascades channel closes.
 
-use crate::capture;
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zord_audio::{MonoResampler, Segmenter, SegmenterConfig, WavWriter};
+use zord_capture::{AudioSource, Microphone, SystemAudio};
 use zord_core::Source;
 use zord_store::Store;
 use zord_transcribe::{ModelId, Transcriber};
+
+/// One VAD segment plus the channel it came from (timing already session-relative).
+struct Job {
+    source: Source,
+    vad: zord_audio::VadSegment,
+}
 
 pub fn run_record(
     model_path: PathBuf,
     model_id: ModelId,
     db_path: PathBuf,
     session_id: &str,
-    source: Source,
     seconds: u64,
     keep_audio: Option<PathBuf>,
 ) -> Result<usize> {
-    let (raw_tx, raw_rx) = mpsc::channel::<Vec<f32>>();
-    let (seg_tx, seg_rx) = mpsc::channel::<zord_audio::VadSegment>();
+    let session_start = Instant::now();
+    let (job_tx, job_rx) = mpsc::channel::<Job>();
+    let mut procs = Vec::new();
 
-    // Stage 1: microphone (stays on this thread; dropping it stops capture).
-    let mic = capture::start_mic(raw_tx)?;
-    let cfg = mic.config;
+    // --- Microphone ("Me"): required. ---
+    let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
+    let mic = Microphone::start(mic_tx)?;
+    procs.push(spawn_proc(
+        mic_rx,
+        mic.sample_rate(),
+        Source::Me,
+        session_start,
+        job_tx.clone(),
+        keep_audio.as_deref().map(|p| derive_path(p, "me")),
+    ));
 
-    // Stage 2: resample to 16 kHz mono + VAD segmentation (+ optional WAV).
-    let proc = thread::spawn(move || -> Result<()> {
-        let mut resampler = MonoResampler::new(cfg.sample_rate, cfg.channels)?;
-        let mut segmenter = Segmenter::new(SegmenterConfig::default());
-        let mut wav = match keep_audio {
-            Some(p) => Some(WavWriter::create(p)?),
-            None => None,
-        };
-        while let Ok(buf) = raw_rx.recv() {
-            let mono = resampler.process(&buf)?;
-            if let Some(w) = wav.as_mut() {
-                w.write(&mono)?;
-            }
-            for seg in segmenter.push(&mono) {
-                let _ = seg_tx.send(seg);
-            }
+    // --- System audio ("Others"): optional; degrade to mic-only on failure. ---
+    let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
+    let system = match SystemAudio::start(sys_tx) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("⚠ system audio unavailable ({e}). Recording microphone only.");
+            None
         }
-        if let Some(seg) = segmenter.flush() {
-            let _ = seg_tx.send(seg);
-        }
-        if let Some(w) = wav {
-            w.finalize()?;
-        }
-        Ok(())
-    });
+    };
+    if let Some(sys) = &system {
+        procs.push(spawn_proc(
+            sys_rx,
+            sys.sample_rate(),
+            Source::Others,
+            session_start,
+            job_tx.clone(),
+            keep_audio.as_deref().map(|p| derive_path(p, "others")),
+        ));
+    }
 
-    // Stage 3: transcription + storage (owns its own DB connection — WAL lets
-    // it coexist with the main thread's connection).
+    drop(job_tx); // remaining senders are the proc clones; job_rx closes when they finish
+
+    // --- Transcription + storage (shared sink for both channels). ---
     let session = session_id.to_string();
     let transcribe = thread::spawn(move || -> Result<usize> {
         let transcriber = Transcriber::load(&model_path, model_id.name())?;
         let store = Store::open(&db_path)?;
         let mut count = 0usize;
-        while let Ok(vad) = seg_rx.recv() {
-            let segments = transcriber.transcribe(&vad.samples, source, vad.t_start_ms)?;
-            for seg in segments {
+        while let Ok(job) = job_rx.recv() {
+            for seg in transcriber.transcribe(&job.vad.samples, job.source, job.vad.t_start_ms)? {
                 store.insert_segment(&session, &seg)?;
                 println!("[{} {}] {}", fmt_ts(seg.t_start_ms), seg.source.label(), seg.text);
                 count += 1;
@@ -78,23 +88,71 @@ pub fn run_record(
         Ok(count)
     });
 
-    // Wait for the stop condition, then drop the stream to end capture.
+    // Wait for the stop signal, then stop capture.
     if seconds == 0 {
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
     } else {
         thread::sleep(Duration::from_secs(seconds));
     }
-    drop(mic); // closes raw_tx -> proc finishes -> closes seg_tx -> transcribe finishes
+    drop(mic);
+    drop(system);
 
-    proc.join().expect("proc thread panicked")?;
+    for p in procs {
+        p.join().expect("proc thread panicked")?;
+    }
     let count = transcribe.join().expect("transcribe thread panicked")?;
     Ok(count)
 }
 
-/// Run a WAV file through the exact same resample -> VAD -> whisper -> store
-/// pipeline as live capture (minus the microphone). Deterministic; used to
-/// verify the pipeline end-to-end.
+/// Spawn a per-channel resample + VAD stage. Stamps the first-frame arrival
+/// (relative to `session_start`) as the channel's base offset so the two
+/// channels share one timeline despite starting at slightly different instants.
+fn spawn_proc(
+    rx: mpsc::Receiver<Vec<f32>>,
+    sample_rate: u32,
+    source: Source,
+    session_start: Instant,
+    job_tx: mpsc::Sender<Job>,
+    wav_path: Option<PathBuf>,
+) -> thread::JoinHandle<Result<()>> {
+    thread::spawn(move || -> Result<()> {
+        // Sources already emit mono, so channels = 1 (downmix is a no-op).
+        let mut resampler = MonoResampler::new(sample_rate, 1)?;
+        let mut segmenter = Segmenter::new(SegmenterConfig::default());
+        let mut wav = match wav_path {
+            Some(p) => Some(WavWriter::create(p)?),
+            None => None,
+        };
+        let mut base_ms: Option<u64> = None;
+
+        while let Ok(frame) = rx.recv() {
+            let base = *base_ms.get_or_insert_with(|| session_start.elapsed().as_millis() as u64);
+            let mono = resampler.process(&frame)?;
+            if let Some(w) = wav.as_mut() {
+                w.write(&mono)?;
+            }
+            for mut seg in segmenter.push(&mono) {
+                seg.t_start_ms += base;
+                seg.t_end_ms += base;
+                let _ = job_tx.send(Job { source, vad: seg });
+            }
+        }
+        if let Some(mut seg) = segmenter.flush() {
+            let base = base_ms.unwrap_or(0);
+            seg.t_start_ms += base;
+            seg.t_end_ms += base;
+            let _ = job_tx.send(Job { source, vad: seg });
+        }
+        if let Some(w) = wav {
+            w.finalize()?;
+        }
+        Ok(())
+    })
+}
+
+/// Run a WAV file through the same resample -> VAD -> whisper -> store pipeline
+/// (no capture). Deterministic; used to verify the pipeline.
 pub fn run_file(
     model_path: PathBuf,
     model_id: ModelId,
@@ -106,9 +164,7 @@ pub fn run_file(
     let mut reader = hound::WavReader::open(&wav_path)?;
     let spec = reader.spec();
     let interleaved: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => {
-            reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?
-        }
+        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
         hound::SampleFormat::Int => {
             let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
             reader
@@ -144,6 +200,12 @@ pub fn run_file(
         }
     }
     Ok(count)
+}
+
+/// `foo.wav` + "me" -> `foo.me.wav`
+fn derive_path(p: &Path, tag: &str) -> PathBuf {
+    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    p.with_file_name(format!("{stem}.{tag}.wav"))
 }
 
 fn fmt_ts(ms: u64) -> String {
