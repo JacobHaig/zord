@@ -78,7 +78,7 @@ pub struct ModelInfo {
 }
 
 fn catalog() -> Vec<ModelInfo> {
-    ModelId::ALL
+    ModelId::listed()
         .iter()
         .map(|&m| ModelInfo {
             name: m.name().to_string(),
@@ -424,7 +424,7 @@ fn run_session(
         let model_path = model_path.clone();
         let db_path = db_path.clone();
         thread::spawn(move || {
-            let transcriber = match Transcriber::load(&model_path, model.name()) {
+            let transcriber = match Transcriber::load(model, &model_path) {
                 Ok(t) => t,
                 Err(e) => {
                     let _ = ev.send(Event::Status(Status::Error(format!("whisper: {e}"))));

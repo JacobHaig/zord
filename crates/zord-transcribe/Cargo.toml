@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Adds the NVIDIA Parakeet backend (sherpa-onnx, ONNX). Heavier build; the
+# build script downloads prebuilt sherpa-onnx libs.
+parakeet = []
+
 [dependencies]
 zord-core = { workspace = true }
 anyhow = { workspace = true }

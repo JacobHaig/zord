@@ -75,7 +75,7 @@ pub fn run_record(
     // --- Transcription + storage (shared sink for both channels). ---
     let session = session_id.to_string();
     let transcribe = thread::spawn(move || -> Result<usize> {
-        let transcriber = Transcriber::load(&model_path, model_id.name())?;
+        let transcriber = Transcriber::load(model_id, &model_path)?;
         let store = Store::open(&db_path)?;
         let mut count = 0usize;
         while let Ok(job) = job_rx.recv() {
@@ -161,7 +161,7 @@ pub fn run_file(
     source: Source,
     wav_path: PathBuf,
 ) -> Result<usize> {
-    let transcriber = Transcriber::load(&model_path, model_id.name())?;
+    let transcriber = Transcriber::load(model_id, &model_path)?;
     let store = Store::open(&db_path)?;
     transcribe_wav(&transcriber, &store, session_id, source, &wav_path)
 }
@@ -176,7 +176,7 @@ pub fn run_retranscribe(
     session_id: &str,
     prefix: &Path,
 ) -> Result<usize> {
-    let transcriber = Transcriber::load(&model_path, model_id.name())?;
+    let transcriber = Transcriber::load(model_id, &model_path)?;
     let store = Store::open(&db_path)?;
     store.clear_segments(session_id)?;
     store.set_session_model(session_id, model_id.name())?;

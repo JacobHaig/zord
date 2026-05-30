@@ -7,11 +7,18 @@ use std::path::PathBuf;
 
 const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
-/// A selectable Whisper model. Defaults to the turbo q5_0 quant: ~95% of
-/// large-v3 accuracy, a fraction of the size and several times faster.
-///
-/// (Future: a `Parakeet*` family lands here behind a transcription-backend
-/// trait — Phase 10.)
+/// Which transcription engine a model runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    /// whisper.cpp (single ggml `.bin`).
+    Whisper,
+    /// NVIDIA Parakeet via sherpa-onnx (a directory of ONNX files + tokens).
+    Parakeet,
+}
+
+/// A selectable model. Whisper variants default to the turbo q5_0 quant; the
+/// Parakeet variant runs on the sherpa-onnx backend (only when built with the
+/// `parakeet` feature).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelId {
     TinyEn,
@@ -22,20 +29,45 @@ pub enum ModelId {
     LargeV3Turbo,
     /// large-v3-turbo, q5_0 quantized. Default — best size/speed/accuracy.
     LargeV3TurboQ5,
+    /// NVIDIA Parakeet TDT 0.6B v3, int8 (25 languages). sherpa-onnx backend.
+    ParakeetTdtV3,
 }
 
-impl ModelId {
-    /// Every model in the catalog, ordered light → heavy.
-    pub const ALL: &'static [ModelId] = &[
-        ModelId::TinyEn,
-        ModelId::BaseEn,
-        ModelId::SmallEn,
-        ModelId::MediumEn,
-        ModelId::LargeV3TurboQ5,
-        ModelId::LargeV3Turbo,
-        ModelId::LargeV3,
-    ];
+/// Every known model (used for `parse`/match completeness).
+const EVERY: &[ModelId] = &[
+    ModelId::TinyEn,
+    ModelId::BaseEn,
+    ModelId::SmallEn,
+    ModelId::MediumEn,
+    ModelId::LargeV3TurboQ5,
+    ModelId::LargeV3Turbo,
+    ModelId::LargeV3,
+    ModelId::ParakeetTdtV3,
+];
 
+impl ModelId {
+    /// Models shown in the settings UI. Parakeet only appears in `parakeet`
+    /// builds (otherwise it can't be downloaded or run).
+    pub fn listed() -> &'static [ModelId] {
+        #[cfg(feature = "parakeet")]
+        {
+            EVERY
+        }
+        #[cfg(not(feature = "parakeet"))]
+        {
+            &EVERY[..EVERY.len() - 1] // drop the trailing Parakeet entry
+        }
+    }
+
+    pub fn engine(self) -> Engine {
+        match self {
+            ModelId::ParakeetTdtV3 => Engine::Parakeet,
+            _ => Engine::Whisper,
+        }
+    }
+
+    /// Whisper: the ggml file name. Parakeet: the model directory name (also the
+    /// release archive stem).
     pub fn filename(self) -> &'static str {
         match self {
             ModelId::TinyEn => "ggml-tiny.en.bin",
@@ -45,6 +77,7 @@ impl ModelId {
             ModelId::LargeV3 => "ggml-large-v3.bin",
             ModelId::LargeV3Turbo => "ggml-large-v3-turbo.bin",
             ModelId::LargeV3TurboQ5 => "ggml-large-v3-turbo-q5_0.bin",
+            ModelId::ParakeetTdtV3 => "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
         }
     }
 
@@ -57,6 +90,7 @@ impl ModelId {
             ModelId::LargeV3 => "large-v3",
             ModelId::LargeV3Turbo => "large-v3-turbo",
             ModelId::LargeV3TurboQ5 => "large-v3-turbo-q5_0",
+            ModelId::ParakeetTdtV3 => "parakeet-tdt-0.6b-v3",
         }
     }
 
@@ -70,6 +104,7 @@ impl ModelId {
             ModelId::LargeV3 => "3.1 GB",
             ModelId::LargeV3Turbo => "1.6 GB",
             ModelId::LargeV3TurboQ5 => "574 MB",
+            ModelId::ParakeetTdtV3 => "650 MB",
         }
     }
 
@@ -83,11 +118,12 @@ impl ModelId {
             ModelId::LargeV3 => "Highest accuracy, multilingual. Largest/slowest.",
             ModelId::LargeV3Turbo => "Near large-v3 accuracy, much faster. Multilingual.",
             ModelId::LargeV3TurboQ5 => "Quantized turbo — best all-round. Default.",
+            ModelId::ParakeetTdtV3 => "NVIDIA Parakeet TDT (ONNX), 25 languages, fast on CPU.",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|m| m.name() == s)
+        EVERY.iter().copied().find(|m| m.name() == s)
     }
 }
 
