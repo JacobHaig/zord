@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# At-rest encryption via SQLCipher (bundles SQLCipher + vendored OpenSSL).
+# Build needs a C compiler + perl. Default build stays on plain bundled SQLite.
+encryption = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+
 [dependencies]
 zord-core = { workspace = true }
 anyhow = { workspace = true }

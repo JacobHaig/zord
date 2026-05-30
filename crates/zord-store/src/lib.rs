@@ -6,14 +6,50 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use zord_core::{Segment, Session, Source, Word};
 
+/// Process-wide database passphrase. Set once at startup (after unlocking);
+/// every `Store::open` applies it as the SQLCipher key. `None` = no encryption.
+static DB_KEY: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Set or clear the process-wide DB passphrase. Call **before** opening any
+/// `Store`. (In non-`encryption` builds the value is stored but never applied.)
+pub fn set_db_key(key: Option<String>) {
+    if let Ok(mut g) = DB_KEY.write() {
+        *g = key;
+    }
+}
+
+#[cfg(feature = "encryption")]
+fn current_key() -> Option<String> {
+    DB_KEY.read().ok().and_then(|g| g.clone())
+}
+
+/// Apply the SQLCipher key (if any) as the first op after opening. Forces a
+/// schema read so a wrong/missing key fails here with a clear error.
+#[cfg(feature = "encryption")]
+fn apply_key(conn: &Connection) -> Result<()> {
+    if let Some(key) = current_key() {
+        conn.pragma_update(None, "key", &key)?;
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .map_err(|_| anyhow::anyhow!("could not open encrypted database (wrong passphrase?)"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "encryption"))]
+fn apply_key(_conn: &Connection) -> Result<()> {
+    Ok(())
+}
+
 pub struct Store {
     conn: Connection,
 }
 
 impl Store {
-    /// Open (creating if needed) a database at `path`.
+    /// Open (creating if needed) a database at `path`. Applies the process-wide
+    /// passphrase (see [`set_db_key`]) before anything else.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
+        apply_key(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Self { conn };
@@ -215,4 +251,133 @@ fn row_to_segment_offset(r: &rusqlite::Row, off: usize) -> rusqlite::Result<Segm
         text: r.get(off + 3)?,
         words,
     })
+}
+
+// ---------------------------------------------------------------------------
+// At-rest encryption (SQLCipher) — only meaningful with the `encryption` feature
+// ---------------------------------------------------------------------------
+
+/// Best-effort check of whether the DB file at `path` is encrypted (i.e. can't
+/// be read as plain SQLite). Returns false in non-`encryption` builds.
+#[cfg(feature = "encryption")]
+pub fn is_encrypted(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    if !path.exists() {
+        return false;
+    }
+    match Connection::open(path) {
+        // No key applied: a readable schema means it's plaintext.
+        Ok(c) => c
+            .query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+            .is_err(),
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(feature = "encryption"))]
+pub fn is_encrypted(_path: impl AsRef<Path>) -> bool {
+    false
+}
+
+/// Encrypt an existing plaintext database in place with `key` (keeps a
+/// `<db>.plaintext.bak` backup). Uses SQLCipher's `sqlcipher_export`.
+#[cfg(feature = "encryption")]
+pub fn encrypt_existing(path: impl AsRef<Path>, key: &str) -> Result<()> {
+    use std::path::PathBuf;
+    let path = path.as_ref();
+    let p = path.display().to_string();
+    let backup = PathBuf::from(format!("{p}.plaintext.bak"));
+    let enc = PathBuf::from(format!("{p}.enc"));
+    std::fs::copy(path, &backup)?;
+    let _ = std::fs::remove_file(&enc);
+
+    let conn = Connection::open(path)?; // plaintext source
+    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE").ok();
+    conn.execute(
+        "ATTACH DATABASE ?1 AS encrypted KEY ?2",
+        params![enc.to_string_lossy(), key],
+    )?;
+    conn.query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()))?;
+    conn.execute("DETACH DATABASE encrypted", [])?;
+    drop(conn);
+
+    // Replace plaintext with the encrypted copy; clear stale WAL sidecars.
+    std::fs::rename(&enc, path)?;
+    let _ = std::fs::remove_file(format!("{p}-wal"));
+    let _ = std::fs::remove_file(format!("{p}-shm"));
+    tracing::info!("database encrypted (backup at {backup:?})");
+    Ok(())
+}
+
+/// Decrypt an encrypted database in place back to plaintext (`key` is its
+/// current passphrase). Keeps a `<db>.encrypted.bak` backup.
+#[cfg(feature = "encryption")]
+pub fn decrypt_existing(path: impl AsRef<Path>, key: &str) -> Result<()> {
+    use std::path::PathBuf;
+    let path = path.as_ref();
+    let p = path.display().to_string();
+    let backup = PathBuf::from(format!("{p}.encrypted.bak"));
+    let plain = PathBuf::from(format!("{p}.plain"));
+    std::fs::copy(path, &backup)?;
+    let _ = std::fs::remove_file(&plain);
+
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "key", key)?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        .map_err(|_| anyhow::anyhow!("wrong passphrase"))?;
+    conn.execute(
+        "ATTACH DATABASE ?1 AS plaintext KEY ''",
+        params![plain.to_string_lossy()],
+    )?;
+    conn.query_row("SELECT sqlcipher_export('plaintext')", [], |_| Ok(()))?;
+    conn.execute("DETACH DATABASE plaintext", [])?;
+    drop(conn);
+
+    std::fs::rename(&plain, path)?;
+    let _ = std::fs::remove_file(format!("{p}-wal"));
+    let _ = std::fs::remove_file(format!("{p}-shm"));
+    tracing::info!("database decrypted (backup at {backup:?})");
+    Ok(())
+}
+
+#[cfg(all(test, feature = "encryption"))]
+mod enc_tests {
+    use super::*;
+
+    #[test]
+    fn keyed_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("zord-enc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+
+        set_db_key(Some("hunter2".to_string()));
+        {
+            let s = Store::open(&db).unwrap();
+            s.create_session(&Session {
+                id: "s1".into(),
+                started_at: 1,
+                ended_at: None,
+                title: None,
+                audio_path: None,
+                model: "m".into(),
+            })
+            .unwrap();
+        }
+        // Correct key reopens fine.
+        {
+            let s = Store::open(&db).unwrap();
+            assert_eq!(s.list_sessions().unwrap().len(), 1);
+        }
+        // The file is genuinely encrypted.
+        assert!(is_encrypted(&db));
+        // Wrong key fails.
+        set_db_key(Some("wrong".to_string()));
+        assert!(Store::open(&db).is_err());
+        // No key fails.
+        set_db_key(None);
+        assert!(Store::open(&db).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
