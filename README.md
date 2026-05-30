@@ -49,6 +49,21 @@ That builds both binaries:
 - `zord` — the command-line tool (crate `zord-app`)
 - `zord-gui` — the desktop app (crate `zord-gui`)
 
+### Optional: NVIDIA Parakeet models
+
+By default Zord transcribes with Whisper. To also enable **NVIDIA Parakeet**
+(via sherpa-onnx — fast, 25-language, runs well on CPU), build with the
+`parakeet` feature:
+
+```bash
+cargo run -p zord-gui --features parakeet   # or: cargo build --release -p zord-gui --features parakeet
+```
+
+This pulls in an ONNX runtime (the build script downloads prebuilt sherpa-onnx
+libs). With it enabled, the settings panel lists Parakeet alongside the Whisper
+models to download and select. Without the feature, the default build stays
+lean and Whisper-only.
+
 ---
 
 ## 3. Run the desktop app

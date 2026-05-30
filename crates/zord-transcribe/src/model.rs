@@ -137,31 +137,40 @@ pub fn model_cache_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Ensure the model file exists locally, downloading it if absent. Returns the
-/// path. `progress` is called with (downloaded_bytes, total_bytes_opt).
+/// Ensure a model exists locally, downloading it if absent. Returns the path:
+/// a `.bin` file for Whisper, or the extracted model directory for Parakeet.
+/// `progress` is called with (downloaded_bytes, total_bytes_opt).
 pub fn ensure_model(
     model: ModelId,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<PathBuf> {
-    let dir = model_cache_dir()?;
-    let path = dir.join(model.filename());
+    match model.engine() {
+        Engine::Whisper => ensure_whisper(model, progress),
+        Engine::Parakeet => ensure_parakeet(model, progress),
+    }
+}
+
+fn ensure_whisper(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+    let path = model_cache_dir()?.join(model.filename());
     if path.exists() && std::fs::metadata(&path)?.len() > 0 {
         return Ok(path);
     }
-
     let url = format!("{HF_BASE}/{}", model.filename());
     tracing::info!(%url, "downloading whisper model (first run)");
+    download_to_file(&url, &path, progress)?;
+    Ok(path)
+}
 
-    let resp = ureq::get(&url)
-        .call()
-        .with_context(|| format!("requesting {url}"))?;
-    let total: Option<u64> = resp
-        .header("Content-Length")
-        .and_then(|h| h.parse::<u64>().ok());
-
-    // Download to a temp file, then atomically rename, so an interrupted
-    // download never leaves a corrupt model in place.
-    let tmp = path.with_extension("partial");
+/// Stream `url` to `dest` via a `.partial` temp + atomic rename, reporting
+/// (downloaded, total) progress.
+fn download_to_file(
+    url: &str,
+    dest: &std::path::Path,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<()> {
+    let resp = ureq::get(url).call().with_context(|| format!("requesting {url}"))?;
+    let total = resp.header("Content-Length").and_then(|h| h.parse::<u64>().ok());
+    let tmp = dest.with_extension("partial");
     let mut file = std::fs::File::create(&tmp)?;
     let mut reader = resp.into_reader();
     let mut buf = vec![0u8; 1 << 20];
@@ -177,9 +186,41 @@ pub fn ensure_model(
     }
     file.flush()?;
     drop(file);
-    std::fs::rename(&tmp, &path)?;
-    tracing::info!(bytes = downloaded, ?path, "model download complete");
-    Ok(path)
+    std::fs::rename(&tmp, dest)?;
+    tracing::info!(bytes = downloaded, ?dest, "download complete");
+    Ok(())
+}
+
+#[cfg(feature = "parakeet")]
+fn ensure_parakeet(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+    let dir = model_cache_dir()?;
+    let target = dir.join(model.filename()); // extracted model directory
+    if target.is_dir() && target.join("tokens.txt").exists() {
+        return Ok(target);
+    }
+    // sherpa-onnx hosts pre-exported model archives on its GitHub releases.
+    let base = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+    let archive_url = format!("{base}/{}.tar.bz2", model.filename());
+    tracing::info!(%archive_url, "downloading Parakeet model (first run)");
+    let tarball = dir.join(format!("{}.tar.bz2", model.filename()));
+    download_to_file(&archive_url, &tarball, progress)?;
+
+    // Decompress .tar.bz2 and unpack into the cache dir. The archive's top
+    // folder is the model name, so this yields dir/<filename>/...
+    let file = std::fs::File::open(&tarball)?;
+    let bz = bzip2::read::BzDecoder::new(file);
+    tar::Archive::new(bz).unpack(&dir).context("unpacking Parakeet archive")?;
+    let _ = std::fs::remove_file(&tarball);
+
+    if !target.is_dir() {
+        anyhow::bail!("Parakeet archive did not produce {target:?}");
+    }
+    Ok(target)
+}
+
+#[cfg(not(feature = "parakeet"))]
+fn ensure_parakeet(_model: ModelId, _progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+    anyhow::bail!("Parakeet support is not built in — rebuild with `--features parakeet`")
 }
 
 pub fn model_path_if_present(model: ModelId) -> Result<Option<PathBuf>> {
@@ -187,22 +228,26 @@ pub fn model_path_if_present(model: ModelId) -> Result<Option<PathBuf>> {
     Ok(if path.exists() { Some(path) } else { None })
 }
 
-/// Whether a model is already downloaded locally.
+/// Whether a model is already downloaded locally (a `.bin` for Whisper, a
+/// populated directory for Parakeet).
 pub fn is_downloaded(model: ModelId) -> bool {
-    model_path_if_present(model)
-        .ok()
-        .flatten()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+    let Ok(path) = model_cache_dir().map(|d| d.join(model.filename())) else {
+        return false;
+    };
+    match model.engine() {
+        Engine::Whisper => std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false),
+        Engine::Parakeet => path.is_dir() && path.join("tokens.txt").exists(),
+    }
 }
 
-/// Delete a downloaded model file (no-op if absent).
+/// Delete a downloaded model (a file for Whisper, a directory for Parakeet).
 pub fn delete_model(model: ModelId) -> Result<()> {
     let path = model_cache_dir()?.join(model.filename());
-    if path.exists() {
+    if path.is_dir() {
+        std::fs::remove_dir_all(&path).with_context(|| format!("deleting {path:?}"))?;
+    } else if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("deleting {path:?}"))?;
-        tracing::info!(?path, "deleted model");
     }
+    tracing::info!(?path, "deleted model");
     Ok(())
 }

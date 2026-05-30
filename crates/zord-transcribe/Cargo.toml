@@ -7,8 +7,8 @@ license.workspace = true
 [features]
 default = []
 # Adds the NVIDIA Parakeet backend (sherpa-onnx, ONNX). Heavier build; the
-# build script downloads prebuilt sherpa-onnx libs.
-parakeet = []
+# sherpa-onnx build script downloads prebuilt libs. tar+bzip2 unpack the model.
+parakeet = ["dep:sherpa-onnx", "dep:tar", "dep:bzip2"]
 
 [dependencies]
 zord-core = { workspace = true }
@@ -16,6 +16,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 directories = "5"
 ureq = "2"
+sherpa-onnx = { version = "1.13", optional = true }
+tar = { version = "0.4", optional = true }
+bzip2 = { version = "0.4", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal"] }

@@ -8,6 +8,11 @@ license.workspace = true
 name = "zord"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enable the NVIDIA Parakeet backend (sherpa-onnx).
+parakeet = ["zord-transcribe/parakeet"]
+
 [dependencies]
 zord-core = { workspace = true }
 zord-audio = { workspace = true }

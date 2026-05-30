@@ -360,10 +360,22 @@ platform; Windows-specific capture lands in Phase 2b.
 - **Next (Phase 10):** Parakeet via `sherpa-rs` behind a transcription-backend
   trait (lets the catalog include non-Whisper engines).
 
-### Phase 10 — Parakeet / multi-backend transcription (planned)
-- Transcription-backend trait abstracting Whisper (whisper-rs) and Parakeet
-  (sherpa-onnx via `sherpa-rs`, ONNX). Extend the model catalog + download to
-  Parakeet TDT models; multilingual.
+### Phase 10 — Parakeet / multi-backend transcription  ✅ DONE (feature build verified)
+- [x] `TranscribeBackend` trait; Whisper moved to `WhisperBackend`; `Transcriber`
+  dispatches by `ModelId::engine()`. (Phase 10a)
+- [x] `ParakeetBackend` via the `sherpa-onnx` crate (offline `nemo_transducer`),
+  behind the **`parakeet` cargo feature** so the default build stays lean/green.
+- [x] Catalog entry `parakeet-tdt-0.6b-v3` (25 languages); `ensure_model`
+  downloads + extracts the sherpa-onnx `.tar.bz2`; `is_downloaded`/`delete_model`
+  are directory-aware for Parakeet. Listed in the settings UI only with the feature.
+- [x] Passthrough `parakeet` feature on `zord-app` + `zord-gui`.
+- **Verified:** default build green + jfk works through the trait; `--features
+  parakeet` **compiles & links** for zord-transcribe, the CLI, and the GUI
+  (sherpa-onnx build script fetches prebuilt libs). Runtime Parakeet inference
+  (download the ~650 MB model + real audio) is a user step — can't be exercised
+  in this build env.
+- Build it: `cargo run -p zord-gui --features parakeet` → the settings overlay
+  lists Parakeet to download/select.
 
 ### Phase 7/Future — backlog (explicitly out of v1 scope)
 - Auto-detect active meeting apps (Teams/Zoom) → prompt/auto-start.
