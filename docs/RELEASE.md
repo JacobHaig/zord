@@ -80,10 +80,21 @@ git push origin v0.1.0
   Privacy & Security → Screen Recording** and relaunches. There is no
   Info.plist key for this — it is entirely TCC-managed.
 
+## Windows
+
+The Windows backend (WASAPI loopback + cpal mic) is implemented and the
+`windows` job in `.github/workflows/release.yml` builds + bundles a `.msi` on a
+`windows-latest` runner for every tag. Runtime testing on a real Windows machine
+is still pending (no Windows host in the dev environment). Authenticode signing
+is not yet wired up — add a signing step analogous to the macOS one when you
+have a code-signing certificate.
+
 ## Not yet covered
 
-- **Windows** (`.msi` via WASAPI loopback) — Phase 2b; no Windows host in this
-  build environment yet.
-- **SQLCipher** at-rest encryption — deferred (see `docs/PLAN.md`).
-- **App icon** — add an icon set and reference it in `Dioxus.toml` `[bundle]
-  icon` before a public release.
+- **macOS notarization automation** — wired in CI but gated on your Apple
+  Developer secrets (see §4).
+- **SQLCipher** at-rest encryption — planned (PLAN Phase 11).
+- **App icon** — planned (PLAN Phase 12): add an icon set + `Dioxus.toml`
+  `[bundle] icon` before a public release.
+- **NVIDIA Parakeet** — build with `--features parakeet` (PLAN Phase 10); the
+  release workflow currently builds the default (Whisper-only) configuration.

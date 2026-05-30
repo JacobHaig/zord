@@ -377,12 +377,52 @@ platform; Windows-specific capture lands in Phase 2b.
 - Build it: `cargo run -p zord-gui --features parakeet` → the settings overlay
   lists Parakeet to download/select.
 
-### Phase 7/Future — backlog (explicitly out of v1 scope)
-- Auto-detect active meeting apps (Teams/Zoom) → prompt/auto-start.
-- Local AI summaries / action items via a local LLM (llama.cpp).
-- Custom vocabulary (whisper `initial_prompt` / hotword biasing).
-- Per-speaker diarization within the "Others" channel.
-- SQLCipher at-rest encryption; app icon.
+### Inter-phase UX increments (shipped between numbered phases)
+- ✅ Dioxus signal best-practices pass (pass signals to children; fewer re-renders).
+- ✅ Export **Reveal in Finder/Explorer** + **Open in editor** buttons (`osutil`).
+- ✅ **dB-scale level meters** with time-based attack/release (consistent mic vs
+  system behaviour).
+
+---
+
+## 7. Backlog — planned future phases
+
+Done **one at a time**, each a sizable, self-contained phase with its own
+verification. Order is a suggestion, not fixed.
+
+### Phase 11 — SQLCipher at-rest encryption
+Encrypt `zord.db` with a user passphrase. Switch `rusqlite` to
+`bundled-sqlcipher`; key PRAGMA on **every** connection (CLI/GUI/web); passphrase
+entry + keychain option; migrate an existing plaintext DB; clear "lost passphrase
+= lost data" warning. Gate behind a feature so the default stays simple.
+
+### Phase 12 — App icon & brand polish
+Design an icon set, wire `Dioxus.toml` `[bundle] icon`, rename the `.app` to
+`Zord.app`, tidy the in-app header/empty states.
+
+### Phase 13 — Local AI summaries / action items
+A local LLM (llama.cpp via a Rust binding) to summarise a session and extract
+action items, fully offline. New backend + model management entry + a "Summary"
+panel. Heavy; feature-gated like Parakeet.
+
+### Phase 14 — Meeting auto-detect
+Watch for active meeting apps (Teams/Zoom/Meet) and offer to auto-start/stop
+recording. Per-OS process/Window inspection; opt-in.
+
+### Phase 15 — Custom vocabulary
+Bias transcription toward names/jargon: Whisper `initial_prompt`, sherpa-onnx
+hotwords. A settings field + per-session override.
+
+### Phase 16 — Per-speaker diarization (within "Others")
+Distinguish individual speakers inside the system channel (e.g. sherpa-onnx
+speaker-diarization / embeddings). Channel separation already covers Me-vs-Others;
+this adds Others → Speaker 1/2/3.
+
+### Cross-cutting / smaller
+- Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language
+  setting beyond English).
+- CUDA release builds for Windows/Linux NVIDIA GPUs.
+- macOS code-sign + notarize automation (needs Apple Developer account).
 
 ---
 

@@ -7,14 +7,22 @@ an accurate, timestamped, searchable transcript that labels who said what
 storage happen on your machine.
 
 - 🎙️ **Dual-channel capture** — your mic + system loopback, transcribed
-  separately and merged onto one timeline.
-- 🧠 **Local Whisper** (whisper.cpp) — GPU-accelerated on Apple Silicon (Metal),
-  CPU on Windows. The model downloads once on first run, then works offline.
+  separately and merged onto one **Me / Others** timeline, with live dB level
+  meters per channel.
+- 🧠 **Local transcription** — **Whisper** (whisper.cpp), GPU-accelerated on
+  Apple Silicon (Metal), CPU elsewhere. Optionally **NVIDIA Parakeet**
+  (sherpa-onnx) behind a build feature. Models download on demand and run offline.
+- ⚙️ **Model management** — pick from several Whisper sizes (and Parakeet) in a
+  settings panel; download / select / delete locally; re-transcribe old sessions
+  with a better model.
 - 🔎 **Searchable history** — every session stored in local SQLite with
   full-text search.
-- 📤 **Export** — Markdown, SRT, or JSON.
+- 📤 **Export** — Markdown, SRT, or JSON, with one-click **Reveal in
+  Finder/Explorer** and **Open in editor**.
 - 🖥️ **Two front-ends** — a native desktop GUI (Dioxus) and a `localhost` web
   dashboard for reviewing transcripts in a browser.
+- 🔒 **Private by design** — retention controls (keep/auto-delete audio) and a
+  configurable storage location. Nothing leaves the device.
 
 > Platforms: **macOS 13+ (Apple Silicon)** is the primary, fully-tested target.
 > **Windows 10/11 (x64)** is supported in code (WASAPI loopback) and built in
@@ -100,8 +108,11 @@ In the window:
 2. Talk, and/or play some audio (a video, a call). Watch the transcript stream
    in, color-coded **Me** / **Others**.
 3. Click **■ Stop**. The session appears in the left sidebar.
-4. Use the **search box** to find text across every session; click the **⚙**
-   gear for settings; open a saved session to **export** it.
+4. Use the **search box** to find text across every session. Open a saved
+   session to **export** it (Markdown/SRT/JSON) and **Reveal**/**Open** the file.
+5. Click the **⚙ gear** for the full settings panel: download/select/delete
+   transcription models, choose your microphone, toggle keep-audio +
+   auto-delete-after-N-days.
 
 ### First-run permissions
 
@@ -143,7 +154,8 @@ zord retranscribe <session-id> --model large-v3-turbo
 ```
 
 **Models** (`--model`): `large-v3-turbo-q5_0` (default — best size/speed),
-`large-v3-turbo` (highest accuracy), `small.en` (light, good on CPU).
+`large-v3-turbo`, `large-v3`, `medium.en`, `small.en`, `base.en`, `tiny.en`.
+With a `--features parakeet` build, `parakeet-tdt-0.6b-v3` is also available.
 
 **`--keep-audio <file.wav>`** saves the raw audio as `<file>.me.wav` and
 `<file>.others.wav`, which `retranscribe` can later reuse.
@@ -162,7 +174,7 @@ Everything stays under one local app-data folder:
 io.zord.zord/
 ├── config.json     # settings (model, retention, device, storage dir)
 ├── zord.db         # SQLite: sessions + transcript segments + FTS index
-├── models/         # downloaded Whisper ggml models
+├── models/         # downloaded models (Whisper .bin + any Parakeet dirs)
 ├── audio/          # kept recordings (only if "keep audio" is on)
 └── exports/        # files written by the GUI export buttons
 ```
@@ -197,7 +209,7 @@ A Cargo workspace of focused crates:
 | `zord-core` | shared types (`Source`, `Segment`, `Session`) |
 | `zord-audio` | resample → 16 kHz mono, voice-activity segmentation, WAV writer |
 | `zord-capture` | audio sources: `Microphone` (cpal) + `SystemAudio` (ScreenCaptureKit / WASAPI loopback) |
-| `zord-transcribe` | Whisper (whisper-rs) + first-run model download |
+| `zord-transcribe` | `TranscribeBackend` trait + Whisper (whisper-rs) always, Parakeet (sherpa-onnx) under `parakeet`; model catalog + downloads |
 | `zord-store` | SQLite storage + FTS5 search |
 | `zord-config` | persisted settings + paths + retention |
 | `zord-export` | Markdown / SRT / JSON renderers |
