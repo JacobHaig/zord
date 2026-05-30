@@ -24,6 +24,9 @@ pub struct Settings {
     pub input_device: Option<String>,
     /// Override for where recordings/db/exports live. `None` = app data dir.
     pub storage_dir: Option<PathBuf>,
+    /// Whether the database is encrypted (SQLCipher). Requires an `encryption`
+    /// build to actually open.
+    pub encrypted: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +37,39 @@ impl Default for Settings {
             auto_delete_days: None,
             input_device: None,
             storage_dir: None,
+            encrypted: false,
+        }
+    }
+}
+
+/// Optional OS-keychain storage for the database passphrase
+/// (macOS Keychain / Windows Credential Manager / Linux Secret Service).
+#[cfg(feature = "encryption")]
+pub mod keychain {
+    const SERVICE: &str = "io.zord.zord";
+    const ACCOUNT: &str = "db-passphrase";
+
+    fn entry() -> Option<keyring::Entry> {
+        keyring::Entry::new(SERVICE, ACCOUNT).ok()
+    }
+
+    /// Remember the passphrase in the OS keychain.
+    pub fn store(passphrase: &str) -> anyhow::Result<()> {
+        entry()
+            .ok_or_else(|| anyhow::anyhow!("no keychain available"))?
+            .set_password(passphrase)?;
+        Ok(())
+    }
+
+    /// Retrieve a remembered passphrase, if any.
+    pub fn get() -> Option<String> {
+        entry()?.get_password().ok()
+    }
+
+    /// Forget any remembered passphrase.
+    pub fn clear() {
+        if let Some(e) = entry() {
+            let _ = e.delete_credential();
         }
     }
 }

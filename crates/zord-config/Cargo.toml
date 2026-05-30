@@ -4,9 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Optional OS-keychain storage for the DB passphrase.
+encryption = ["dep:keyring"]
+
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 directories = "5"
+keyring = { version = "3", optional = true }

@@ -85,6 +85,19 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Enable at-rest encryption (set a passphrase, migrate the DB).
+    Encrypt {
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Remember the passphrase in the OS keychain.
+        #[arg(long)]
+        remember: bool,
+    },
+    /// Disable at-rest encryption (decrypt the DB back to plaintext).
+    Decrypt {
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -122,16 +135,91 @@ fn main() -> Result<()> {
             model,
             db,
         } => cmd_retranscribe(&session_id, &model, db),
+        Cmd::Encrypt { db, remember } => cmd_encrypt(db, remember),
+        Cmd::Decrypt { db } => cmd_decrypt(db),
     }
+}
+
+#[cfg(feature = "encryption")]
+fn cmd_encrypt(db: Option<PathBuf>, remember: bool) -> Result<()> {
+    let db_path = match db {
+        Some(p) => p,
+        None => default_db_path()?,
+    };
+    if zord_store::is_encrypted(&db_path) {
+        eprintln!("Database is already encrypted.");
+        return Ok(());
+    }
+    // Non-interactive (scripts/CI): take the passphrase from the environment.
+    let p1 = match std::env::var("ZORD_PASSPHRASE") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            let p = rpassword::prompt_password("New passphrase: ")?;
+            if p.is_empty() {
+                anyhow::bail!("passphrase must not be empty");
+            }
+            if rpassword::prompt_password("Confirm passphrase: ")? != p {
+                anyhow::bail!("passphrases do not match");
+            }
+            p
+        }
+    };
+    if db_path.exists() {
+        zord_store::encrypt_existing(&db_path, &p1)?;
+    } else {
+        // No DB yet: create a fresh encrypted one.
+        zord_store::set_db_key(Some(p1.clone()));
+        let _ = Store::open(&db_path)?;
+    }
+    let mut s = zord_config::Settings::load();
+    s.encrypted = true;
+    s.save()?;
+    if remember {
+        zord_config::keychain::store(&p1)?;
+        eprintln!("Passphrase remembered in the OS keychain.");
+    }
+    eprintln!("Encryption enabled (a plaintext backup was kept beside the database).");
+    Ok(())
+}
+
+#[cfg(feature = "encryption")]
+fn cmd_decrypt(db: Option<PathBuf>) -> Result<()> {
+    let db_path = match db {
+        Some(p) => p,
+        None => default_db_path()?,
+    };
+    if !zord_store::is_encrypted(&db_path) {
+        eprintln!("Database is not encrypted.");
+        return Ok(());
+    }
+    let pass = zord_config::keychain::get()
+        .or_else(|| std::env::var("ZORD_PASSPHRASE").ok())
+        .or_else(|| rpassword::prompt_password("Database passphrase: ").ok())
+        .filter(|p| !p.is_empty())
+        .context("a passphrase is required")?;
+    zord_store::decrypt_existing(&db_path, &pass)?;
+    let mut s = zord_config::Settings::load();
+    s.encrypted = false;
+    s.save()?;
+    zord_config::keychain::clear();
+    eprintln!("Encryption disabled (an encrypted backup was kept beside the database).");
+    Ok(())
+}
+
+#[cfg(not(feature = "encryption"))]
+fn cmd_encrypt(_db: Option<PathBuf>, _remember: bool) -> Result<()> {
+    anyhow::bail!("this build has no encryption support — rebuild with `--features encryption`")
+}
+
+#[cfg(not(feature = "encryption"))]
+fn cmd_decrypt(_db: Option<PathBuf>) -> Result<()> {
+    anyhow::bail!("this build has no encryption support — rebuild with `--features encryption`")
 }
 
 fn cmd_retranscribe(session_id: &str, model: &str, db: Option<PathBuf>) -> Result<()> {
     let model_id = ModelId::parse(model)
         .with_context(|| format!("unknown model '{model}'"))?;
-    let db_path = match db {
-        Some(p) => p,
-        None => default_db_path()?,
-    };
+    let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
     let session = store
         .get_session(session_id)?
@@ -165,10 +253,7 @@ fn cmd_export(
 ) -> Result<()> {
     let fmt = zord_export::Format::parse(format)
         .with_context(|| format!("unknown format '{format}' (use md|srt|json)"))?;
-    let db_path = match db {
-        Some(p) => p,
-        None => default_db_path()?,
-    };
+    let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
     let session = store
         .get_session(session_id)?
@@ -187,10 +272,7 @@ fn cmd_export(
 }
 
 fn cmd_serve(port: u16, db: Option<PathBuf>) -> Result<()> {
-    let db_path = match db {
-        Some(p) => p,
-        None => default_db_path()?,
-    };
+    let db_path = resolve_db(db)?;
     zord_web::serve_blocking(db_path, port)
 }
 
@@ -206,10 +288,7 @@ fn cmd_file(path: PathBuf, model: &str, db: Option<PathBuf>) -> Result<()> {
     })?;
     eprintln!("\r  model ready.                                  ");
 
-    let db_path = match db {
-        Some(p) => p,
-        None => default_db_path()?,
-    };
+    let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
 
     let started_at = now_ms();
@@ -240,6 +319,38 @@ fn default_db_path() -> Result<PathBuf> {
     zord_config::Settings::load().db_path()
 }
 
+/// Resolve the DB path (from `--db` or config) and unlock it if encrypted.
+fn resolve_db(db: Option<PathBuf>) -> Result<PathBuf> {
+    let path = match db {
+        Some(p) => p,
+        None => default_db_path()?,
+    };
+    unlock(&path)?;
+    Ok(path)
+}
+
+/// If the database is encrypted, obtain the passphrase (keychain → env
+/// `ZORD_PASSPHRASE` → hidden prompt) and set the process-wide DB key.
+#[cfg(feature = "encryption")]
+fn unlock(db_path: &std::path::Path) -> Result<()> {
+    let needs = zord_config::Settings::load().encrypted || zord_store::is_encrypted(db_path);
+    if !needs {
+        return Ok(());
+    }
+    let pass = zord_config::keychain::get()
+        .or_else(|| std::env::var("ZORD_PASSPHRASE").ok())
+        .or_else(|| rpassword::prompt_password("Database passphrase: ").ok())
+        .filter(|p| !p.is_empty())
+        .context("a passphrase is required to open the encrypted database")?;
+    zord_store::set_db_key(Some(pass));
+    Ok(())
+}
+
+#[cfg(not(feature = "encryption"))]
+fn unlock(_db_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -266,10 +377,7 @@ fn cmd_record(
     })?;
     eprintln!("\r  model ready: {}                         ", model_path.display());
 
-    let db_path = match db {
-        Some(p) => p,
-        None => default_db_path()?,
-    };
+    let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
 
     let started_at = now_ms();
@@ -306,10 +414,7 @@ fn cmd_record(
 }
 
 fn cmd_show(session_id: &str, db: Option<PathBuf>) -> Result<()> {
-    let db_path = match db {
-        Some(p) => p,
-        None => default_db_path()?,
-    };
+    let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
     for seg in store.segments(session_id)? {
         println!(
@@ -323,10 +428,7 @@ fn cmd_show(session_id: &str, db: Option<PathBuf>) -> Result<()> {
 }
 
 fn cmd_search(query: &str, db: Option<PathBuf>) -> Result<()> {
-    let db_path = match db {
-        Some(p) => p,
-        None => default_db_path()?,
-    };
+    let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
     for (sid, seg) in store.search(query)? {
         println!(

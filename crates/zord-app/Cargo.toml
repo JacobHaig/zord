@@ -12,6 +12,8 @@ path = "src/main.rs"
 default = []
 # Enable the NVIDIA Parakeet backend (sherpa-onnx).
 parakeet = ["zord-transcribe/parakeet"]
+# Enable SQLCipher at-rest encryption (+ keychain + hidden passphrase prompts).
+encryption = ["zord-store/encryption", "zord-config/encryption", "dep:rpassword"]
 
 [dependencies]
 zord-core = { workspace = true }
@@ -27,3 +29,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 hound = "3.5"
+rpassword = { version = "7", optional = true }
