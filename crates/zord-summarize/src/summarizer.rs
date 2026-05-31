@@ -77,7 +77,7 @@ impl SummaryModel {
 }
 
 fn models_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("io", "zord", "zord")
+    let dirs = directories::ProjectDirs::from("", "", "Zord")
         .ok_or_else(|| anyhow!("could not resolve a data directory"))?;
     let dir = dirs.data_dir().join("models");
     std::fs::create_dir_all(&dir)?;

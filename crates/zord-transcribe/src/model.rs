@@ -127,10 +127,10 @@ impl ModelId {
     }
 }
 
-/// Directory where models are cached (`~/Library/Application Support/zord/models`
+/// Directory where models are cached (`~/Library/Application Support/Zord/models`
 /// on macOS, platform-appropriate elsewhere).
 pub fn model_cache_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("io", "zord", "zord")
+    let dirs = directories::ProjectDirs::from("", "", "Zord")
         .ok_or_else(|| anyhow!("could not resolve a data directory"))?;
     let dir = dirs.data_dir().join("models");
     std::fs::create_dir_all(&dir)?;

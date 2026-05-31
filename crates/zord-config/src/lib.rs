@@ -153,9 +153,9 @@ pub mod keychain {
     }
 }
 
-/// The OS app-data directory (`~/Library/Application Support/zord` on macOS).
+/// The OS app-data directory (`~/Library/Application Support/Zord` on macOS).
 pub fn app_data_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("io", "zord", "zord")
+    let dirs = directories::ProjectDirs::from("", "", "Zord")
         .context("could not resolve an app data directory")?;
     Ok(dirs.data_dir().to_path_buf())
 }
