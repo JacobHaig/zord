@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 use zord_core::{Segment, Session, Source, Word};
 
@@ -76,9 +77,18 @@ impl Store {
                 t_start_ms  INTEGER NOT NULL,
                 t_end_ms    INTEGER NOT NULL,
                 text        TEXT NOT NULL,
-                words_json  TEXT
+                words_json  TEXT,
+                speaker     INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id, t_start_ms);
+
+            -- Phase 16: custom names for diarized speakers, per session.
+            CREATE TABLE IF NOT EXISTS speaker_names (
+                session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                speaker     INTEGER NOT NULL,
+                name        TEXT NOT NULL,
+                PRIMARY KEY (session_id, speaker)
+            );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
                 text,
@@ -103,6 +113,10 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE sessions ADD COLUMN summary TEXT", []);
+        // Added in Phase 16 — tolerate older DBs that predate the speaker column.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE segments ADD COLUMN speaker INTEGER", []);
         Ok(())
     }
 
@@ -189,8 +203,8 @@ impl Store {
             Some(serde_json::to_string(&seg.words)?)
         };
         self.conn.execute(
-            "INSERT INTO segments (session_id, source, t_start_ms, t_end_ms, text, words_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO segments (session_id, source, t_start_ms, t_end_ms, text, words_json, speaker)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id,
                 seg.source.as_str(),
@@ -198,6 +212,7 @@ impl Store {
                 seg.t_end_ms,
                 seg.text,
                 words_json,
+                seg.speaker,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -247,7 +262,7 @@ impl Store {
     /// All segments for a session, ordered by time.
     pub fn segments(&self, session_id: &str) -> Result<Vec<Segment>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source, t_start_ms, t_end_ms, text, words_json
+            "SELECT id, source, t_start_ms, t_end_ms, text, words_json, speaker
              FROM segments WHERE session_id = ?1 ORDER BY t_start_ms",
         )?;
         let rows = stmt.query_map(params![session_id], row_to_segment)?;
@@ -257,7 +272,7 @@ impl Store {
     /// Full-text search across all transcripts. Returns (session_id, segment).
     pub fn search(&self, query: &str) -> Result<Vec<(String, Segment)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.session_id, s.id, s.source, s.t_start_ms, s.t_end_ms, s.text, s.words_json
+            "SELECT s.session_id, s.id, s.source, s.t_start_ms, s.t_end_ms, s.text, s.words_json, s.speaker
              FROM segments_fts f
              JOIN segments s ON s.id = f.rowid
              WHERE segments_fts MATCH ?1
@@ -276,6 +291,58 @@ impl Store {
             .execute("UPDATE segments SET text = ?2 WHERE id = ?1", params![id, text])?;
         Ok(())
     }
+
+    /// Assign (or clear) the diarized speaker index for a single segment.
+    pub fn set_segment_speaker(&self, id: i64, speaker: Option<i32>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE segments SET speaker = ?2 WHERE id = ?1",
+            params![id, speaker],
+        )?;
+        Ok(())
+    }
+
+    /// Clear all speaker assignments for a session (used before re-diarizing).
+    /// Also drops any custom speaker names so stale labels don't linger.
+    pub fn clear_speakers(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE segments SET speaker = NULL WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM speaker_names WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set or clear a custom display name for a diarized speaker. An empty/blank
+    /// name removes the override (reverting to "Speaker N").
+    pub fn set_speaker_name(&self, session_id: &str, speaker: i32, name: &str) -> Result<()> {
+        if name.trim().is_empty() {
+            self.conn.execute(
+                "DELETE FROM speaker_names WHERE session_id = ?1 AND speaker = ?2",
+                params![session_id, speaker],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO speaker_names (session_id, speaker, name) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id, speaker) DO UPDATE SET name = excluded.name",
+                params![session_id, speaker, name.trim()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Custom speaker names for a session, as a `speaker_index -> name` map.
+    pub fn speaker_names(&self, session_id: &str) -> Result<HashMap<i32, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT speaker, name FROM speaker_names WHERE session_id = ?1")?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok((r.get::<_, i32>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
 }
 
 fn row_to_segment(r: &rusqlite::Row) -> rusqlite::Result<Segment> {
@@ -289,6 +356,7 @@ fn row_to_segment_offset(r: &rusqlite::Row, off: usize) -> rusqlite::Result<Segm
     let words: Vec<Word> = words_json
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
+    let speaker: Option<i32> = r.get(off + 6)?;
     Ok(Segment {
         id,
         source: match source_str.as_str() {
@@ -299,6 +367,7 @@ fn row_to_segment_offset(r: &rusqlite::Row, off: usize) -> rusqlite::Result<Segm
         t_end_ms: r.get(off + 3)?,
         text: r.get(off + 4)?,
         words,
+        speaker,
     })
 }
 

@@ -65,6 +65,29 @@ pub struct Segment {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Word>,
+    /// Diarized speaker index within the "Others" channel (0-based), if known.
+    /// `None` for "Me" or before diarization has run. Set by Phase 16 diarization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<i32>,
+}
+
+impl Segment {
+    /// Human label for this segment's speaker: "Me" for the mic channel, or
+    /// "Speaker N" (1-based) for a diarized "Others" segment, falling back to
+    /// "Others" when no speaker has been assigned. `names` optionally maps a
+    /// 0-based speaker index to a custom name (e.g. "Alex").
+    pub fn speaker_label(&self, names: &std::collections::HashMap<i32, String>) -> String {
+        match self.source {
+            Source::Me => "Me".to_string(),
+            Source::Others => match self.speaker {
+                Some(idx) => names
+                    .get(&idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Speaker {}", idx + 1)),
+                None => "Others".to_string(),
+            },
+        }
+    }
 }
 
 /// A recording session (one "call" or capture run).

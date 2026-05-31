@@ -74,6 +74,7 @@ impl TranscribeBackend for WhisperBackend {
                 t_end_ms: base_offset_ms + t1,
                 text,
                 words: Vec::new(),
+                speaker: None,
             });
         }
         Ok(out)

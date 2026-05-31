@@ -47,6 +47,24 @@ pub struct Settings {
     /// Freeform system-prompt override; `None`/empty = use the preset.
     #[serde(default)]
     pub summary_prompt: Option<String>,
+    /// Run speaker diarization automatically when a recording stops.
+    #[serde(default = "default_true")]
+    pub diarize_auto: bool,
+    /// Show provisional speaker labels live during recording. Accurate labels
+    /// are always recomputed by the offline pass at stop; this only affects the
+    /// in-progress display. Off by default to spare constrained hardware.
+    #[serde(default)]
+    pub diarize_live: bool,
+    /// Speaker-embedding model id for diarization (see zord-diarize catalog).
+    #[serde(default = "default_embedding_model")]
+    pub diarize_embedding_model: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_embedding_model() -> String {
+    "3dspeaker-eres2netv2".to_string()
 }
 
 fn default_capture_mode() -> String {
@@ -100,6 +118,9 @@ impl Default for Settings {
             summary_model: default_summary_model(),
             summary_preset: default_summary_preset(),
             summary_prompt: None,
+            diarize_auto: true,
+            diarize_live: false,
+            diarize_embedding_model: default_embedding_model(),
         }
     }
 }

@@ -68,6 +68,7 @@ impl TranscribeBackend for ParakeetBackend {
             t_end_ms: base_offset_ms + dur_ms,
             text,
             words: Vec::new(),
+            speaker: None,
         }])
     }
 }
