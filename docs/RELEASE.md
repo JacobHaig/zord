@@ -93,7 +93,9 @@ have a code-signing certificate.
 
 - **macOS notarization automation** — wired in CI but gated on your Apple
   Developer secrets (see §4).
-- **SQLCipher** at-rest encryption — planned (PLAN Phase 11).
+- **SQLCipher** at-rest encryption — implemented (PLAN Phase 11) behind
+  `--features encryption`; the default release build omits it (avoids the
+  OpenSSL/perl build).
 - **App icon** — planned (PLAN Phase 12): add an icon set + `Dioxus.toml`
   `[bundle] icon` before a public release.
 - **NVIDIA Parakeet** — build with `--features parakeet` (PLAN Phase 10); the

@@ -390,11 +390,23 @@ platform; Windows-specific capture lands in Phase 2b.
 Done **one at a time**, each a sizable, self-contained phase with its own
 verification. Order is a suggestion, not fixed.
 
-### Phase 11 — SQLCipher at-rest encryption
-Encrypt `zord.db` with a user passphrase. Switch `rusqlite` to
-`bundled-sqlcipher`; key PRAGMA on **every** connection (CLI/GUI/web); passphrase
-entry + keychain option; migrate an existing plaintext DB; clear "lost passphrase
-= lost data" warning. Gate behind a feature so the default stays simple.
+### Phase 11 — SQLCipher at-rest encryption  ✅ DONE (feature-gated, verified)
+- [x] `encryption` feature (`rusqlite/bundled-sqlcipher-vendored-openssl`),
+  feature-gated so the default build + CI stay lean.
+- [x] Process-wide key (`set_db_key`) applied as `PRAGMA key` on every
+  `Store::open`; wrong/missing key fails clearly. `encrypt_existing` /
+  `decrypt_existing` migrate via `sqlcipher_export` (with backups); `is_encrypted`
+  detection. (11a — roundtrip test passes.)
+- [x] CLI: `resolve_db` unlocks via keychain → `ZORD_PASSPHRASE` → hidden prompt;
+  `zord encrypt [--remember]` / `zord decrypt`. (11b — full encrypt/read/decrypt
+  cycle verified at runtime.)
+- [x] Config: `encrypted` + `encrypt_pending`/`decrypt_pending`; optional
+  `keychain` module (keyring). GUI: unlock screen at launch (keychain
+  auto-unlock or passphrase prompt + remember); Enable/Disable in settings that
+  migrate **on next launch** (safe — no live-DB migration). (11c — builds + launches.)
+- **Passphrase UX:** set-once + optional OS keychain (chosen). Runtime: store
+  roundtrip + CLI cycle verified here; GUI unlock/enable exercised by build+launch
+  (full click-through is a user step).
 
 ### Phase 12 — App icon & brand polish
 Design an icon set, wire `Dioxus.toml` `[bundle] icon`, rename the `.app` to

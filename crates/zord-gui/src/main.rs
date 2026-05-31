@@ -40,8 +40,159 @@ enum View {
     Search,
 }
 
+// ---------------------------------------------------------------------------
+// Encryption gate: runs before the main app so the DB key is set (and any
+// pending migration applied) before the engine opens any connection.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "encryption")]
+fn gate_db_path() -> PathBuf {
+    Settings::load().db_path().unwrap_or_else(|_| PathBuf::from("zord.db"))
+}
+
+#[cfg(feature = "encryption")]
+mod crypto_gate {
+    use std::path::Path;
+    use zord_config::{keychain, Settings};
+
+    pub enum Gate {
+        Unlocked,
+        NeedsPassphrase,
+    }
+
+    /// Apply pending migrations + auto-unlock at startup; decide the lock state.
+    pub fn run(db_path: &Path) -> Gate {
+        let mut s = Settings::load();
+
+        if s.encrypt_pending {
+            match keychain::get() {
+                Some(pass) => {
+                    if db_path.exists() {
+                        if let Err(e) = zord_store::encrypt_existing(db_path, &pass) {
+                            tracing::error!("encrypt-on-launch failed: {e}");
+                        }
+                    }
+                    zord_store::set_db_key(Some(pass));
+                    s.encrypted = true;
+                    s.encrypt_pending = false;
+                    let _ = s.save();
+                    return Gate::Unlocked;
+                }
+                None => {
+                    s.encrypt_pending = false;
+                    let _ = s.save();
+                }
+            }
+        }
+
+        if s.decrypt_pending {
+            if let Some(pass) = keychain::get() {
+                let _ = zord_store::decrypt_existing(db_path, &pass);
+            }
+            zord_store::set_db_key(None);
+            keychain::clear();
+            s.encrypted = false;
+            s.decrypt_pending = false;
+            let _ = s.save();
+            return Gate::Unlocked;
+        }
+
+        if s.encrypted || zord_store::is_encrypted(db_path) {
+            if let Some(pass) = keychain::get() {
+                zord_store::set_db_key(Some(pass));
+                if zord_store::Store::open(db_path).is_ok() {
+                    return Gate::Unlocked;
+                }
+            }
+            return Gate::NeedsPassphrase;
+        }
+
+        Gate::Unlocked
+    }
+
+    /// Try a user-entered passphrase; on success set the key (and optionally
+    /// remember it) and return true.
+    pub fn try_unlock(db_path: &Path, pass: &str, remember: bool) -> bool {
+        zord_store::set_db_key(Some(pass.to_string()));
+        if zord_store::Store::open(db_path).is_ok() {
+            if remember {
+                let _ = keychain::store(pass);
+            }
+            true
+        } else {
+            zord_store::set_db_key(None);
+            false
+        }
+    }
+}
+
+/// Launched root. With `encryption`, gates the app behind an unlock screen when
+/// the DB is encrypted; otherwise just renders the main app.
+#[cfg(feature = "encryption")]
 #[component]
 fn App() -> Element {
+    let db = use_hook(gate_db_path);
+    let unlocked = use_signal(|| matches!(crypto_gate::run(&db), crypto_gate::Gate::Unlocked));
+    if *unlocked.read() {
+        rsx! { MainApp {} }
+    } else {
+        rsx! { UnlockScreen { db: db.clone(), unlocked } }
+    }
+}
+
+#[cfg(not(feature = "encryption"))]
+#[component]
+fn App() -> Element {
+    rsx! { MainApp {} }
+}
+
+#[cfg(feature = "encryption")]
+#[component]
+fn UnlockScreen(db: PathBuf, unlocked: Signal<bool>) -> Element {
+    let mut pass = use_signal(String::new);
+    let mut remember = use_signal(|| true);
+    let mut error = use_signal(|| Option::<String>::None);
+
+    let submit = move |_| {
+        let p = pass.peek().clone();
+        if crypto_gate::try_unlock(&db, &p, *remember.peek()) {
+            unlocked.set(true);
+        } else {
+            error.set(Some("Wrong passphrase — try again.".to_string()));
+        }
+    };
+
+    rsx! {
+        style { dangerous_inner_html: CSS }
+        div { class: "unlock",
+            div { class: "unlock-card",
+                div { class: "brand", "ZORD" }
+                h2 { "Unlock" }
+                p { class: "field-note", "This database is encrypted. Enter your passphrase to continue." }
+                input {
+                    r#type: "password",
+                    class: "search",
+                    placeholder: "Passphrase",
+                    autofocus: true,
+                    value: "{pass}",
+                    oninput: move |e| pass.set(e.value()),
+                }
+                button {
+                    class: if remember() { "toggle on" } else { "toggle" },
+                    onclick: move |_| { let v = *remember.peek(); remember.set(!v); },
+                    if remember() { "Remember in keychain" } else { "Don't remember" }
+                }
+                if let Some(err) = error.read().clone() {
+                    div { class: "notice", "{err}" }
+                }
+                button { class: "record", onclick: submit, "Unlock" }
+            }
+        }
+    }
+}
+
+#[component]
+fn MainApp() -> Element {
     let mut status = use_signal(|| Status::Idle);
     let mut notice = use_signal(|| Option::<String>::None);
     let mut segments = use_signal(Vec::<Segment>::new);
@@ -401,6 +552,8 @@ fn App() -> Element {
                                     }
                                 }
 
+                                EncryptionSettings { settings, notice }
+
                                 section { class: "settings-section",
                                     h3 { "About" }
                                     p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
@@ -410,6 +563,77 @@ fn App() -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(feature = "encryption")]
+#[component]
+fn EncryptionSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
+    let mut p1 = use_signal(String::new);
+    let mut p2 = use_signal(String::new);
+    let s = settings.read().clone();
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Encryption (at rest)" }
+            if s.encrypted || s.encrypt_pending {
+                p { class: "field-note",
+                    if s.encrypt_pending { "Encryption will be applied next launch." } else { "Database encryption is ON." }
+                }
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.decrypt_pending = true;
+                        let _ = s.save();
+                        settings.set(s);
+                        notice.set(Some("Encryption will be removed on next launch — restart Zord.".to_string()));
+                    },
+                    "Disable encryption"
+                }
+            } else {
+                p { class: "field-note", "Encrypt the local database with a passphrase (kept in your OS keychain). Applied on next launch." }
+                input { r#type: "password", class: "search", placeholder: "Passphrase", value: "{p1}", oninput: move |e| p1.set(e.value()) }
+                input { r#type: "password", class: "search", placeholder: "Confirm passphrase", value: "{p2}", oninput: move |e| p2.set(e.value()) }
+                button {
+                    class: "mbtn",
+                    onclick: move |_| {
+                        let (a, b) = (p1.peek().clone(), p2.peek().clone());
+                        if a.is_empty() {
+                            notice.set(Some("Passphrase must not be empty.".to_string()));
+                            return;
+                        }
+                        if a != b {
+                            notice.set(Some("Passphrases do not match.".to_string()));
+                            return;
+                        }
+                        if zord_config::keychain::store(&a).is_err() {
+                            notice.set(Some("Could not access the OS keychain.".to_string()));
+                            return;
+                        }
+                        let mut s = settings.peek().clone();
+                        s.encrypt_pending = true;
+                        let _ = s.save();
+                        settings.set(s);
+                        p1.set(String::new());
+                        p2.set(String::new());
+                        notice.set(Some("Encryption will be applied on next launch — restart Zord.".to_string()));
+                    },
+                    "Enable encryption"
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "encryption"))]
+#[component]
+fn EncryptionSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
+    let _ = (settings, notice);
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Encryption (at rest)" }
+            p { class: "field-note", "Build with `--features encryption` to enable SQLCipher database encryption." }
         }
     }
 }

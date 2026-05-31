@@ -21,8 +21,9 @@ storage happen on your machine.
   Finder/Explorer** and **Open in editor**.
 - 🖥️ **Two front-ends** — a native desktop GUI (Dioxus) and a `localhost` web
   dashboard for reviewing transcripts in a browser.
-- 🔒 **Private by design** — retention controls (keep/auto-delete audio) and a
-  configurable storage location. Nothing leaves the device.
+- 🔒 **Private by design** — retention controls (keep/auto-delete audio), a
+  configurable storage location, and optional **at-rest database encryption**
+  (SQLCipher, behind a build feature). Nothing leaves the device.
 
 > Platforms: **macOS 13+ (Apple Silicon)** is the primary, fully-tested target.
 > **Windows 10/11 (x64)** is supported in code (WASAPI loopback) and built in
@@ -71,6 +72,22 @@ This pulls in an ONNX runtime (the build script downloads prebuilt sherpa-onnx
 libs). With it enabled, the settings panel lists Parakeet alongside the Whisper
 models to download and select. Without the feature, the default build stays
 lean and Whisper-only.
+
+### Optional: database encryption (SQLCipher)
+
+To encrypt the local database at rest, build with the `encryption` feature:
+
+```bash
+cargo run -p zord-gui --features encryption    # GUI: unlock screen + Settings → Encryption
+cargo build -p zord-app --features encryption  # CLI: `zord encrypt [--remember]` / `zord decrypt`
+```
+
+Encryption is opt-in. Enable it from the GUI settings (applied on next launch) or
+with `zord encrypt`; the passphrase can be remembered in your OS keychain or
+prompted each launch (`ZORD_PASSPHRASE` is honored for scripting). **Keep your
+passphrase safe — a lost passphrase means unrecoverable data.** This feature
+vendors SQLCipher + OpenSSL, so the build needs perl in addition to the C
+toolchain.
 
 ---
 

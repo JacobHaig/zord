@@ -27,6 +27,14 @@ pub struct Settings {
     /// Whether the database is encrypted (SQLCipher). Requires an `encryption`
     /// build to actually open.
     pub encrypted: bool,
+    /// Set by the GUI to request encrypting the DB on next launch (migration
+    /// runs before the engine opens any connection — safe). Uses the keychain
+    /// passphrase.
+    #[serde(default)]
+    pub encrypt_pending: bool,
+    /// Likewise, request decrypting on next launch.
+    #[serde(default)]
+    pub decrypt_pending: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +46,8 @@ impl Default for Settings {
             input_device: None,
             storage_dir: None,
             encrypted: false,
+            encrypt_pending: false,
+            decrypt_pending: false,
         }
     }
 }
