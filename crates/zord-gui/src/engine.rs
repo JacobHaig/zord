@@ -102,6 +102,16 @@ fn catalog() -> Vec<ModelInfo> {
             kind: "summary".to_string(),
         });
     }
+    #[cfg(feature = "diarization")]
+    for (name, label, size, present) in zord_diarize::list_embedding_models() {
+        models.push(ModelInfo {
+            name: name.to_string(),
+            size: size.to_string(),
+            description: label.to_string(),
+            downloaded: present,
+            kind: "diarization".to_string(),
+        });
+    }
     models
 }
 
@@ -139,6 +149,14 @@ pub enum DbCmd {
     EditSegment {
         segment_id: i64,
         text: String,
+    },
+    /// (Re-)run speaker diarization on a past session's retained "Others" audio.
+    Diarize(String),
+    /// Rename a diarized speaker (0-based index) within a session.
+    RenameSpeaker {
+        id: String,
+        speaker: i32,
+        name: String,
     },
 }
 
@@ -298,7 +316,19 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 #[cfg(not(feature = "summaries"))]
                 let handled_summary = false;
 
-                if !handled_summary {
+                #[cfg(feature = "diarization")]
+                let handled_diar = if let Some(dm) = zord_diarize::EmbeddingModel::parse(&name) {
+                    if let Err(e) = zord_diarize::ensure_diar_models(dm, &mut progress) {
+                        let _ = ev.send(Event::Notice(format!("download failed: {e}")));
+                    }
+                    true
+                } else {
+                    false
+                };
+                #[cfg(not(feature = "diarization"))]
+                let handled_diar = false;
+
+                if !handled_summary && !handled_diar {
                     if let Some(model) = ModelId::parse(&name) {
                         if let Err(e) = ensure_model(model, &mut progress) {
                             let _ = ev.send(Event::Notice(format!("download failed: {e}")));
@@ -311,6 +341,10 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 #[cfg(feature = "summaries")]
                 if let Some(sm) = zord_summarize::SummaryModel::parse(&name) {
                     let _ = zord_summarize::delete_summary_model(sm);
+                }
+                #[cfg(feature = "diarization")]
+                if let Some(dm) = zord_diarize::EmbeddingModel::parse(&name) {
+                    let _ = zord_diarize::delete_embedding(dm);
                 }
                 if let Some(model) = ModelId::parse(&name) {
                     let _ = zord_transcribe::delete_model(model);
@@ -381,8 +415,155 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             DbCmd::EditSegment { segment_id, text } => {
                 let _ = store.update_segment_text(segment_id, &text);
             }
+            DbCmd::RenameSpeaker { id, speaker, name } => {
+                let _ = store.set_speaker_name(&id, speaker, &name);
+                if let Ok(v) = store.segments(&id) {
+                    let _ = ev.send(Event::Transcript(v));
+                }
+            }
+            DbCmd::Diarize(id) => {
+                // Heavy (loads ONNX + clusters); run off the db thread so queries
+                // stay responsive. The worker opens its own Store.
+                let ev = ev.clone();
+                let db_path = db_path.clone();
+                thread::spawn(move || diarize_session_ondemand(&db_path, &id, &ev));
+            }
         }
     }
+}
+
+/// On-demand diarization for a past session: locate its retained "Others" WAV
+/// from the stored audio prefix, then run the offline pass.
+fn diarize_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedSender<Event>) {
+    #[cfg(not(feature = "diarization"))]
+    {
+        let _ = (db_path, session_id);
+        let _ = ev.send(Event::Notice(
+            "Diarization isn't built in — rebuild with `--features diarization`.".to_string(),
+        ));
+    }
+    #[cfg(feature = "diarization")]
+    {
+        let store = match Store::open(db_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("db: {e}")));
+                return;
+            }
+        };
+        let session = match store.get_session(session_id) {
+            Ok(Some(s)) => s,
+            _ => {
+                let _ = ev.send(Event::Notice("No such session.".to_string()));
+                return;
+            }
+        };
+        let Some(prefix) = session.audio_path else {
+            let _ = ev.send(Event::Notice(
+                "This session didn't retain audio, so speakers can't be re-identified.".to_string(),
+            ));
+            return;
+        };
+        let wav = PathBuf::from(format!("{prefix}.others.wav"));
+        if !wav.exists() {
+            let _ = ev.send(Event::Notice(
+                "The 'Others' audio for this session is missing.".to_string(),
+            ));
+            return;
+        }
+        apply_diarization(&store, session_id, &wav, ev);
+    }
+}
+
+/// Load the "Others" WAV, run the offline diarizer, and write speaker labels
+/// onto the session's segments. Emits progress notices + a refreshed transcript.
+#[cfg(feature = "diarization")]
+fn apply_diarization(
+    store: &Store,
+    session_id: &str,
+    others_wav: &std::path::Path,
+    ev: &UnboundedSender<Event>,
+) {
+    let samples = match zord_audio::read_wav_mono_f32(others_wav) {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            let _ = ev.send(Event::Notice("No 'Others' audio to diarize.".to_string()));
+            return;
+        }
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("reading audio: {e}")));
+            return;
+        }
+    };
+
+    let settings = zord_config::Settings::load();
+    let model = zord_diarize::EmbeddingModel::parse_or_default(&settings.diarize_embedding_model);
+
+    if !zord_diarize::diar_models_present(model) {
+        let _ = ev.send(Event::Notice("Downloading speaker models…".to_string()));
+        let ev2 = ev.clone();
+        let mut progress = move |done: u64, total: Option<u64>| {
+            if let Some(total) = total.filter(|t| *t > 0) {
+                let _ = ev2.send(Event::ModelProgress {
+                    name: model.name().to_string(),
+                    pct: (done * 100 / total) as u8,
+                });
+            }
+        };
+        if let Err(e) = zord_diarize::ensure_diar_models(model, &mut progress) {
+            let _ = ev.send(Event::Notice(format!("speaker models: {e}")));
+            return;
+        }
+    }
+
+    let _ = ev.send(Event::Notice("Identifying speakers…".to_string()));
+    let diarizer = match zord_diarize::Diarizer::load_default(model) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("diarizer: {e}")));
+            return;
+        }
+    };
+    let spans = match diarizer.diarize(&samples) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("diarization failed: {e}")));
+            return;
+        }
+    };
+
+    // Map speaker spans onto the stored "Others" segments by max time overlap.
+    let segs = store.segments(session_id).unwrap_or_default();
+    let _ = store.clear_speakers(session_id);
+    let mut speakers = std::collections::HashSet::new();
+    for seg in segs.iter().filter(|s| s.source == Source::Others) {
+        let Some(id) = seg.id else { continue };
+        let best = spans
+            .iter()
+            .map(|sp| (sp.speaker, overlap_ms(seg.t_start_ms, seg.t_end_ms, sp.start_ms, sp.end_ms)))
+            .filter(|(_, ov)| *ov > 0)
+            .max_by_key(|(_, ov)| *ov);
+        if let Some((speaker, _)) = best {
+            let _ = store.set_segment_speaker(id, Some(speaker));
+            speakers.insert(speaker);
+        }
+    }
+
+    if let Ok(v) = store.segments(session_id) {
+        let _ = ev.send(Event::Transcript(v));
+    }
+    let _ = ev.send(Event::Notice(format!(
+        "Identified {} speaker(s) in this conversation.",
+        speakers.len()
+    )));
+}
+
+/// Milliseconds of overlap between two [start, end] intervals.
+#[cfg(feature = "diarization")]
+fn overlap_ms(a0: u64, a1: u64, b0: u64, b1: u64) -> u64 {
+    let lo = a0.max(b0);
+    let hi = a1.min(b1);
+    hi.saturating_sub(lo)
 }
 
 /// Render a session and write it to the app data `exports/` directory.
@@ -537,6 +718,18 @@ fn run_session(
         }
     };
 
+    // Diarization runs offline at stop. It needs the full "Others" track, so we
+    // write that WAV even when the user isn't retaining audio (deleted after the
+    // pass). Only when the feature is built and auto-diarize is enabled.
+    let settings = zord_config::Settings::load();
+    let diarize_auto = cfg!(feature = "diarization") && record_system && settings.diarize_auto;
+    let others_wav: Option<PathBuf> = if record_system && (keep_audio || diarize_auto) {
+        let _ = std::fs::create_dir_all(&audio_dir);
+        Some(audio_dir.join(format!("{session_id}.others.wav")))
+    } else {
+        None
+    };
+
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let mut procs = Vec::new();
@@ -563,7 +756,7 @@ fn run_session(
         let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
         match SystemAudio::start(sys_tx) {
             Ok(s) => {
-                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), wav_path("others")));
+                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone()));
                 Some(s)
             }
             Err(e) => {
@@ -635,6 +828,21 @@ fn run_session(
     }
     let _ = transcribe.join();
     let _ = store.end_session(&session_id, now_ms());
+
+    // Offline speaker diarization (accurate, source of truth) over the "Others"
+    // track, then drop the temp WAV if the user isn't retaining audio.
+    #[cfg(feature = "diarization")]
+    if diarize_auto {
+        if let Some(wav) = others_wav.as_ref() {
+            apply_diarization(&store, &session_id, wav, ev);
+        }
+    }
+    if !keep_audio {
+        if let Some(wav) = others_wav.as_ref() {
+            let _ = std::fs::remove_file(wav);
+        }
+    }
+
     let _ = ev.send(Event::Status(Status::Idle));
     shutdown
 }

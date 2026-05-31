@@ -16,6 +16,8 @@ parakeet = ["zord-transcribe/parakeet"]
 encryption = ["zord-store/encryption", "zord-config/encryption"]
 # Enable local LLM summaries (llama.cpp).
 summaries = ["dep:zord-summarize", "zord-summarize/llama"]
+# Enable per-speaker diarization (sherpa-onnx).
+diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 
 [dependencies]
 zord-core = { workspace = true }
@@ -31,4 +33,5 @@ tracing-subscriber = { workspace = true }
 dioxus = { version = "0.7", features = ["desktop"] }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 zord-summarize = { workspace = true, optional = true }
+zord-diarize = { workspace = true, optional = true }
 arboard = "3"

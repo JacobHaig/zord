@@ -16,6 +16,8 @@ parakeet = ["zord-transcribe/parakeet"]
 encryption = ["zord-store/encryption", "zord-config/encryption", "dep:rpassword"]
 # Enable local LLM summaries (llama.cpp).
 summaries = ["dep:zord-summarize", "zord-summarize/llama"]
+# Enable per-speaker diarization (sherpa-onnx).
+diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 
 [dependencies]
 zord-core = { workspace = true }
@@ -33,3 +35,4 @@ clap = { version = "4", features = ["derive"] }
 hound = "3.5"
 rpassword = { version = "7", optional = true }
 zord-summarize = { workspace = true, optional = true }
+zord-diarize = { workspace = true, optional = true }
