@@ -70,25 +70,39 @@ pub enum Event {
     Summary(Option<String>),
 }
 
-/// A model in the catalog plus whether it's downloaded locally.
+/// A model in the catalog plus whether it's downloaded locally. `kind` is
+/// "transcription" or "summary" so the UI can group them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelInfo {
     pub name: String,
     pub size: String,
     pub description: String,
     pub downloaded: bool,
+    pub kind: String,
 }
 
 fn catalog() -> Vec<ModelInfo> {
-    ModelId::listed()
+    let mut models: Vec<ModelInfo> = ModelId::listed()
         .iter()
         .map(|&m| ModelInfo {
             name: m.name().to_string(),
             size: m.size_label().to_string(),
             description: m.description().to_string(),
             downloaded: zord_transcribe::is_downloaded(m),
+            kind: "transcription".to_string(),
         })
-        .collect()
+        .collect();
+    #[cfg(feature = "summaries")]
+    for &m in zord_summarize::SummaryModel::ALL {
+        models.push(ModelInfo {
+            name: m.name().to_string(),
+            size: m.size_label().to_string(),
+            description: m.label().to_string(),
+            downloaded: zord_summarize::summary_model_present(m),
+            kind: "summary".to_string(),
+        });
+    }
+    models
 }
 
 /// Commands controlling recording.
@@ -261,25 +275,43 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 let _ = ev.send(Event::Models(catalog()));
             }
             ModelCmd::Download(name) => {
-                if let Some(model) = ModelId::parse(&name) {
-                    let ev2 = ev.clone();
-                    let name2 = name.clone();
-                    let res = ensure_model(model, &mut |done, total| {
-                        if let Some(total) = total.filter(|t| *t > 0) {
-                            let pct = (done * 100 / total) as u8;
-                            let _ = ev2.send(Event::ModelProgress {
-                                name: name2.clone(),
-                                pct,
-                            });
-                        }
-                    });
-                    if let Err(e) = res {
+                let ev2 = ev.clone();
+                let name2 = name.clone();
+                let mut progress = move |done: u64, total: Option<u64>| {
+                    if let Some(total) = total.filter(|t| *t > 0) {
+                        let pct = (done * 100 / total) as u8;
+                        let _ = ev2.send(Event::ModelProgress {
+                            name: name2.clone(),
+                            pct,
+                        });
+                    }
+                };
+                #[cfg(feature = "summaries")]
+                let handled_summary = if let Some(sm) = zord_summarize::SummaryModel::parse(&name) {
+                    if let Err(e) = zord_summarize::ensure_summary_model(sm, &mut progress) {
                         let _ = ev.send(Event::Notice(format!("download failed: {e}")));
+                    }
+                    true
+                } else {
+                    false
+                };
+                #[cfg(not(feature = "summaries"))]
+                let handled_summary = false;
+
+                if !handled_summary {
+                    if let Some(model) = ModelId::parse(&name) {
+                        if let Err(e) = ensure_model(model, &mut progress) {
+                            let _ = ev.send(Event::Notice(format!("download failed: {e}")));
+                        }
                     }
                 }
                 let _ = ev.send(Event::Models(catalog()));
             }
             ModelCmd::Delete(name) => {
+                #[cfg(feature = "summaries")]
+                if let Some(sm) = zord_summarize::SummaryModel::parse(&name) {
+                    let _ = zord_summarize::delete_summary_model(sm);
+                }
                 if let Some(model) = ModelId::parse(&name) {
                     let _ = zord_transcribe::delete_model(model);
                 }

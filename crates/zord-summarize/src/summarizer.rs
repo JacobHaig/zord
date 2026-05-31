@@ -84,6 +84,17 @@ fn models_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Delete a downloaded summary model (no-op if absent).
+pub fn delete_summary_model(model: SummaryModel) -> Result<()> {
+    if let Ok(dir) = models_dir() {
+        let path = dir.join(model.filename());
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("deleting {path:?}"))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn summary_model_present(model: SummaryModel) -> bool {
     models_dir()
         .map(|d| d.join(model.filename()))

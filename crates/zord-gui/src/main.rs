@@ -647,7 +647,7 @@ fn MainApp() -> Element {
                                 section { class: "settings-section",
                                     h3 { "Transcription model" }
                                     p { class: "field-note", "Pick a downloaded model, or download another. Bigger = more accurate but slower; the quantized turbo is the best all-round." }
-                                    for m in models.read().iter() {
+                                    for m in models.read().iter().filter(|m| m.kind == "transcription") {
                                         {
                                             let name = m.name.clone();
                                             let selected = name == current;
@@ -766,7 +766,81 @@ fn MainApp() -> Element {
                                     }
                                 }
 
-                                SummarySettings { settings }
+                                section { class: "settings-section",
+                                    h3 { "Summaries" }
+                                    {
+                                        let summary_models: Vec<ModelInfo> = models
+                                            .read()
+                                            .iter()
+                                            .filter(|m| m.kind == "summary")
+                                            .cloned()
+                                            .collect();
+                                        let cur_sum = settings.read().summary_model.clone();
+                                        if summary_models.is_empty() {
+                                            rsx! {
+                                                p { class: "field-note", "Build with `--features summaries` to enable local AI summaries." }
+                                            }
+                                        } else {
+                                            rsx! {
+                                                p { class: "field-note", "Download and pick the summary model. Bigger = better notes but slower." }
+                                                for m in summary_models.iter() {
+                                                    {
+                                                        let name = m.name.clone();
+                                                        let selected = name == cur_sum;
+                                                        let dl = match &progress {
+                                                            Some((n, p)) if *n == name => Some(*p),
+                                                            _ => None,
+                                                        };
+                                                        let eng_dl = engine.clone();
+                                                        let eng_del = engine.clone();
+                                                        let (n_sel, n_dl, n_del) = (name.clone(), name.clone(), name.clone());
+                                                        rsx! {
+                                                            div { key: "{name}", class: if selected { "model-row sel" } else { "model-row" },
+                                                                div { class: "model-main",
+                                                                    div { class: "model-name", "{m.name}" }
+                                                                    div { class: "model-desc", "{m.description} · {m.size}" }
+                                                                }
+                                                                div { class: "model-actions",
+                                                                    if m.downloaded {
+                                                                        button {
+                                                                            class: "mbtn",
+                                                                            disabled: selected,
+                                                                            onclick: move |_| {
+                                                                                let mut s = settings.peek().clone();
+                                                                                s.summary_model = n_sel.clone();
+                                                                                let _ = s.save();
+                                                                                settings.set(s);
+                                                                            },
+                                                                            if selected { "Selected" } else { "Select" }
+                                                                        }
+                                                                        button {
+                                                                            class: "mbtn ghost",
+                                                                            disabled: selected,
+                                                                            onclick: move |_| { let _ = eng_del.model_tx.send(ModelCmd::Delete(n_del.clone())); },
+                                                                            "Delete"
+                                                                        }
+                                                                    } else if let Some(p) = dl {
+                                                                        div { class: "dl-prog",
+                                                                            div { class: "dl-bar", style: "width: {p}%" }
+                                                                            span { class: "dl-txt", "Downloading… {p}%" }
+                                                                        }
+                                                                    } else {
+                                                                        button {
+                                                                            class: "mbtn",
+                                                                            onclick: move |_| { let _ = eng_dl.model_tx.send(ModelCmd::Download(n_dl.clone())); },
+                                                                            "Download"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                SummaryPromptSettings { settings }
+                                            }
+                                        }
+                                    }
+                                }
 
                                 EncryptionSettings { settings, notice }
 
@@ -796,84 +870,52 @@ fn MainApp() -> Element {
     }
 }
 
-#[cfg(feature = "summaries")]
+/// Summary style preset + editable system prompt. Uses only zord-config, so it
+/// compiles regardless of the `summaries` feature (rendered next to the summary
+/// model list, which is the part that needs the feature).
 #[component]
-fn SummarySettings(settings: Signal<Settings>) -> Element {
+fn SummaryPromptSettings(settings: Signal<Settings>) -> Element {
     let s = settings.read().clone();
-    let current_model = s.summary_model.clone();
-    let model_present = zord_summarize::SummaryModel::parse(&current_model)
-        .map(zord_summarize::summary_model_present)
-        .unwrap_or(false);
     let effective = s.effective_summary_prompt();
     rsx! {
-        section { class: "settings-section",
-            h3 { "Summaries" }
-            div { class: "field",
-                label { "Model" }
-                select {
-                    onchange: move |e: FormEvent| {
-                        let mut s = settings.peek().clone();
-                        s.summary_model = e.value();
-                        let _ = s.save();
-                        settings.set(s);
-                    },
-                    for m in zord_summarize::SummaryModel::ALL.iter() {
-                        option { value: "{m.name()}", selected: current_model == m.name(), "{m.label()} ({m.size_label()})" }
-                    }
-                }
-                p { class: "field-note", if model_present { "Downloaded." } else { "Downloads on first summarize." } }
-            }
-            div { class: "field",
-                label { "Style preset" }
-                select {
-                    onchange: move |e: FormEvent| {
-                        let mut s = settings.peek().clone();
-                        s.summary_preset = e.value();
-                        s.summary_prompt = None; // switch to the preset's prompt
-                        let _ = s.save();
-                        settings.set(s);
-                    },
-                    for (id, label, _) in zord_config::summary_presets().iter() {
-                        option { value: "{id}", selected: s.summary_preset == *id, "{label}" }
-                    }
-                }
-            }
-            div { class: "field",
-                label { "System prompt" }
-                textarea {
-                    class: "prompt-edit",
-                    rows: "5",
-                    value: "{effective}",
-                    oninput: move |e: FormEvent| {
-                        let mut s = settings.peek().clone();
-                        s.summary_prompt = Some(e.value());
-                        settings.set(s); // saved on blur to avoid per-keystroke writes
-                    },
-                    onfocusout: move |_| { let _ = settings.peek().save(); },
-                }
-                button {
-                    class: "mbtn ghost",
-                    onclick: move |_| {
-                        let mut s = settings.peek().clone();
-                        s.summary_prompt = None;
-                        let _ = s.save();
-                        settings.set(s);
-                    },
-                    "Reset to preset"
+        div { class: "field",
+            label { "Style preset" }
+            select {
+                onchange: move |e: FormEvent| {
+                    let mut s = settings.peek().clone();
+                    s.summary_preset = e.value();
+                    s.summary_prompt = None; // switch to the preset's prompt
+                    let _ = s.save();
+                    settings.set(s);
+                },
+                for (id, label, _) in zord_config::summary_presets().iter() {
+                    option { value: "{id}", selected: s.summary_preset == *id, "{label}" }
                 }
             }
         }
-    }
-}
-
-#[cfg(not(feature = "summaries"))]
-#[component]
-fn SummarySettings(settings: Signal<Settings>) -> Element {
-    let _ = settings;
-    rsx! {
-        section { class: "settings-section",
-            h3 { "Summaries" }
-            p { class: "field-note", "Build with `--features summaries` to enable local AI summaries." }
+        div { class: "field",
+            label { "System prompt" }
+            textarea {
+                class: "prompt-edit",
+                rows: "5",
+                value: "{effective}",
+                oninput: move |e: FormEvent| {
+                    let mut s = settings.peek().clone();
+                    s.summary_prompt = Some(e.value());
+                    settings.set(s); // saved on blur to avoid per-keystroke writes
+                },
+                onfocusout: move |_| { let _ = settings.peek().save(); },
+            }
+            button {
+                class: "mbtn ghost",
+                onclick: move |_| {
+                    let mut s = settings.peek().clone();
+                    s.summary_prompt = None;
+                    let _ = s.save();
+                    settings.set(s);
+                },
+                "Reset to preset"
+            }
         }
     }
 }
