@@ -55,6 +55,9 @@ pub struct Word {
 /// A transcribed utterance segment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Segment {
+    /// Database row id, populated on read. `None` for freshly-built segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
     pub source: Source,
     /// Milliseconds from session start.
     pub t_start_ms: u64,

@@ -98,6 +98,8 @@ pub enum RecorderCmd {
         keep_audio: bool,
         input_device: Option<String>,
         audio_dir: PathBuf,
+        record_mic: bool,
+        record_system: bool,
     },
     Stop,
     /// Stop the engine entirely (process exit normally handles this; kept for
@@ -387,12 +389,22 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 keep_audio,
                 input_device,
                 audio_dir,
+                record_mic,
+                record_system,
             } => {
+                // Guard: if neither was requested, record both.
+                let (record_mic, record_system) = if !record_mic && !record_system {
+                    (true, true)
+                } else {
+                    (record_mic, record_system)
+                };
                 let opts = SessionOpts {
                     model,
                     keep_audio,
                     input_device,
                     audio_dir,
+                    record_mic,
+                    record_system,
                 };
                 if run_session(opts, &rx, &ev, &db_path) {
                     break; // session ended due to Shutdown
@@ -414,6 +426,8 @@ struct SessionOpts {
     keep_audio: bool,
     input_device: Option<String>,
     audio_dir: PathBuf,
+    record_mic: bool,
+    record_system: bool,
 }
 
 /// Run one recording session. Returns `true` if it ended because of `Shutdown`.
@@ -428,6 +442,8 @@ fn run_session(
         keep_audio,
         input_device,
         audio_dir,
+        record_mic,
+        record_system,
     } = opts;
     let _ = ev.send(Event::Status(Status::PreparingModel));
     let model_path = {
@@ -483,29 +499,39 @@ fn run_session(
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let mut procs = Vec::new();
 
-    // Microphone (required).
-    let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
-    let mic = match Microphone::start_with(mic_tx, input_device.as_deref()) {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = ev.send(Event::Status(Status::Error(format!("microphone: {e}"))));
-            return false;
+    // Microphone ("Me") — only if the capture mode includes it.
+    let mic = if record_mic {
+        let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
+        match Microphone::start_with(mic_tx, input_device.as_deref()) {
+            Ok(m) => {
+                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me")));
+                Some(m)
+            }
+            Err(e) => {
+                let _ = ev.send(Event::Status(Status::Error(format!("microphone: {e}"))));
+                return false;
+            }
         }
+    } else {
+        None
     };
-    procs.push(spawn_proc(mic_rx, mic.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me")));
 
-    // System audio (optional).
-    let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
-    let system = match SystemAudio::start(sys_tx) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            let _ = ev.send(Event::Notice(format!("System audio off: {e}")));
-            None
+    // System audio ("Others") — optional; only if the capture mode includes it.
+    let system = if record_system {
+        let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
+        match SystemAudio::start(sys_tx) {
+            Ok(s) => {
+                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), wav_path("others")));
+                Some(s)
+            }
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("System audio off: {e}")));
+                None
+            }
         }
+    } else {
+        None
     };
-    if let Some(sys) = &system {
-        procs.push(spawn_proc(sys_rx, sys.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), wav_path("others")));
-    }
     drop(job_tx);
 
     let _ = ev.send(Event::Status(Status::Recording));

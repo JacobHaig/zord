@@ -35,6 +35,54 @@ pub struct Settings {
     /// Likewise, request decrypting on next launch.
     #[serde(default)]
     pub decrypt_pending: bool,
+    /// Which audio to record: "both" | "mic" | "system".
+    #[serde(default = "default_capture_mode")]
+    pub capture_mode: String,
+    /// Summary LLM id (see zord-summarize catalog).
+    #[serde(default = "default_summary_model")]
+    pub summary_model: String,
+    /// Summary style preset id (see `summary_presets`).
+    #[serde(default = "default_summary_preset")]
+    pub summary_preset: String,
+    /// Freeform system-prompt override; `None`/empty = use the preset.
+    #[serde(default)]
+    pub summary_prompt: Option<String>,
+}
+
+fn default_capture_mode() -> String {
+    "both".to_string()
+}
+fn default_summary_model() -> String {
+    "qwen2.5-3b-instruct".to_string()
+}
+fn default_summary_preset() -> String {
+    "balanced".to_string()
+}
+
+/// Summary style presets: (id, label, system prompt).
+pub fn summary_presets() -> &'static [(&'static str, &'static str, &'static str)] {
+    &[
+        (
+            "balanced",
+            "Balanced (TL;DR + points + actions)",
+            "You are a meeting-notes assistant. The transcript is labeled by speaker: \"Me\" is the local user, \"Others\" is everyone else. Produce concise Markdown with three sections: a one-sentence **TL;DR**, a short **Key points** bullet list, and **Action items** (who + what) if any. Be faithful to the transcript and do not invent details.",
+        ),
+        (
+            "bullets",
+            "Bulleted key points",
+            "Summarize the transcript as a tight Markdown bullet list of the main points, in order. No preamble, no headings. Be faithful; don't invent details.",
+        ),
+        (
+            "exec",
+            "Executive brief",
+            "Write a 2–3 sentence executive brief of the transcript capturing the key decisions and outcomes. Plain prose, no bullet points. Be faithful; don't invent details.",
+        ),
+        (
+            "actions",
+            "Action items only",
+            "Extract only the action items from the transcript as a Markdown checklist: who is responsible, what they will do, and any due date mentioned. If there are none, say \"No action items.\"",
+        ),
+    ]
 }
 
 impl Default for Settings {
@@ -48,7 +96,28 @@ impl Default for Settings {
             encrypted: false,
             encrypt_pending: false,
             decrypt_pending: false,
+            capture_mode: default_capture_mode(),
+            summary_model: default_summary_model(),
+            summary_preset: default_summary_preset(),
+            summary_prompt: None,
         }
+    }
+}
+
+impl Settings {
+    /// The system prompt to summarize with: the custom override if set,
+    /// otherwise the selected preset's prompt (falling back to "balanced").
+    pub fn effective_summary_prompt(&self) -> String {
+        if let Some(p) = self.summary_prompt.as_ref().filter(|p| !p.trim().is_empty()) {
+            return p.clone();
+        }
+        let presets = summary_presets();
+        presets
+            .iter()
+            .find(|(id, _, _)| *id == self.summary_preset)
+            .or_else(|| presets.first())
+            .map(|(_, _, prompt)| prompt.to_string())
+            .unwrap_or_default()
     }
 }
 

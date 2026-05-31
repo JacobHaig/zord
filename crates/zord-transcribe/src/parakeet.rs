@@ -62,6 +62,7 @@ impl TranscribeBackend for ParakeetBackend {
         // audio, so emit a single segment spanning this chunk.
         let dur_ms = samples.len() as u64 * 1000 / zord_core::WHISPER_SAMPLE_RATE as u64;
         Ok(vec![Segment {
+            id: None,
             source,
             t_start_ms: base_offset_ms,
             t_end_ms: base_offset_ms + dur_ms,

@@ -33,42 +33,59 @@ pub fn run_record(
     session_id: &str,
     seconds: u64,
     keep_audio: Option<PathBuf>,
+    record_mic: bool,
+    record_system: bool,
 ) -> Result<usize> {
+    // If neither was requested, record both.
+    let (record_mic, record_system) = if !record_mic && !record_system {
+        (true, true)
+    } else {
+        (record_mic, record_system)
+    };
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let mut procs = Vec::new();
 
-    // --- Microphone ("Me"): required. ---
-    let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
-    let mic = Microphone::start(mic_tx)?;
-    procs.push(spawn_proc(
-        mic_rx,
-        mic.sample_rate(),
-        Source::Me,
-        session_start,
-        job_tx.clone(),
-        keep_audio.as_deref().map(|p| derive_path(p, "me")),
-    ));
-
-    // --- System audio ("Others"): optional; degrade to mic-only on failure. ---
-    let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
-    let system = match SystemAudio::start(sys_tx) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("⚠ system audio unavailable ({e}). Recording microphone only.");
-            None
-        }
-    };
-    if let Some(sys) = &system {
+    // --- Microphone ("Me") ---
+    let mic = if record_mic {
+        let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
+        let mic = Microphone::start(mic_tx)?;
         procs.push(spawn_proc(
-            sys_rx,
-            sys.sample_rate(),
-            Source::Others,
+            mic_rx,
+            mic.sample_rate(),
+            Source::Me,
             session_start,
             job_tx.clone(),
-            keep_audio.as_deref().map(|p| derive_path(p, "others")),
+            keep_audio.as_deref().map(|p| derive_path(p, "me")),
         ));
-    }
+        Some(mic)
+    } else {
+        None
+    };
+
+    // --- System audio ("Others"): optional; degrade on failure. ---
+    let system = if record_system {
+        let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
+        match SystemAudio::start(sys_tx) {
+            Ok(s) => {
+                procs.push(spawn_proc(
+                    sys_rx,
+                    s.sample_rate(),
+                    Source::Others,
+                    session_start,
+                    job_tx.clone(),
+                    keep_audio.as_deref().map(|p| derive_path(p, "others")),
+                ));
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("⚠ system audio unavailable ({e}). Recording microphone only.");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     drop(job_tx); // remaining senders are the proc clones; job_rx closes when they finish
 

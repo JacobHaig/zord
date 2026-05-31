@@ -330,11 +330,18 @@ fn MainApp() -> Element {
                 let s = settings.peek().clone();
                 let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
                 let audio_dir = s.audio_dir().unwrap_or_else(|_| PathBuf::from("audio"));
+                let (record_mic, record_system) = match s.capture_mode.as_str() {
+                    "mic" => (true, false),
+                    "system" => (false, true),
+                    _ => (true, true),
+                };
                 let _ = engine.rec_tx.send(RecorderCmd::Start {
                     model,
                     keep_audio: s.keep_audio,
                     input_device: s.input_device.clone(),
                     audio_dir,
+                    record_mic,
+                    record_system,
                 });
             }
         }

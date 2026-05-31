@@ -68,6 +68,7 @@ impl TranscribeBackend for WhisperBackend {
             let t0 = segment.start_timestamp().max(0) as u64 * 10;
             let t1 = segment.end_timestamp().max(0) as u64 * 10;
             out.push(Segment {
+                id: None,
                 source,
                 t_start_ms: base_offset_ms + t0,
                 t_end_ms: base_offset_ms + t1,

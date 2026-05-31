@@ -36,6 +36,9 @@ enum Cmd {
         /// Optionally retain the captured audio to this WAV path.
         #[arg(long)]
         keep_audio: Option<PathBuf>,
+        /// What to capture: both | mic | system. Defaults to the config setting.
+        #[arg(long)]
+        capture: Option<String>,
     },
     /// Transcribe an existing WAV file (verifies the pipeline without a mic).
     File {
@@ -125,7 +128,8 @@ fn main() -> Result<()> {
             model,
             db,
             keep_audio,
-        } => cmd_record(seconds, &model, db, keep_audio),
+            capture,
+        } => cmd_record(seconds, &model, db, keep_audio, capture),
         Cmd::File { path, model, db } => cmd_file(path, &model, db),
         Cmd::Show { session_id, db } => cmd_show(&session_id, db),
         Cmd::Search { query, db } => cmd_search(&query, db),
@@ -410,9 +414,16 @@ fn cmd_record(
     model: &str,
     db: Option<PathBuf>,
     keep_audio: Option<PathBuf>,
+    capture: Option<String>,
 ) -> Result<()> {
     let model_id = ModelId::parse(model)
         .with_context(|| format!("unknown model '{model}'"))?;
+    let mode = capture.unwrap_or_else(|| zord_config::Settings::load().capture_mode);
+    let (record_mic, record_system) = match mode.as_str() {
+        "mic" => (true, false),
+        "system" => (false, true),
+        _ => (true, true),
+    };
 
     // Ensure the model exists locally (download on first run, with progress).
     eprintln!("Preparing model '{}'...", model_id.name());
@@ -438,7 +449,13 @@ fn cmd_record(
         model: model_id.name().to_string(),
     })?;
 
-    eprintln!("Session {session_id} — recording microphone (Me) + system audio (Others).");
+    let what = match (record_mic, record_system) {
+        (true, true) => "microphone (Me) + system audio (Others)",
+        (true, false) => "microphone (Me) only",
+        (false, true) => "system audio (Others) only",
+        _ => "audio",
+    };
+    eprintln!("Session {session_id} — recording {what}.");
     if seconds == 0 {
         eprintln!("Press Enter to stop.");
     } else {
@@ -452,6 +469,8 @@ fn cmd_record(
         &session_id,
         seconds,
         keep_audio,
+        record_mic,
+        record_system,
     )?;
 
     store.end_session(&session_id, now_ms())?;

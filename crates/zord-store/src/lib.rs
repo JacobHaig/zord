@@ -247,7 +247,7 @@ impl Store {
     /// All segments for a session, ordered by time.
     pub fn segments(&self, session_id: &str) -> Result<Vec<Segment>> {
         let mut stmt = self.conn.prepare(
-            "SELECT source, t_start_ms, t_end_ms, text, words_json
+            "SELECT id, source, t_start_ms, t_end_ms, text, words_json
              FROM segments WHERE session_id = ?1 ORDER BY t_start_ms",
         )?;
         let rows = stmt.query_map(params![session_id], row_to_segment)?;
@@ -257,7 +257,7 @@ impl Store {
     /// Full-text search across all transcripts. Returns (session_id, segment).
     pub fn search(&self, query: &str) -> Result<Vec<(String, Segment)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.session_id, s.source, s.t_start_ms, s.t_end_ms, s.text, s.words_json
+            "SELECT s.session_id, s.id, s.source, s.t_start_ms, s.t_end_ms, s.text, s.words_json
              FROM segments_fts f
              JOIN segments s ON s.id = f.rowid
              WHERE segments_fts MATCH ?1
@@ -269,6 +269,13 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// Edit a segment's text in place (FTS stays in sync via the UPDATE trigger).
+    pub fn update_segment_text(&self, id: i64, text: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE segments SET text = ?2 WHERE id = ?1", params![id, text])?;
+        Ok(())
+    }
 }
 
 fn row_to_segment(r: &rusqlite::Row) -> rusqlite::Result<Segment> {
@@ -276,19 +283,21 @@ fn row_to_segment(r: &rusqlite::Row) -> rusqlite::Result<Segment> {
 }
 
 fn row_to_segment_offset(r: &rusqlite::Row, off: usize) -> rusqlite::Result<Segment> {
-    let source_str: String = r.get(off)?;
-    let words_json: Option<String> = r.get(off + 4)?;
+    let id: Option<i64> = r.get(off)?;
+    let source_str: String = r.get(off + 1)?;
+    let words_json: Option<String> = r.get(off + 5)?;
     let words: Vec<Word> = words_json
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
     Ok(Segment {
+        id,
         source: match source_str.as_str() {
             "me" => Source::Me,
             _ => Source::Others,
         },
-        t_start_ms: r.get(off + 1)?,
-        t_end_ms: r.get(off + 2)?,
-        text: r.get(off + 3)?,
+        t_start_ms: r.get(off + 2)?,
+        t_end_ms: r.get(off + 3)?,
+        text: r.get(off + 4)?,
         words,
     })
 }
