@@ -122,6 +122,10 @@ pub enum DbCmd {
         title: String,
     },
     DeleteSession(String),
+    EditSegment {
+        segment_id: i64,
+        text: String,
+    },
 }
 
 /// Model-management commands (download/delete can take minutes, so they run on
@@ -341,6 +345,9 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 if let Ok(v) = store.list_sessions() {
                     let _ = ev.send(Event::Sessions(v));
                 }
+            }
+            DbCmd::EditSegment { segment_id, text } => {
+                let _ = store.update_segment_text(segment_id, &text);
             }
         }
     }

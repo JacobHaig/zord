@@ -199,3 +199,6 @@ body {
 .line.others .who { color: var(--others); }
 .text { color: var(--text); }
 .src { color: var(--muted); font-size: 11px; }
+.line-edit { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--me); border-radius: 6px; padding: 4px 8px; font: inherit; outline: none; }
+.prompt-edit { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px/1.4 ui-monospace, monospace; outline: none; resize: vertical; }
+.prompt-edit:focus { border-color: var(--me); }

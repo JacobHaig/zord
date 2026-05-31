@@ -32,6 +32,23 @@ pub fn reveal_in_file_manager(path: &str) {
     }
 }
 
+/// Open a folder in the OS file manager.
+pub fn open_folder(path: &str) {
+    let p = Path::new(path);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(p).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("explorer").arg(p).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(p).spawn();
+    }
+}
+
 /// Copy `text` to the system clipboard. Best-effort.
 pub fn copy_to_clipboard(text: &str) {
     if let Ok(mut cb) = arboard::Clipboard::new() {

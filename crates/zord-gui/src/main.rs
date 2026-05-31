@@ -360,6 +360,17 @@ fn MainApp() -> Element {
         }
     };
 
+    // Persist an inline transcript edit, then reload the open session.
+    let on_edit_segment = {
+        let engine = engine.clone();
+        move |(segment_id, text): (i64, String)| {
+            let _ = engine.db_tx.send(DbCmd::EditSegment { segment_id, text });
+            if let View::Session(sid) = &*view.peek() {
+                let _ = engine.db_tx.send(DbCmd::Load(sid.clone()));
+            }
+        }
+    };
+
     rsx! {
         style { dangerous_inner_html: CSS }
         div { class: "app",
@@ -583,7 +594,7 @@ fn MainApp() -> Element {
                     if *view.read() == View::Search {
                         SearchResultsView { results: search_results }
                     } else {
-                        TranscriptView { segments }
+                        TranscriptView { segments, on_edit: on_edit_segment }
                     }
                 }
             }
@@ -709,7 +720,20 @@ fn MainApp() -> Element {
                                             }
                                         }
                                     }
-                                    p { class: "field-note", "Desktop / system audio (the “Others” channel) is captured automatically." }
+                                    div { class: "field",
+                                        label { "Capture" }
+                                        select {
+                                            onchange: move |e: FormEvent| {
+                                                let mut s = settings.peek().clone();
+                                                s.capture_mode = e.value();
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            option { value: "both", selected: settings.read().capture_mode == "both", "Microphone + system audio" }
+                                            option { value: "mic", selected: settings.read().capture_mode == "mic", "Microphone only (Me)" }
+                                            option { value: "system", selected: settings.read().capture_mode == "system", "System audio only (Others)" }
+                                        }
+                                    }
                                 }
 
                                 section { class: "settings-section",
@@ -742,7 +766,22 @@ fn MainApp() -> Element {
                                     }
                                 }
 
+                                SummarySettings { settings }
+
                                 EncryptionSettings { settings, notice }
+
+                                section { class: "settings-section",
+                                    h3 { "Storage" }
+                                    button {
+                                        class: "mbtn",
+                                        onclick: move |_| {
+                                            if let Ok(dir) = settings.peek().storage_dir() {
+                                                osutil::open_folder(&dir.display().to_string());
+                                            }
+                                        },
+                                        "Open data folder"
+                                    }
+                                }
 
                                 section { class: "settings-section",
                                     h3 { "About" }
@@ -753,6 +792,88 @@ fn MainApp() -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(feature = "summaries")]
+#[component]
+fn SummarySettings(settings: Signal<Settings>) -> Element {
+    let s = settings.read().clone();
+    let current_model = s.summary_model.clone();
+    let model_present = zord_summarize::SummaryModel::parse(&current_model)
+        .map(zord_summarize::summary_model_present)
+        .unwrap_or(false);
+    let effective = s.effective_summary_prompt();
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Summaries" }
+            div { class: "field",
+                label { "Model" }
+                select {
+                    onchange: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.summary_model = e.value();
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    for m in zord_summarize::SummaryModel::ALL.iter() {
+                        option { value: "{m.name()}", selected: current_model == m.name(), "{m.label()} ({m.size_label()})" }
+                    }
+                }
+                p { class: "field-note", if model_present { "Downloaded." } else { "Downloads on first summarize." } }
+            }
+            div { class: "field",
+                label { "Style preset" }
+                select {
+                    onchange: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.summary_preset = e.value();
+                        s.summary_prompt = None; // switch to the preset's prompt
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    for (id, label, _) in zord_config::summary_presets().iter() {
+                        option { value: "{id}", selected: s.summary_preset == *id, "{label}" }
+                    }
+                }
+            }
+            div { class: "field",
+                label { "System prompt" }
+                textarea {
+                    class: "prompt-edit",
+                    rows: "5",
+                    value: "{effective}",
+                    oninput: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.summary_prompt = Some(e.value());
+                        settings.set(s); // saved on blur to avoid per-keystroke writes
+                    },
+                    onfocusout: move |_| { let _ = settings.peek().save(); },
+                }
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.summary_prompt = None;
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    "Reset to preset"
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "summaries"))]
+#[component]
+fn SummarySettings(settings: Signal<Settings>) -> Element {
+    let _ = settings;
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Summaries" }
+            p { class: "field-note", "Build with `--features summaries` to enable local AI summaries." }
         }
     }
 }
@@ -845,19 +966,58 @@ fn Meter(label: String, level: Signal<f32>, kind: String) -> Element {
 }
 
 #[component]
-fn TranscriptView(segments: Signal<Vec<Segment>>) -> Element {
+fn TranscriptView(segments: Signal<Vec<Segment>>, on_edit: EventHandler<(i64, String)>) -> Element {
+    let mut editing = use_signal(|| Option::<i64>::None);
+    let mut buf = use_signal(String::new);
     let segs = segments.read();
     if segs.is_empty() {
         return rsx! { div { class: "empty", "Press Record, or pick a session." } };
     }
     rsx! {
         for seg in segs.iter() {
-            div {
-                key: "{seg.source.as_str()}-{seg.t_start_ms}",
-                class: "line {source_class(seg.source)}",
-                span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
-                span { class: "who", "{seg.source.label()}" }
-                span { class: "text", "{seg.text}" }
+            {
+                let sid = seg.id;
+                let is_editing = sid.is_some() && *editing.read() == sid;
+                let text = seg.text.clone();
+                let text_for_edit = text.clone();
+                rsx! {
+                    div {
+                        key: "{seg.source.as_str()}-{seg.t_start_ms}",
+                        class: "line {source_class(seg.source)}",
+                        span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
+                        span { class: "who", "{seg.source.label()}" }
+                        if is_editing {
+                            input {
+                                class: "line-edit",
+                                value: "{buf}",
+                                autofocus: true,
+                                oninput: move |e| buf.set(e.value()),
+                                onkeydown: move |e| match e.key() {
+                                    Key::Enter => {
+                                        if let Some(id) = sid {
+                                            on_edit.call((id, buf.peek().clone()));
+                                        }
+                                        editing.set(None);
+                                    }
+                                    Key::Escape => editing.set(None),
+                                    _ => {}
+                                },
+                            }
+                        } else {
+                            span {
+                                class: "text",
+                                title: if sid.is_some() { "Double-click to edit" } else { "" },
+                                ondoubleclick: move |_| {
+                                    if sid.is_some() {
+                                        buf.set(text_for_edit.clone());
+                                        editing.set(sid);
+                                    }
+                                },
+                                "{text}"
+                            }
+                        }
+                    }
+                }
             }
         }
     }

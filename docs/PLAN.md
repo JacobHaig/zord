@@ -446,8 +446,18 @@ verification. Order is a suggestion, not fixed.
 - Deferred from the original list (fine to revisit later): global keyboard
   shortcuts; first-run onboarding hint.
 
-### Phase 15 — Configuration & use-case polish
-Close gaps surfaced in the post-Phase-14 review. Scope (chosen):
+### Phase 15 — Configuration & use-case polish  ✅ DONE
+Closed gaps from the post-14 review (verified: default + feature builds, GUI launches):
+- [x] Summary model selection (Qwen2.5 1.5B/3B/7B) + preset styles
+  (balanced/bullets/exec/actions) **and** editable prompt with reset — in
+  settings, used by CLI + GUI.
+- [x] Capture mode (mic/system/both) — settings dropdown + CLI `--capture`;
+  engine + pipeline start only the chosen sources.
+- [x] Inline transcript editing (double-click a line) → `update_segment_text`
+  (FTS-synced); `Segment.id` exposed.
+- [x] "Open data folder" button; summary section gated under `summaries`.
+
+Original scope notes:
 - **Summary model selection** — a small catalog of summary LLMs (e.g.
   Qwen2.5 1.5B / 3B / 7B Instruct, Q4_K_M); pick + download/select in settings.
   `Summarizer` + `ensure_summary_model` become model-parameterized.

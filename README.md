@@ -18,7 +18,10 @@ storage happen on your machine.
 - 🔎 **Searchable history** — every session stored in local SQLite with
   full-text search.
 - ✨ **Local AI summaries** *(optional)* — a local LLM (llama.cpp) turns a
-  session into Markdown notes (TL;DR / key points / action items), fully offline.
+  session into Markdown notes, fully offline. Pick the model (Qwen2.5 1.5B/3B/7B),
+  a style preset, or write your own prompt — all in settings.
+- 🎚️ **Configurable** — capture mic-only / system-only / both, edit transcript
+  lines inline, and tune summary model + prompt from the settings panel.
 - 📤 **Export** — Markdown, SRT, or JSON, with one-click **Reveal in
   Finder/Explorer** and **Open in editor**.
 - 🖥️ **Two front-ends** — a native desktop GUI (Dioxus) and a `localhost` web
