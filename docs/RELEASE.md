@@ -51,9 +51,20 @@ Verify: `spctl -a -vvv "$APP"` should report `accepted / source=Notarized`.
 
 ## 4. Automated releases (GitHub Actions)
 
-`.github/workflows/release.yml` builds the bundle on every `v*` tag (and on
-manual dispatch). The sign + notarize steps run **only if** these repository
-secrets are present — otherwise CI still uploads an unsigned artifact:
+`.github/workflows/release.yml` builds on every `v*` tag (and on manual
+dispatch), producing for **both macOS (Apple Silicon) and Windows (x64)**:
+
+- the GUI app bundle (`.app`/`.dmg` on macOS, `.exe`/`.msi` on Windows), and
+- the `zord` CLI binary (`zord-macos-arm64`, `zord-windows-x64.exe`).
+
+Both are built with the `FEATURES` set at the top of the workflow
+(`diarization,summaries,parakeet`). `encryption` is intentionally excluded from
+CI because its vendored OpenSSL needs Perl + NASM on the Windows runner — build
+locally with `--features encryption` if you need it. To change what ships, edit
+the single `FEATURES` env value.
+
+The sign + notarize steps (macOS only) run **only if** these repository secrets
+are present — otherwise CI still uploads an unsigned artifact:
 
 | Secret | Value |
 |---|---|

@@ -1,7 +1,7 @@
 name: Release
 
-# Build (and optionally sign/notarize) the macOS app on a version tag, then
-# attach the artifacts to a GitHub Release.
+# Build the macOS + Windows apps (GUI bundle + `zord` CLI) on a version tag,
+# optionally sign/notarize macOS, then attach everything to a GitHub Release.
 on:
   push:
     tags:
@@ -10,6 +10,12 @@ on:
 
 permissions:
   contents: write
+
+env:
+  # Optional engines bundled into the released apps. Kept in one place so both
+  # the GUI bundle and the CLI build stay in sync. (encryption is intentionally
+  # omitted — its vendored OpenSSL would need Perl + NASM on the Windows runner.)
+  FEATURES: "diarization,summaries,parakeet"
 
 jobs:
   macos:
@@ -36,7 +42,10 @@ jobs:
         run: cargo install dioxus-cli --version 0.7.9 --locked
 
       - name: Bundle app
-        run: dx bundle --release --package zord-gui --platform desktop
+        run: dx bundle --release --package zord-gui --platform desktop --features "${{ env.FEATURES }}"
+
+      - name: Build CLI
+        run: cargo build --release --package zord-app --features "${{ env.FEATURES }}"
 
       # ---- Optional: code-sign + notarize (only if secrets are set) ----
       - name: Import signing certificate
@@ -77,10 +86,12 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          # .app (zipped) and any .dmg dx produced.
+          # GUI: .app (zipped) and any .dmg dx produced.
           APP=$(find target -path "*bundle*" -name "*.app" -maxdepth 8 -type d | head -1)
           if [ -n "$APP" ]; then ditto -c -k --keepParent "$APP" "dist/Zord-macos-arm64.zip"; fi
           find target -name "*.dmg" -maxdepth 6 -exec cp {} dist/ \;
+          # CLI binary.
+          if [ -f target/release/zord ]; then cp target/release/zord dist/zord-macos-arm64; fi
           ls -la dist
 
       - name: Upload to release
@@ -88,6 +99,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true
 
       - name: Upload artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -112,13 +124,23 @@ jobs:
         run: cargo install dioxus-cli --version 0.7.9 --locked
 
       - name: Bundle app (WASAPI loopback + cpal mic, CPU whisper)
-        run: dx bundle --release --package zord-gui --platform desktop
+        run: dx bundle --release --package zord-gui --platform desktop --features "${{ env.FEATURES }}"
+
+      - name: Build CLI
+        run: cargo build --release --package zord-app --features "${{ env.FEATURES }}"
 
       - name: Collect artifacts
         shell: bash
         run: |
           mkdir -p dist
+          # GUI installer/exe from the bundle.
           find target -maxdepth 8 \( -name "*.msi" -o -name "*.exe" \) -path "*bundle*" -exec cp {} dist/ \; || true
+          # CLI binary.
+          if [ -f target/release/zord.exe ]; then cp target/release/zord.exe dist/zord-windows-x64.exe; fi
+          # Best-effort: gather any sherpa-onnx / onnxruntime DLLs the ONNX
+          # engines need at runtime, alongside the CLI. (GUI bundle DLL inclusion
+          # is verified separately — see note in the workflow PR.)
+          find target/release -maxdepth 2 -name "*.dll" \( -iname "*onnx*" -o -iname "*sherpa*" \) -exec cp {} dist/ \; || true
           ls -la dist
 
       - name: Upload to release
@@ -126,6 +148,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true
 
       - name: Upload artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
