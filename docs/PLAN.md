@@ -408,9 +408,17 @@ verification. Order is a suggestion, not fixed.
   roundtrip + CLI cycle verified here; GUI unlock/enable exercised by build+launch
   (full click-through is a user step).
 
-### Phase 12 — App icon & brand polish
-Design an icon set, wire `Dioxus.toml` `[bundle] icon`, rename the `.app` to
-`Zord.app`, tidy the in-app header/empty states.
+### Phase 12 — App icon & brand polish  ✅ DONE
+- [x] Icon rendered via `tools/make_icon.swift` (CoreGraphics) — brand meter
+  bars (blue/orange) on a dark rounded square. Assets in `crates/zord-gui/icons/`:
+  `icon.icns` (macOS), `icon.ico` (Windows, PNG-in-ICO), `icon.png` (1024) +
+  `icon-256.png` (runtime).
+- [x] Wired: `Dioxus.toml [bundle] icon`; bundle embeds `ZordGui.icns` with
+  `CFBundleIconFile` set in the (custom) Info.plist; runtime window/dock icon via
+  `dioxus::desktop::icon_from_memory`.
+- [x] Fixed the release CI `.app` glob (dx emits `ZordGui.app`, not `Zord.app`).
+- Note: the bundle **displays** as "Zord" (CFBundleName/DisplayName); the folder
+  is still `ZordGui.app` (dx derives it from the package name). Cosmetic only.
 
 ### Phase 13 — Local AI summaries / action items
 A local LLM (llama.cpp via a Rust binding) to summarise a session and extract

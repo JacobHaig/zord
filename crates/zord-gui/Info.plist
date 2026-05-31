@@ -22,6 +22,8 @@
     <string>io.zord.zord</string>
     <key>CFBundleExecutable</key>
     <string>zord-gui</string>
+    <key>CFBundleIconFile</key>
+    <string>ZordGui</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>

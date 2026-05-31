@@ -28,9 +28,12 @@ fn main() {
     let window = WindowBuilder::new()
         .with_title("Zord")
         .with_inner_size(LogicalSize::new(1120.0, 760.0));
-    LaunchBuilder::desktop()
-        .with_cfg(Config::new().with_window(window))
-        .launch(App);
+    let mut cfg = Config::new().with_window(window);
+    // Dock / taskbar icon when run directly (the bundle uses icons/icon.icns).
+    if let Ok(icon) = dioxus::desktop::icon_from_memory(include_bytes!("../icons/icon-256.png")) {
+        cfg = cfg.with_icon(icon);
+    }
+    LaunchBuilder::desktop().with_cfg(cfg).launch(App);
 }
 
 #[derive(Clone, PartialEq)]

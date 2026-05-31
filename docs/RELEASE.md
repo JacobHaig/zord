@@ -96,7 +96,7 @@ have a code-signing certificate.
 - **SQLCipher** at-rest encryption — implemented (PLAN Phase 11) behind
   `--features encryption`; the default release build omits it (avoids the
   OpenSSL/perl build).
-- **App icon** — planned (PLAN Phase 12): add an icon set + `Dioxus.toml`
-  `[bundle] icon` before a public release.
+- **App icon** — done (PLAN Phase 12): `crates/zord-gui/icons/` + `Dioxus.toml`
+  `[bundle] icon`. Regenerate with `swift tools/make_icon.swift out.png`.
 - **NVIDIA Parakeet** — build with `--features parakeet` (PLAN Phase 10); the
   release workflow currently builds the default (Whisper-only) configuration.

@@ -62,7 +62,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          APP=$(find target -name "Zord.app" -maxdepth 6 -type d | head -1)
+          APP=$(find target -path "*bundle*" -name "*.app" -maxdepth 8 -type d | head -1)
           echo "Signing $APP"
           codesign --deep --force --options runtime \
             --entitlements crates/zord-gui/entitlements.plist \
@@ -78,7 +78,7 @@ jobs:
         run: |
           mkdir -p dist
           # .app (zipped) and any .dmg dx produced.
-          APP=$(find target -name "Zord.app" -maxdepth 6 -type d | head -1)
+          APP=$(find target -path "*bundle*" -name "*.app" -maxdepth 8 -type d | head -1)
           if [ -n "$APP" ]; then ditto -c -k --keepParent "$APP" "dist/Zord-macos-arm64.zip"; fi
           find target -name "*.dmg" -maxdepth 6 -exec cp {} dist/ \;
           ls -la dist
