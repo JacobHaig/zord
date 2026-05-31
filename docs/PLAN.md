@@ -425,15 +425,19 @@ A local LLM (llama.cpp via a Rust binding) to summarise a session and extract
 action items, fully offline. New backend + model management entry + a "Summary"
 panel. Heavy; feature-gated like Parakeet.
 
-### Phase 14 — Meeting auto-detect
-Watch for active meeting apps (Teams/Zoom/Meet) and offer to auto-start/stop
-recording. Per-OS process/Window inspection; opt-in.
+### Phase 14 — UX polish pass
+A second layer of refinement (replaces the earlier meeting-auto-detect and
+custom-vocabulary ideas, deferred as out-of-scope for now). Candidate items, to
+be prioritized when we start:
+- Session management: rename / delete sessions; nicer titles (date/time +
+  duration) instead of `Recording <epoch>`.
+- Transcript niceties: copy line / copy all, auto-scroll-to-latest while
+  recording, a recording timer.
+- Keyboard shortcuts (record/stop, focus search) and confirm dialogs for
+  destructive actions (delete session/model).
+- Toast-style notices, clearer loading/empty states, first-run hint.
 
-### Phase 15 — Custom vocabulary
-Bias transcription toward names/jargon: Whisper `initial_prompt`, sherpa-onnx
-hotwords. A settings field + per-session override.
-
-### Phase 16 — Per-speaker diarization (within "Others")
+### Phase 15 — Per-speaker diarization (within "Others")
 Distinguish individual speakers inside the system channel (e.g. sherpa-onnx
 speaker-diarization / embeddings). Channel separation already covers Me-vs-Others;
 this adds Others → Speaker 1/2/3.
