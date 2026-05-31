@@ -68,6 +68,8 @@ pub enum Event {
     ModelProgress { name: String, pct: u8 },
     /// A session's summary (loaded or freshly generated). `None` = none yet.
     Summary(Option<String>),
+    /// Custom names for diarized speakers in the viewed session (index → name).
+    Speakers(std::collections::HashMap<i32, String>),
 }
 
 /// A model in the catalog plus whether it's downloaded locally. `kind` is
@@ -82,6 +84,8 @@ pub struct ModelInfo {
 }
 
 fn catalog() -> Vec<ModelInfo> {
+    // `mut` is used only when summary/diarization features push extra entries.
+    #[allow(unused_mut)]
     let mut models: Vec<ModelInfo> = ModelId::listed()
         .iter()
         .map(|&m| ModelInfo {
@@ -390,6 +394,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 if let Ok(v) = store.segments(&id) {
                     let _ = ev.send(Event::Transcript(v));
                 }
+                let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
                 let _ = ev.send(Event::Summary(store.get_summary(&id).ok().flatten()));
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
@@ -417,9 +422,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             }
             DbCmd::RenameSpeaker { id, speaker, name } => {
                 let _ = store.set_speaker_name(&id, speaker, &name);
-                if let Ok(v) = store.segments(&id) {
-                    let _ = ev.send(Event::Transcript(v));
-                }
+                let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
             }
             DbCmd::Diarize(id) => {
                 // Heavy (loads ONNX + clusters); run off the db thread so queries
@@ -552,6 +555,7 @@ fn apply_diarization(
     if let Ok(v) = store.segments(session_id) {
         let _ = ev.send(Event::Transcript(v));
     }
+    let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
     let _ = ev.send(Event::Notice(format!(
         "Identified {} speaker(s) in this conversation.",
         speakers.len()

@@ -209,6 +209,8 @@ fn MainApp() -> Element {
     let mut last_export = use_signal(|| Option::<String>::None);
     // Current session's AI summary, if any.
     let mut summary = use_signal(|| Option::<String>::None);
+    // Custom names for diarized speakers in the viewed session (index → name).
+    let mut speaker_names = use_signal(std::collections::HashMap::<i32, String>::new);
     // Session id currently being renamed (+ its edit buffer); pending delete.
     let mut editing = use_signal(|| Option::<String>::None);
     let mut edit_text = use_signal(String::new);
@@ -260,6 +262,7 @@ fn MainApp() -> Element {
                         model_progress.set(Some((name, pct)));
                     }
                     Event::Summary(v) => summary.set(v),
+                    Event::Speakers(v) => speaker_names.set(v),
                 }
             }
         });
@@ -326,6 +329,7 @@ fn MainApp() -> Element {
                 segments.write().clear();
                 notice.set(None);
                 summary.set(None);
+                speaker_names.write().clear();
                 view.set(View::Live);
                 let s = settings.peek().clone();
                 let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
@@ -506,6 +510,8 @@ fn MainApp() -> Element {
                         let engine = engine.clone();
                         let sid = id.clone();
                         let eng_sum = engine.clone();
+                        let eng_diar = engine.clone();
+                        let sid_diar = id.clone();
                         let mk = move |fmt: Format| {
                             let id = id.clone();
                             let engine = engine.clone();
@@ -530,11 +536,21 @@ fn MainApp() -> Element {
                                 }
                                 button {
                                     class: "export-btn",
+                                    title: "Group the 'Others' channel into individual speakers (needs retained audio)",
                                     onclick: move |_| {
+                                        notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
+                                        let _ = eng_diar.db_tx.send(DbCmd::Diarize(sid_diar.clone()));
+                                    },
+                                    "🗣 Identify speakers"
+                                }
+                                button {
+                                    class: "export-btn",
+                                    onclick: move |_| {
+                                        let names = speaker_names.peek().clone();
                                         let text = segments
                                             .peek()
                                             .iter()
-                                            .map(|s| format!("[{} {}] {}", fmt_ts(s.t_start_ms), s.source.label(), s.text))
+                                            .map(|s| format!("[{} {}] {}", fmt_ts(s.t_start_ms), s.speaker_label(&names), s.text))
                                             .collect::<Vec<_>>()
                                             .join("\n");
                                         osutil::copy_to_clipboard(&text);
@@ -588,13 +604,57 @@ fn MainApp() -> Element {
                     }
                 }
 
+                // Speaker legend (rename diarized speakers) — only for a saved
+                // session that has speaker labels.
+                if let View::Session(id) = &*view.read() {
+                    {
+                        let id = id.clone();
+                        let engine = engine.clone();
+                        let mut spk: Vec<i32> =
+                            segments.read().iter().filter_map(|s| s.speaker).collect();
+                        spk.sort_unstable();
+                        spk.dedup();
+                        if spk.is_empty() {
+                            rsx! {}
+                        } else {
+                            rsx! {
+                                div { class: "speaker-legend",
+                                    span { class: "legend-label", "Speakers:" }
+                                    for idx in spk {
+                                        {
+                                            let val = speaker_names.read().get(&idx).cloned().unwrap_or_default();
+                                            let engine = engine.clone();
+                                            let id = id.clone();
+                                            rsx! {
+                                                input {
+                                                    key: "{idx}",
+                                                    class: "speaker-name spk-{idx}",
+                                                    value: "{val}",
+                                                    placeholder: "Speaker {idx + 1}",
+                                                    onchange: move |e: FormEvent| {
+                                                        let _ = engine.db_tx.send(DbCmd::RenameSpeaker {
+                                                            id: id.clone(),
+                                                            speaker: idx,
+                                                            name: e.value(),
+                                                        });
+                                                    },
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Transcript / results. Pass signals so the list subscribes and
                 // re-renders itself; App is not re-rendered on each new segment.
                 div { class: "transcript",
                     if *view.read() == View::Search {
                         SearchResultsView { results: search_results }
                     } else {
-                        TranscriptView { segments, on_edit: on_edit_segment }
+                        TranscriptView { segments, speaker_names, on_edit: on_edit_segment }
                     }
                 }
             }
@@ -842,6 +902,108 @@ fn MainApp() -> Element {
                                     }
                                 }
 
+                                section { class: "settings-section",
+                                    h3 { "Speakers" }
+                                    {
+                                        let diar_models: Vec<ModelInfo> = models
+                                            .read()
+                                            .iter()
+                                            .filter(|m| m.kind == "diarization")
+                                            .cloned()
+                                            .collect();
+                                        let cur_diar = settings.read().diarize_embedding_model.clone();
+                                        if diar_models.is_empty() {
+                                            rsx! {
+                                                p { class: "field-note", "Build with `--features diarization` to label individual speakers in the 'Others' channel." }
+                                            }
+                                        } else {
+                                            rsx! {
+                                                p { class: "field-note", "Groups the 'Others' channel into individual speakers. Runs automatically after recording (and on demand). Bigger models = better accuracy, slower." }
+                                                for m in diar_models.iter() {
+                                                    {
+                                                        let name = m.name.clone();
+                                                        let selected = name == cur_diar;
+                                                        let dl = match &progress {
+                                                            Some((n, p)) if *n == name => Some(*p),
+                                                            _ => None,
+                                                        };
+                                                        let eng_dl = engine.clone();
+                                                        let eng_del = engine.clone();
+                                                        let (n_sel, n_dl, n_del) = (name.clone(), name.clone(), name.clone());
+                                                        rsx! {
+                                                            div { key: "{name}", class: if selected { "model-row sel" } else { "model-row" },
+                                                                div { class: "model-main",
+                                                                    div { class: "model-name", "{m.name}" }
+                                                                    div { class: "model-desc", "{m.description} · {m.size}" }
+                                                                }
+                                                                div { class: "model-actions",
+                                                                    if m.downloaded {
+                                                                        button {
+                                                                            class: "mbtn",
+                                                                            disabled: selected,
+                                                                            onclick: move |_| {
+                                                                                let mut s = settings.peek().clone();
+                                                                                s.diarize_embedding_model = n_sel.clone();
+                                                                                let _ = s.save();
+                                                                                settings.set(s);
+                                                                            },
+                                                                            if selected { "Selected" } else { "Select" }
+                                                                        }
+                                                                        button {
+                                                                            class: "mbtn ghost",
+                                                                            disabled: selected,
+                                                                            onclick: move |_| { let _ = eng_del.model_tx.send(ModelCmd::Delete(n_del.clone())); },
+                                                                            "Delete"
+                                                                        }
+                                                                    } else if let Some(p) = dl {
+                                                                        div { class: "dl-prog",
+                                                                            div { class: "dl-bar", style: "width: {p}%" }
+                                                                            span { class: "dl-txt", "Downloading… {p}%" }
+                                                                        }
+                                                                    } else {
+                                                                        button {
+                                                                            class: "mbtn",
+                                                                            onclick: move |_| { let _ = eng_dl.model_tx.send(ModelCmd::Download(n_dl.clone())); },
+                                                                            "Download"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "field-row",
+                                                    label { class: "field-label", "Identify speakers automatically after recording" }
+                                                    button {
+                                                        class: if settings.read().diarize_auto { "toggle on" } else { "toggle" },
+                                                        onclick: move |_| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.diarize_auto = !s.diarize_auto;
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                        if settings.read().diarize_auto { "On" } else { "Off" }
+                                                    }
+                                                }
+                                                div { class: "field-row",
+                                                    label { class: "field-label", "Show provisional speaker labels live while recording" }
+                                                    button {
+                                                        class: if settings.read().diarize_live { "toggle on" } else { "toggle" },
+                                                        onclick: move |_| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.diarize_live = !s.diarize_live;
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                        if settings.read().diarize_live { "On" } else { "Off" }
+                                                    }
+                                                }
+                                                p { class: "field-note", "Live labels are rough and get replaced by the accurate pass at stop. Leave off on lighter hardware." }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 EncryptionSettings { settings, notice }
 
                                 section { class: "settings-section",
@@ -1008,10 +1170,15 @@ fn Meter(label: String, level: Signal<f32>, kind: String) -> Element {
 }
 
 #[component]
-fn TranscriptView(segments: Signal<Vec<Segment>>, on_edit: EventHandler<(i64, String)>) -> Element {
+fn TranscriptView(
+    segments: Signal<Vec<Segment>>,
+    speaker_names: Signal<std::collections::HashMap<i32, String>>,
+    on_edit: EventHandler<(i64, String)>,
+) -> Element {
     let mut editing = use_signal(|| Option::<i64>::None);
     let mut buf = use_signal(String::new);
     let segs = segments.read();
+    let names = speaker_names.read();
     if segs.is_empty() {
         return rsx! { div { class: "empty", "Press Record, or pick a session." } };
     }
@@ -1022,12 +1189,13 @@ fn TranscriptView(segments: Signal<Vec<Segment>>, on_edit: EventHandler<(i64, St
                 let is_editing = sid.is_some() && *editing.read() == sid;
                 let text = seg.text.clone();
                 let text_for_edit = text.clone();
+                let who = seg.speaker_label(&names);
                 rsx! {
                     div {
                         key: "{seg.source.as_str()}-{seg.t_start_ms}",
-                        class: "line {source_class(seg.source)}",
+                        class: "line {line_class(seg)}",
                         span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
-                        span { class: "who", "{seg.source.label()}" }
+                        span { class: "who", "{who}" }
                         if is_editing {
                             input {
                                 class: "line-edit",
@@ -1075,9 +1243,9 @@ fn SearchResultsView(results: Signal<Vec<(String, Segment)>>) -> Element {
         for (sid, seg) in hits.iter() {
             div {
                 key: "{sid}-{seg.t_start_ms}",
-                class: "line {source_class(seg.source)}",
+                class: "line {line_class(seg)}",
                 span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
-                span { class: "who", "{seg.source.label()}" }
+                span { class: "who", "{quick_speaker_label(seg)}" }
                 span { class: "text", "{seg.text}" }
                 span { class: "src", "{short_id(sid)}" }
             }
@@ -1089,6 +1257,24 @@ fn source_class(s: Source) -> &'static str {
     match s {
         Source::Me => "me",
         Source::Others => "others",
+    }
+}
+
+/// CSS class for a transcript line: the source, plus a rotating per-speaker
+/// class (`spk-0`..`spk-7`) so diarized speakers get distinct accent colors.
+fn line_class(seg: &Segment) -> String {
+    match (seg.source, seg.speaker) {
+        (Source::Others, Some(idx)) => format!("others spk-{}", idx.rem_euclid(8)),
+        (s, _) => source_class(s).to_string(),
+    }
+}
+
+/// Speaker label without a custom-name map (used in cross-session search where
+/// names aren't loaded): "Speaker N" for diarized "Others", else the source.
+fn quick_speaker_label(seg: &Segment) -> String {
+    match (seg.source, seg.speaker) {
+        (Source::Others, Some(idx)) => format!("Speaker {}", idx + 1),
+        (s, _) => s.label().to_string(),
     }
 }
 

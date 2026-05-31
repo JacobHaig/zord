@@ -199,6 +199,30 @@ body {
 .line.others .who { color: var(--others); }
 .text { color: var(--text); }
 .src { color: var(--muted); font-size: 11px; }
+
+/* Per-speaker accent colors for diarized "Others" lines. */
+.line.spk-0 .who { color: #ffb454; }
+.line.spk-1 .who { color: #6fd3ff; }
+.line.spk-2 .who { color: #a6e22e; }
+.line.spk-3 .who { color: #ff80bf; }
+.line.spk-4 .who { color: #c792ea; }
+.line.spk-5 .who { color: #ffd866; }
+.line.spk-6 .who { color: #80ffd4; }
+.line.spk-7 .who { color: #ff6e6e; }
+
+/* Speaker legend (rename diarized speakers). */
+.speaker-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.legend-label { color: var(--muted); font-size: 12px; font-weight: 700; }
+.speaker-name { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; outline: none; max-width: 140px; }
+.speaker-name:focus { border-color: var(--me); }
+.speaker-name.spk-0 { border-left: 3px solid #ffb454; }
+.speaker-name.spk-1 { border-left: 3px solid #6fd3ff; }
+.speaker-name.spk-2 { border-left: 3px solid #a6e22e; }
+.speaker-name.spk-3 { border-left: 3px solid #ff80bf; }
+.speaker-name.spk-4 { border-left: 3px solid #c792ea; }
+.speaker-name.spk-5 { border-left: 3px solid #ffd866; }
+.speaker-name.spk-6 { border-left: 3px solid #80ffd4; }
+.speaker-name.spk-7 { border-left: 3px solid #ff6e6e; }
 .line-edit { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--me); border-radius: 6px; padding: 4px 8px; font: inherit; outline: none; }
 .prompt-edit { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px/1.4 ui-monospace, monospace; outline: none; resize: vertical; }
 .prompt-edit:focus { border-color: var(--me); }
