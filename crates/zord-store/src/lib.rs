@@ -99,7 +99,29 @@ impl Store {
             END;
             "#,
         )?;
+        // Added in Phase 13 — tolerate older DBs that predate the column.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE sessions ADD COLUMN summary TEXT", []);
         Ok(())
+    }
+
+    /// Store (or replace) the AI-generated summary for a session.
+    pub fn set_summary(&self, session_id: &str, summary: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET summary = ?2 WHERE id = ?1",
+            params![session_id, summary],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a session's stored summary, if any.
+    pub fn get_summary(&self, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT summary FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?.flatten())
     }
 
     pub fn create_session(&self, session: &Session) -> Result<()> {

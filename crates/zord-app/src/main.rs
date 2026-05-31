@@ -98,6 +98,12 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Summarize a session with a local LLM (requires `--features summaries`).
+    Summarize {
+        session_id: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -137,7 +143,48 @@ fn main() -> Result<()> {
         } => cmd_retranscribe(&session_id, &model, db),
         Cmd::Encrypt { db, remember } => cmd_encrypt(db, remember),
         Cmd::Decrypt { db } => cmd_decrypt(db),
+        Cmd::Summarize { session_id, db } => cmd_summarize(&session_id, db),
     }
+}
+
+/// Build a plain "Speaker: text" transcript for summarization.
+#[cfg(feature = "summaries")]
+fn transcript_text(segments: &[zord_core::Segment]) -> String {
+    segments
+        .iter()
+        .map(|s| format!("{}: {}", s.source.label(), s.text))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(feature = "summaries")]
+fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
+    let db_path = resolve_db(db)?;
+    let store = Store::open(&db_path)?;
+    let segs = store.segments(session_id)?;
+    if segs.is_empty() {
+        anyhow::bail!("session '{session_id}' has no transcript to summarize");
+    }
+    let transcript = transcript_text(&segs);
+
+    eprintln!("Preparing summary model…");
+    let model_path = zord_summarize::ensure_summary_model(&mut |done, total| {
+        if let Some(total) = total {
+            eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
+        }
+    })?;
+    eprintln!("\r  model ready. Summarizing…              ");
+
+    let summarizer = zord_summarize::Summarizer::load(&model_path)?;
+    let summary = summarizer.summarize(&transcript)?;
+    store.set_summary(session_id, &summary)?;
+    println!("{summary}");
+    Ok(())
+}
+
+#[cfg(not(feature = "summaries"))]
+fn cmd_summarize(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
+    anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
 }
 
 #[cfg(feature = "encryption")]

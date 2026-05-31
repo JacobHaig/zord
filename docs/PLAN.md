@@ -420,10 +420,19 @@ verification. Order is a suggestion, not fixed.
 - Note: the bundle **displays** as "Zord" (CFBundleName/DisplayName); the folder
   is still `ZordGui.app` (dx derives it from the package name). Cosmetic only.
 
-### Phase 13 — Local AI summaries / action items
-A local LLM (llama.cpp via a Rust binding) to summarise a session and extract
-action items, fully offline. New backend + model management entry + a "Summary"
-panel. Heavy; feature-gated like Parakeet.
+### Phase 13 — Local AI summaries / action items  ✅ DONE (feature build verified)
+- [x] `zord-summarize` crate: `llama` feature pulls `llama-cpp-2` (Metal on
+  macOS). `Summarizer` runs one chat completion (apply_chat_template + greedy
+  decode) → Markdown notes (TL;DR / key points / action items).
+  `ensure_summary_model` downloads Qwen2.5-3B-Instruct Q4_K_M on demand. (13a)
+- [x] `zord-store`: `summary` column + `set_summary`/`get_summary`. CLI
+  `zord summarize <id>`. GUI: ✨ Summarize button in the session toolbar →
+  engine summarize-worker thread → persisted + shown in a Summary panel; loading
+  a session restores its saved summary. (13b)
+- [x] Passthrough `summaries` feature on `zord-app` + `zord-gui`; default build
+  leaves llama.cpp out and stays lean.
+- **Verified:** default green; `--features summaries` compiles + links + launches
+  (CLI & GUI). Runtime summarization needs the ~2 GB model + is slow (user step).
 
 ### Phase 14 — UX polish pass
 A second layer of refinement (replaces the earlier meeting-auto-detect and

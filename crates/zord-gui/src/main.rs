@@ -206,6 +206,8 @@ fn MainApp() -> Element {
     let mut view = use_signal(|| View::Live);
     // Path of the most recently exported file (drives the Reveal/Open buttons).
     let mut last_export = use_signal(|| Option::<String>::None);
+    // Current session's AI summary, if any.
+    let mut summary = use_signal(|| Option::<String>::None);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
@@ -250,6 +252,7 @@ fn MainApp() -> Element {
                     Event::ModelProgress { name, pct } => {
                         model_progress.set(Some((name, pct)));
                     }
+                    Event::Summary(v) => summary.set(v),
                 }
             }
         });
@@ -280,6 +283,7 @@ fn MainApp() -> Element {
             } else {
                 segments.write().clear();
                 notice.set(None);
+                summary.set(None);
                 view.set(View::Live);
                 let s = settings.peek().clone();
                 let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
@@ -387,6 +391,8 @@ fn MainApp() -> Element {
                     {
                         let id = id.clone();
                         let engine = engine.clone();
+                        let sid = id.clone();
+                        let eng_sum = engine.clone();
                         let mk = move |fmt: Format| {
                             let id = id.clone();
                             let engine = engine.clone();
@@ -400,6 +406,15 @@ fn MainApp() -> Element {
                                 button { class: "export-btn", onclick: mk(Format::Markdown), "Markdown" }
                                 button { class: "export-btn", onclick: mk(Format::Srt), "SRT" }
                                 button { class: "export-btn", onclick: mk(Format::Json), "JSON" }
+                                span { class: "export-sep", "·" }
+                                button {
+                                    class: "export-btn",
+                                    onclick: move |_| {
+                                        notice.set(Some("Summarizing… (first run downloads the model)".to_string()));
+                                        let _ = eng_sum.summ_tx.send(sid.clone());
+                                    },
+                                    "✨ Summarize"
+                                }
                                 if let Some(path) = last_export.read().clone() {
                                     span { class: "export-sep", "·" }
                                     button {
@@ -417,6 +432,16 @@ fn MainApp() -> Element {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // AI summary (when present for the viewed session).
+                if *view.read() != View::Search {
+                    if let Some(text) = summary.read().clone() {
+                        div { class: "summary",
+                            div { class: "summary-head", "Summary" }
+                            div { class: "summary-body", "{text}" }
                         }
                     }
                 }

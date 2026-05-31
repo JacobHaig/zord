@@ -66,6 +66,8 @@ pub enum Event {
     Models(Vec<ModelInfo>),
     /// Download progress for a model (0..100).
     ModelProgress { name: String, pct: u8 },
+    /// A session's summary (loaded or freshly generated). `None` = none yet.
+    Summary(Option<String>),
 }
 
 /// A model in the catalog plus whether it's downloaded locally.
@@ -129,6 +131,8 @@ pub struct Engine {
     pub rec_tx: mpsc::Sender<RecorderCmd>,
     pub db_tx: mpsc::Sender<DbCmd>,
     pub model_tx: mpsc::Sender<ModelCmd>,
+    /// Send a session id to summarize it (heavy; runs on its own thread).
+    pub summ_tx: mpsc::Sender<String>,
 }
 
 impl Engine {
@@ -139,6 +143,7 @@ impl Engine {
         let (rec_tx, rec_rx) = mpsc::channel::<RecorderCmd>();
         let (db_tx, db_rx) = mpsc::channel::<DbCmd>();
         let (model_tx, model_rx) = mpsc::channel::<ModelCmd>();
+        let (summ_tx, summ_rx) = mpsc::channel::<String>();
 
         {
             let ev = ev_tx.clone();
@@ -147,20 +152,90 @@ impl Engine {
         }
         {
             let ev = ev_tx.clone();
-            thread::spawn(move || db_loop(db_rx, ev, db_path));
+            let dbp = db_path.clone();
+            thread::spawn(move || db_loop(db_rx, ev, dbp));
+        }
+        {
+            let ev = ev_tx.clone();
+            thread::spawn(move || model_loop(model_rx, ev));
         }
         {
             let ev = ev_tx;
-            thread::spawn(move || model_loop(model_rx, ev));
+            thread::spawn(move || summarize_loop(summ_rx, ev, db_path));
         }
         (
             Engine {
                 rec_tx,
                 db_tx,
                 model_tx,
+                summ_tx,
             },
             ev_rx,
         )
+    }
+}
+
+/// Worker that generates session summaries (local LLM, heavy). Real impl only
+/// in `summaries` builds; otherwise it reports a friendly notice.
+fn summarize_loop(rx: mpsc::Receiver<String>, ev: UnboundedSender<Event>, db_path: PathBuf) {
+    while let Ok(session_id) = rx.recv() {
+        #[cfg(feature = "summaries")]
+        summarize_one(&session_id, &ev, &db_path);
+        #[cfg(not(feature = "summaries"))]
+        {
+            let _ = &session_id;
+            let _ = &db_path;
+            let _ = ev.send(Event::Notice(
+                "Summaries aren't built in — rebuild with `--features summaries`.".to_string(),
+            ));
+        }
+    }
+}
+
+#[cfg(feature = "summaries")]
+fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf) {
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
+            return;
+        }
+    };
+    let segs = store.segments(session_id).unwrap_or_default();
+    if segs.is_empty() {
+        let _ = ev.send(Event::Notice("Nothing to summarize in this session.".to_string()));
+        return;
+    }
+    let transcript = segs
+        .iter()
+        .map(|s| format!("{}: {}", s.source.label(), s.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let _ = ev.send(Event::Notice("Preparing summary model…".to_string()));
+    let model_path = match zord_summarize::ensure_summary_model(&mut |_d, _t| {}) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("summary model: {e}")));
+            return;
+        }
+    };
+    let _ = ev.send(Event::Notice("Summarizing…".to_string()));
+    let summarizer = match zord_summarize::Summarizer::load(&model_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("summary: {e}")));
+            return;
+        }
+    };
+    match summarizer.summarize(&transcript) {
+        Ok(text) => {
+            let _ = store.set_summary(session_id, &text);
+            let _ = ev.send(Event::Summary(Some(text)));
+        }
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("summary failed: {e}")));
+        }
     }
 }
 
@@ -235,6 +310,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 if let Ok(v) = store.segments(&id) {
                     let _ = ev.send(Event::Transcript(v));
                 }
+                let _ = ev.send(Event::Summary(store.get_summary(&id).ok().flatten()));
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
                 Ok(path) => {

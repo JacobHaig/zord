@@ -17,6 +17,8 @@ storage happen on your machine.
   with a better model.
 - 🔎 **Searchable history** — every session stored in local SQLite with
   full-text search.
+- ✨ **Local AI summaries** *(optional)* — a local LLM (llama.cpp) turns a
+  session into Markdown notes (TL;DR / key points / action items), fully offline.
 - 📤 **Export** — Markdown, SRT, or JSON, with one-click **Reveal in
   Finder/Explorer** and **Open in editor**.
 - 🖥️ **Two front-ends** — a native desktop GUI (Dioxus) and a `localhost` web
@@ -72,6 +74,19 @@ This pulls in an ONNX runtime (the build script downloads prebuilt sherpa-onnx
 libs). With it enabled, the settings panel lists Parakeet alongside the Whisper
 models to download and select. Without the feature, the default build stays
 lean and Whisper-only.
+
+### Optional: local AI summaries
+
+Generate meeting notes from a session with a local LLM (no cloud), build with
+the `summaries` feature:
+
+```bash
+cargo run -p zord-gui --features summaries     # GUI: ✨ Summarize on a saved session
+cargo build -p zord-app --features summaries   # CLI: `zord summarize <session-id>`
+```
+
+This compiles llama.cpp (Metal on Apple Silicon) and, on first use, downloads a
+~2 GB instruct model (Qwen2.5-3B-Instruct, Q4_K_M) to the models folder.
 
 ### Optional: database encryption (SQLCipher)
 

@@ -6693,6 +6693,7 @@ dependencies = [
  "zord-core",
  "zord-export",
  "zord-store",
+ "zord-summarize",
  "zord-transcribe",
  "zord-web",
 ]
@@ -6765,6 +6766,7 @@ dependencies = [
  "zord-core",
  "zord-export",
  "zord-store",
+ "zord-summarize",
  "zord-transcribe",
 ]
 
