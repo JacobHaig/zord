@@ -434,17 +434,17 @@ verification. Order is a suggestion, not fixed.
 - **Verified:** default green; `--features summaries` compiles + links + launches
   (CLI & GUI). Runtime summarization needs the ~2 GB model + is slow (user step).
 
-### Phase 14 — UX polish pass
-A second layer of refinement (replaces the earlier meeting-auto-detect and
-custom-vocabulary ideas, deferred as out-of-scope for now). Candidate items, to
-be prioritized when we start:
-- Session management: rename / delete sessions; nicer titles (date/time +
-  duration) instead of `Recording <epoch>`.
-- Transcript niceties: copy line / copy all, auto-scroll-to-latest while
-  recording, a recording timer.
-- Keyboard shortcuts (record/stop, focus search) and confirm dialogs for
-  destructive actions (delete session/model).
-- Toast-style notices, clearer loading/empty states, first-run hint.
+### Phase 14 — UX polish pass  ✅ DONE
+- [x] Session management (14a): human titles (relative time) + meta
+  (model · duration); inline **rename** (Enter/Esc); per-row **delete** with a
+  confirm dialog (returns to Live if the open session is deleted).
+  zord-store `set_session_title`/`delete_session`; engine `Rename`/`DeleteSession`.
+- [x] Transcript niceties (14b): **Copy** transcript + **Copy** summary
+  (arboard); **recording timer** in the topbar; **auto-scroll** to latest while
+  recording; **auto-dismissing** notices (+ manual ✕).
+- Built + launches; full workspace compiles.
+- Deferred from the original list (fine to revisit later): global keyboard
+  shortcuts; first-run onboarding hint.
 
 ### Phase 15 — Per-speaker diarization (within "Others")
 Distinguish individual speakers inside the system channel (e.g. sherpa-onnx

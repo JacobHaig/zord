@@ -213,6 +213,8 @@ fn MainApp() -> Element {
     let mut editing = use_signal(|| Option::<String>::None);
     let mut edit_text = use_signal(String::new);
     let mut confirm_delete = use_signal(|| Option::<String>::None);
+    // Seconds elapsed in the current recording (0 when idle).
+    let mut rec_secs = use_signal(|| 0u64);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
@@ -264,6 +266,41 @@ fn MainApp() -> Element {
         let _ = engine.db_tx.send(DbCmd::ListSessions);
         let _ = engine.model_tx.send(ModelCmd::List);
         engine
+    });
+
+    // Recording timer: one ticker that counts up while recording, resets idle.
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if matches!(*status.peek(), Status::Recording) {
+                let v = *rec_secs.peek();
+                rec_secs.set(v + 1);
+            } else if *rec_secs.peek() != 0 {
+                rec_secs.set(0);
+            }
+        }
+    });
+
+    // Toast-style notices: auto-dismiss after ~5s (unless replaced meanwhile).
+    use_effect(move || {
+        if let Some(text) = notice.read().clone() {
+            spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if notice.peek().as_deref() == Some(text.as_str()) {
+                    notice.set(None);
+                }
+            });
+        }
+    });
+
+    // Auto-scroll the transcript to the latest line while recording.
+    use_effect(move || {
+        let _ = segments.read().len(); // subscribe to new segments
+        if matches!(*status.peek(), Status::Recording) {
+            let _ = document::eval(
+                "const t=document.querySelector('.transcript'); if(t){t.scrollTop=t.scrollHeight;}",
+            );
+        }
     });
 
     let st = status.read().clone();
@@ -403,6 +440,9 @@ fn MainApp() -> Element {
                     div { class: "status",
                         span { class: if recording { "dot rec" } else { "dot" } }
                         span { "{status_text}" }
+                        if matches!(st, Status::Recording) {
+                            span { class: "rec-timer", "{fmt_dur(rec_secs())}" }
+                        }
                     }
                     div { class: "topbar-actions",
                         button {
@@ -427,7 +467,10 @@ fn MainApp() -> Element {
                 }
 
                 if let Some(n) = notice.read().clone() {
-                    div { class: "notice", "{n}" }
+                    div { class: "notice",
+                        span { "{n}" }
+                        button { class: "notice-x", onclick: move |_| notice.set(None), "✕" }
+                    }
                 }
 
                 // Search
@@ -467,6 +510,20 @@ fn MainApp() -> Element {
                                     },
                                     "✨ Summarize"
                                 }
+                                button {
+                                    class: "export-btn",
+                                    onclick: move |_| {
+                                        let text = segments
+                                            .peek()
+                                            .iter()
+                                            .map(|s| format!("[{} {}] {}", fmt_ts(s.t_start_ms), s.source.label(), s.text))
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        osutil::copy_to_clipboard(&text);
+                                        notice.set(Some("Transcript copied to clipboard".to_string()));
+                                    },
+                                    "Copy"
+                                }
                                 if let Some(path) = last_export.read().clone() {
                                     span { class: "export-sep", "·" }
                                     button {
@@ -491,9 +548,24 @@ fn MainApp() -> Element {
                 // AI summary (when present for the viewed session).
                 if *view.read() != View::Search {
                     if let Some(text) = summary.read().clone() {
-                        div { class: "summary",
-                            div { class: "summary-head", "Summary" }
-                            div { class: "summary-body", "{text}" }
+                        {
+                            let text_copy = text.clone();
+                            rsx! {
+                                div { class: "summary",
+                                    div { class: "summary-head",
+                                        span { "Summary" }
+                                        button {
+                                            class: "row-btn",
+                                            onclick: move |_| {
+                                                osutil::copy_to_clipboard(&text_copy);
+                                                notice.set(Some("Summary copied to clipboard".to_string()));
+                                            },
+                                            "Copy"
+                                        }
+                                    }
+                                    div { class: "summary-body", "{text}" }
+                                }
+                            }
                         }
                     }
                 }

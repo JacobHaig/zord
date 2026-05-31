@@ -29,5 +29,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dioxus = { version = "0.7", features = ["desktop"] }
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 zord-summarize = { workspace = true, optional = true }
+arboard = "3"

@@ -32,6 +32,13 @@ pub fn reveal_in_file_manager(path: &str) {
     }
 }
 
+/// Copy `text` to the system clipboard. Best-effort.
+pub fn copy_to_clipboard(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text.to_string());
+    }
+}
+
 /// Open `path` in the OS default text editor. Exports are plain text
 /// (Markdown / SRT / JSON), so we bias toward an editor over a viewer.
 pub fn open_in_editor(path: &str) {
