@@ -29,6 +29,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The screencapturekit Swift bridge (apple-metal/apple-cf) runs `swift
+      # build` at compile time; pin a recent stable Xcode so its toolchain
+      # matches what builds locally (Swift 6.x) rather than the runner default.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
