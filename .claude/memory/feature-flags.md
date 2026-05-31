@@ -12,6 +12,10 @@ build (and Windows CI) stays lean and fast:
 - `parakeet` → NVIDIA Parakeet via `sherpa-onnx` (in `zord-transcribe`).
 - `encryption` → SQLCipher at-rest DB encryption (`rusqlite/bundled-sqlcipher-vendored-openssl`).
 - `summaries` → local LLM summaries via `llama-cpp-2` (in `zord-summarize`).
+- `diarization` → per-speaker diarization via `sherpa-onnx` (in `zord-diarize`;
+  internal crate feature is `sherpa`, like summarize's `llama`). Reuses the same
+  sherpa-onnx version as `parakeet`; cargo unifies the sys crate so both can be
+  enabled together. See [[diarization-design]].
 
 Each consuming binary (`zord-app`, `zord-gui`) has a **passthrough** feature of
 the same name that enables the underlying crate feature. Default build never
