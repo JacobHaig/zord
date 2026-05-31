@@ -253,9 +253,12 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
         let _ = ev.send(Event::Notice("Nothing to summarize in this session.".to_string()));
         return;
     }
+    // Label each line by its diarized speaker (and custom name, if assigned) so
+    // the LLM can attribute statements/actions to the right person.
+    let names = store.speaker_names(session_id).unwrap_or_default();
     let transcript = segs
         .iter()
-        .map(|s| format!("{}: {}", s.source.label(), s.text))
+        .map(|s| format!("{}: {}", s.speaker_label(&names), s.text))
         .collect::<Vec<_>>()
         .join("\n");
 

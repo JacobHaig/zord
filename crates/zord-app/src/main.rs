@@ -159,12 +159,16 @@ fn main() -> Result<()> {
     }
 }
 
-/// Build a plain "Speaker: text" transcript for summarization.
+/// Build a plain "Speaker: text" transcript for summarization, using diarized
+/// speaker labels + custom names (`names` maps speaker index → name).
 #[cfg(feature = "summaries")]
-fn transcript_text(segments: &[zord_core::Segment]) -> String {
+fn transcript_text(
+    segments: &[zord_core::Segment],
+    names: &std::collections::HashMap<i32, String>,
+) -> String {
     segments
         .iter()
-        .map(|s| format!("{}: {}", s.source.label(), s.text))
+        .map(|s| format!("{}: {}", s.speaker_label(names), s.text))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -177,7 +181,8 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     if segs.is_empty() {
         anyhow::bail!("session '{session_id}' has no transcript to summarize");
     }
-    let transcript = transcript_text(&segs);
+    let names = store.speaker_names(session_id).unwrap_or_default();
+    let transcript = transcript_text(&segs, &names);
 
     let settings = zord_config::Settings::load();
     let model = zord_summarize::SummaryModel::parse(&settings.summary_model)

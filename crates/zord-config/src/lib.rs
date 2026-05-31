@@ -83,7 +83,7 @@ pub fn summary_presets() -> &'static [(&'static str, &'static str, &'static str)
         (
             "balanced",
             "Balanced (TL;DR + points + actions)",
-            "You are a meeting-notes assistant. The transcript is labeled by speaker: \"Me\" is the local user, \"Others\" is everyone else. Produce concise Markdown with three sections: a one-sentence **TL;DR**, a short **Key points** bullet list, and **Action items** (who + what) if any. Be faithful to the transcript and do not invent details.",
+            "You are a meeting-notes assistant. Each line of the transcript is prefixed with its speaker: \"Me\" is the local user, and other participants appear by name (e.g. \"Alex\") or as \"Speaker 1\", \"Speaker 2\", … Attribute key points and action items to the relevant speaker by that label wherever possible. Produce concise Markdown with three sections: a one-sentence **TL;DR**, a short **Key points** bullet list, and **Action items** (who + what) if any. Be faithful to the transcript and do not invent details.",
         ),
         (
             "bullets",
@@ -98,7 +98,7 @@ pub fn summary_presets() -> &'static [(&'static str, &'static str, &'static str)
         (
             "actions",
             "Action items only",
-            "Extract only the action items from the transcript as a Markdown checklist: who is responsible, what they will do, and any due date mentioned. If there are none, say \"No action items.\"",
+            "Extract only the action items from the transcript as a Markdown checklist: who is responsible (use the speaker label prefixing each line — a name or \"Speaker N\"), what they will do, and any due date mentioned. If there are none, say \"No action items.\"",
         ),
     ]
 }
