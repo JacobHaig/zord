@@ -20,7 +20,9 @@ env:
 jobs:
   macos:
     name: macOS (Apple Silicon)
-    runs-on: macos-14 # Apple Silicon runner
+    # macos-15 ships Xcode 26 (macOS 26 SDK), which the screencapturekit Swift
+    # bridge (apple-metal) requires to compile. macos-14 tops out at Xcode 16.
+    runs-on: macos-15
     env:
       # macOS 13 deployment target for the ScreenCaptureKit Swift bridge.
       MACOSX_DEPLOYMENT_TARGET: "13.0"
