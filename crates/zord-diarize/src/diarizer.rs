@@ -14,8 +14,10 @@ use sherpa_onnx::{
 /// sherpa-onnx GitHub release tags hosting the pre-exported ONNX models.
 const SEG_TAG: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models";
+// NOTE: the release tag is misspelled "recongition" in the upstream repo — this
+// is the real, working tag, not a typo on our end.
 const EMB_TAG: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recognition-models";
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models";
 
 /// The shared segmentation model (pyannote 3.0). Archive stem == extracted dir.
 const SEG_STEM: &str = "sherpa-onnx-pyannote-segmentation-3-0";
