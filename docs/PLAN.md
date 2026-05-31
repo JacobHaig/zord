@@ -446,7 +446,27 @@ verification. Order is a suggestion, not fixed.
 - Deferred from the original list (fine to revisit later): global keyboard
   shortcuts; first-run onboarding hint.
 
-### Phase 15 — Per-speaker diarization (within "Others")
+### Phase 15 — Configuration & use-case polish
+Close gaps surfaced in the post-Phase-14 review. Scope (chosen):
+- **Summary model selection** — a small catalog of summary LLMs (e.g.
+  Qwen2.5 1.5B / 3B / 7B Instruct, Q4_K_M); pick + download/select in settings.
+  `Summarizer` + `ensure_summary_model` become model-parameterized.
+- **Summary prompt customization** — preset styles (bullets / exec brief /
+  action-items / balanced) **and** a freeform editable prompt with reset.
+  `Summarizer::summarize(transcript, system_prompt)`; config stores
+  `summary_model`, `summary_preset`, optional `summary_prompt` override.
+- **Capture mode** — record mic-only / system-only / both, in settings; engine
+  honors it (skip starting a source).
+- **Transcript editing** — inline-edit a transcript line in the GUI; persists via
+  `Store::update_segment_text` (FTS stays in sync via the existing UPDATE
+  trigger). Requires exposing a segment `id` on `Segment` (serde-skipped when
+  absent).
+- Freebies if cheap: an **"Open data folder"** button; show summary/Parakeet
+  models in the managed list.
+Done in sub-steps (config+store → summarize params → GUI), feature-aware
+(summary bits under `summaries`). Not started.
+
+### Phase 16 — Per-speaker diarization (within "Others")
 Distinguish individual speakers inside the system channel (e.g. sherpa-onnx
 speaker-diarization / embeddings). Channel separation already covers Me-vs-Others;
 this adds Others → Speaker 1/2/3.
