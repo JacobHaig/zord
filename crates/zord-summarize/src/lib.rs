@@ -7,6 +7,4 @@
 mod summarizer;
 
 #[cfg(feature = "llama")]
-pub use summarizer::{
-    ensure_summary_model, summary_model_filename, summary_model_present, Summarizer,
-};
+pub use summarizer::{ensure_summary_model, summary_model_present, Summarizer, SummaryModel};

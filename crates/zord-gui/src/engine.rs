@@ -219,8 +219,11 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
         .collect::<Vec<_>>()
         .join("\n");
 
+    let settings = zord_config::Settings::load();
+    let model = zord_summarize::SummaryModel::parse(&settings.summary_model)
+        .unwrap_or(zord_summarize::SummaryModel::Qwen3B);
     let _ = ev.send(Event::Notice("Preparing summary model…".to_string()));
-    let model_path = match zord_summarize::ensure_summary_model(&mut |_d, _t| {}) {
+    let model_path = match zord_summarize::ensure_summary_model(model, &mut |_d, _t| {}) {
         Ok(p) => p,
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("summary model: {e}")));
@@ -235,7 +238,7 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
             return;
         }
     };
-    match summarizer.summarize(&transcript) {
+    match summarizer.summarize(&transcript, &settings.effective_summary_prompt()) {
         Ok(text) => {
             let _ = store.set_summary(session_id, &text);
             let _ = ev.send(Event::Summary(Some(text)));

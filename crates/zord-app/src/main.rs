@@ -171,8 +171,11 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     }
     let transcript = transcript_text(&segs);
 
-    eprintln!("Preparing summary model…");
-    let model_path = zord_summarize::ensure_summary_model(&mut |done, total| {
+    let settings = zord_config::Settings::load();
+    let model = zord_summarize::SummaryModel::parse(&settings.summary_model)
+        .unwrap_or(zord_summarize::SummaryModel::Qwen3B);
+    eprintln!("Preparing summary model '{}'…", model.name());
+    let model_path = zord_summarize::ensure_summary_model(model, &mut |done, total| {
         if let Some(total) = total {
             eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
         }
@@ -180,7 +183,7 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     eprintln!("\r  model ready. Summarizing…              ");
 
     let summarizer = zord_summarize::Summarizer::load(&model_path)?;
-    let summary = summarizer.summarize(&transcript)?;
+    let summary = summarizer.summarize(&transcript, &settings.effective_summary_prompt())?;
     store.set_summary(session_id, &summary)?;
     println!("{summary}");
     Ok(())

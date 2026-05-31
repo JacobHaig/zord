@@ -14,19 +14,66 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
 use llama_cpp_2::sampling::LlamaSampler;
 
-/// Default summary model: Qwen2.5 3B Instruct, Q4_K_M (~2 GB). Good quality,
-/// runs comfortably on Apple Silicon / modern CPUs.
-const HF_URL: &str =
-    "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf";
-const FILE: &str = "qwen2.5-3b-instruct-q4_k_m.gguf";
-
 const N_CTX: u32 = 8192;
 const MAX_NEW_TOKENS: usize = 640;
 /// Leave headroom for the system prompt + generated tokens.
 const MAX_TRANSCRIPT_CHARS: usize = 16_000;
 
-pub fn summary_model_filename() -> &'static str {
-    FILE
+/// Selectable summary LLM (Qwen2.5 Instruct GGUF, Q4_K_M).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryModel {
+    Qwen1_5B,
+    Qwen3B,
+    Qwen7B,
+}
+
+impl SummaryModel {
+    pub const ALL: &'static [SummaryModel] =
+        &[SummaryModel::Qwen1_5B, SummaryModel::Qwen3B, SummaryModel::Qwen7B];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct",
+            SummaryModel::Qwen3B => "qwen2.5-3b-instruct",
+            SummaryModel::Qwen7B => "qwen2.5-7b-instruct",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SummaryModel::Qwen1_5B => "Qwen2.5 1.5B — fastest, lighter quality",
+            SummaryModel::Qwen3B => "Qwen2.5 3B — balanced (default)",
+            SummaryModel::Qwen7B => "Qwen2.5 7B — best quality, slower",
+        }
+    }
+
+    pub fn size_label(self) -> &'static str {
+        match self {
+            SummaryModel::Qwen1_5B => "~1 GB",
+            SummaryModel::Qwen3B => "~2 GB",
+            SummaryModel::Qwen7B => "~4.7 GB",
+        }
+    }
+
+    fn filename(self) -> &'static str {
+        match self {
+            SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen3B => "qwen2.5-3b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen7B => "qwen2.5-7b-instruct-q4_k_m.gguf",
+        }
+    }
+
+    fn url(self) -> &'static str {
+        match self {
+            SummaryModel::Qwen1_5B => "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen3B => "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen7B => "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.name() == s)
+    }
 }
 
 fn models_dir() -> Result<PathBuf> {
@@ -37,22 +84,25 @@ fn models_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn summary_model_present() -> bool {
+pub fn summary_model_present(model: SummaryModel) -> bool {
     models_dir()
-        .map(|d| d.join(FILE))
+        .map(|d| d.join(model.filename()))
         .map(|p| p.exists() && std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false))
         .unwrap_or(false)
 }
 
-/// Ensure the summary model is downloaded; returns its path. `progress` is
-/// called with (downloaded, total).
-pub fn ensure_summary_model(progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<PathBuf> {
-    let path = models_dir()?.join(FILE);
+/// Ensure `model` is downloaded; returns its path. `progress` → (downloaded, total).
+pub fn ensure_summary_model(
+    model: SummaryModel,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf> {
+    let path = models_dir()?.join(model.filename());
     if path.exists() && std::fs::metadata(&path)?.len() > 0 {
         return Ok(path);
     }
-    tracing::info!(%HF_URL, "downloading summary model (first run)");
-    let resp = ureq::get(HF_URL).call().with_context(|| format!("requesting {HF_URL}"))?;
+    let url = model.url();
+    tracing::info!(%url, "downloading summary model (first run)");
+    let resp = ureq::get(url).call().with_context(|| format!("requesting {url}"))?;
     let total = resp.header("Content-Length").and_then(|h| h.parse::<u64>().ok());
     let tmp = path.with_extension("partial");
     let mut file = std::fs::File::create(&tmp)?;
@@ -101,18 +151,13 @@ impl Summarizer {
         Ok(Self { model })
     }
 
-    /// Summarize a transcript into Markdown (TL;DR / key points / action items).
-    pub fn summarize(&self, transcript: &str) -> Result<String> {
+    /// Summarize a transcript using the given system prompt; returns Markdown.
+    pub fn summarize(&self, transcript: &str, system_prompt: &str) -> Result<String> {
         let backend = backend()?;
-        let system = "You are a meeting-notes assistant. The transcript is labeled by \
-            speaker: \"Me\" is the local user, \"Others\" is everyone else. Produce concise \
-            Markdown with three sections: a one-sentence **TL;DR**, a short **Key points** \
-            bullet list, and **Action items** (who + what) if any. Be faithful to the \
-            transcript and do not invent details.";
         let user = format!("Transcript:\n\n{}", truncate_chars(transcript, MAX_TRANSCRIPT_CHARS));
 
         let messages = vec![
-            LlamaChatMessage::new("system".to_string(), system.to_string())?,
+            LlamaChatMessage::new("system".to_string(), system_prompt.to_string())?,
             LlamaChatMessage::new("user".to_string(), user)?,
         ];
         let tmpl = self
