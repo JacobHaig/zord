@@ -1,0 +1,27 @@
+---
+name: feature-flags
+description: Optional heavy engines are Cargo features; the default build stays lean and is the only one verified headlessly
+metadata:
+  node_type: memory
+  type: project
+---
+
+Heavy/optional capabilities are gated behind Cargo features so the default
+build (and Windows CI) stays lean and fast:
+
+- `parakeet` → NVIDIA Parakeet via `sherpa-onnx` (in `zord-transcribe`).
+- `encryption` → SQLCipher at-rest DB encryption (`rusqlite/bundled-sqlcipher-vendored-openssl`).
+- `summaries` → local LLM summaries via `llama-cpp-2` (in `zord-summarize`).
+
+Each consuming binary (`zord-app`, `zord-gui`) has a **passthrough** feature of
+the same name that enables the underlying crate feature. Default build never
+compiles these deps.
+
+**Why:** the default build must compile fast and not require extra toolchains
+(perl/OpenSSL, ONNX, llama.cpp). See [[feature-build-deps]].
+
+**How to apply:** new optional engine = optional dep + crate feature, with the
+code gated `#[cfg(feature = "…")]` and a non-feature stub that bails with
+"rebuild with --features …". Add passthrough features on the binaries. Always
+verify both the default build AND the feature build. Related: [[architecture]],
+[[verification-limits]].
