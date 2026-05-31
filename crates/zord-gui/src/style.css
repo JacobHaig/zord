@@ -37,8 +37,22 @@ body {
 }
 .session:hover { background: var(--panel-2); }
 .session.active { background: var(--panel-2); border-color: var(--line); }
-.session-title { font-size: 13px; }
+.session { display: flex; align-items: center; gap: 6px; }
+.session-row { flex: 1; min-width: 0; }
+.session-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.session-actions { display: none; gap: 2px; flex-shrink: 0; }
+.session:hover .session-actions { display: flex; }
+.row-btn { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 6px; }
+.row-btn:hover { background: var(--bg); color: var(--text); }
+.rename-input { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--me); border-radius: 6px; padding: 5px 8px; font-size: 13px; outline: none; }
+
+/* Confirm dialog */
+.confirm-card { width: min(380px, 90%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 22px; display: flex; flex-direction: column; gap: 12px; margin: auto; }
+.confirm-card h2 { font-size: 16px; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mbtn.danger { background: var(--accent); color: #fff; border-color: var(--accent); }
+.mbtn.danger:hover { filter: brightness(1.08); }
 
 /* Main */
 .main { flex: 1; display: flex; flex-direction: column; padding: 20px 24px; gap: 14px; overflow: hidden; }

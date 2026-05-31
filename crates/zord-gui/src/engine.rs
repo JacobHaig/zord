@@ -115,6 +115,11 @@ pub enum DbCmd {
         id: String,
         format: zord_export::Format,
     },
+    Rename {
+        id: String,
+        title: String,
+    },
+    DeleteSession(String),
 }
 
 /// Model-management commands (download/delete can take minutes, so they run on
@@ -320,6 +325,18 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     let _ = ev.send(Event::Notice(format!("export failed: {e}")));
                 }
             },
+            DbCmd::Rename { id, title } => {
+                let _ = store.set_session_title(&id, &title);
+                if let Ok(v) = store.list_sessions() {
+                    let _ = ev.send(Event::Sessions(v));
+                }
+            }
+            DbCmd::DeleteSession(id) => {
+                let _ = store.delete_session(&id);
+                if let Ok(v) = store.list_sessions() {
+                    let _ = ev.send(Event::Sessions(v));
+                }
+            }
         }
     }
 }

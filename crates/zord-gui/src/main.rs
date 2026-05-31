@@ -9,6 +9,7 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{DbCmd, Engine, Event, ModelCmd, ModelInfo, RecorderCmd, Status};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use zord_config::Settings;
 use zord_core::{Segment, Session, Source};
 use zord_export::Format;
@@ -208,6 +209,10 @@ fn MainApp() -> Element {
     let mut last_export = use_signal(|| Option::<String>::None);
     // Current session's AI summary, if any.
     let mut summary = use_signal(|| Option::<String>::None);
+    // Session id currently being renamed (+ its edit buffer); pending delete.
+    let mut editing = use_signal(|| Option::<String>::None);
+    let mut edit_text = use_signal(String::new);
+    let mut confirm_delete = use_signal(|| Option::<String>::None);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
@@ -325,19 +330,66 @@ fn MainApp() -> Element {
                     for s in sessions.read().iter().cloned() {
                         {
                             let id = s.id.clone();
-                            let engine = engine.clone();
                             let active = matches!(&*view.read(), View::Session(v) if *v == id);
+                            let is_editing = editing.read().as_deref() == Some(id.as_str());
+                            let title = session_title(&s);
+                            let meta = session_meta(&s);
+                            let eng_open = engine.clone();
+                            let eng_save = engine.clone();
+                            let (id_open, id_edit, id_save, id_del) =
+                                (id.clone(), id.clone(), id.clone(), id.clone());
+                            let title_edit = title.clone();
                             rsx! {
                                 div {
                                     key: "{s.id}",
                                     class: if active { "session active" } else { "session" },
-                                    onclick: move |_| {
-                                        view.set(View::Session(id.clone()));
-                                        last_export.set(None);
-                                        let _ = engine.db_tx.send(DbCmd::Load(id.clone()));
-                                    },
-                                    div { class: "session-title", "{session_title(&s)}" }
-                                    div { class: "session-meta", "{s.model}" }
+                                    if is_editing {
+                                        input {
+                                            class: "rename-input",
+                                            value: "{edit_text}",
+                                            autofocus: true,
+                                            oninput: move |e| edit_text.set(e.value()),
+                                            onkeydown: move |e| match e.key() {
+                                                Key::Enter => {
+                                                    let t = edit_text.peek().trim().to_string();
+                                                    if !t.is_empty() {
+                                                        let _ = eng_save.db_tx.send(DbCmd::Rename { id: id_save.clone(), title: t });
+                                                    }
+                                                    editing.set(None);
+                                                }
+                                                Key::Escape => editing.set(None),
+                                                _ => {}
+                                            },
+                                        }
+                                    } else {
+                                        div { class: "session-row",
+                                            onclick: move |_| {
+                                                view.set(View::Session(id_open.clone()));
+                                                last_export.set(None);
+                                                summary.set(None);
+                                                let _ = eng_open.db_tx.send(DbCmd::Load(id_open.clone()));
+                                            },
+                                            div { class: "session-title", "{title}" }
+                                            div { class: "session-meta", "{meta}" }
+                                        }
+                                        div { class: "session-actions",
+                                            button {
+                                                class: "row-btn",
+                                                title: "Rename",
+                                                onclick: move |_| {
+                                                    edit_text.set(title_edit.clone());
+                                                    editing.set(Some(id_edit.clone()));
+                                                },
+                                                "✏"
+                                            }
+                                            button {
+                                                class: "row-btn",
+                                                title: "Delete",
+                                                onclick: move |_| confirm_delete.set(Some(id_del.clone())),
+                                                "🗑"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -453,6 +505,37 @@ fn MainApp() -> Element {
                         SearchResultsView { results: search_results }
                     } else {
                         TranscriptView { segments }
+                    }
+                }
+            }
+        }
+
+        // ---- Confirm-delete dialog ----
+        if let Some(did) = confirm_delete.read().clone() {
+            {
+                let engine = engine.clone();
+                rsx! {
+                    div { class: "overlay",
+                        div { class: "confirm-card",
+                            h2 { "Delete session?" }
+                            p { class: "field-note", "This permanently removes the recording's transcript and summary. This can't be undone." }
+                            div { class: "confirm-actions",
+                                button { class: "mbtn ghost", onclick: move |_| confirm_delete.set(None), "Cancel" }
+                                button {
+                                    class: "mbtn danger",
+                                    onclick: move |_| {
+                                        let _ = engine.db_tx.send(DbCmd::DeleteSession(did.clone()));
+                                        if matches!(&*view.peek(), View::Session(v) if *v == did) {
+                                            view.set(View::Live);
+                                            segments.write().clear();
+                                            summary.set(None);
+                                        }
+                                        confirm_delete.set(None);
+                                    },
+                                    "Delete"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -733,10 +816,45 @@ fn fmt_ts(ms: u64) -> String {
     format!("{:02}:{:02}", total_s / 60, total_s % 60)
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 fn session_title(s: &Session) -> String {
-    s.title
-        .clone()
-        .unwrap_or_else(|| format!("Recording {}", s.started_at / 1000))
+    match s.title.as_ref().filter(|t| !t.trim().is_empty()) {
+        Some(t) => t.clone(),
+        None => format!("Recording · {}", relative_time(s.started_at)),
+    }
+}
+
+/// "just now" / "5m ago" / "2h ago" / "3d ago".
+fn relative_time(ms: u64) -> String {
+    let secs = now_ms().saturating_sub(ms) / 1000;
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Sidebar second line: model + recording duration when known.
+fn session_meta(s: &Session) -> String {
+    match s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000) {
+        Some(secs) if secs > 0 => format!("{} · {}", s.model, fmt_dur(secs)),
+        _ => s.model.clone(),
+    }
+}
+
+fn fmt_dur(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
 }
 
 fn short_id(id: &str) -> String {

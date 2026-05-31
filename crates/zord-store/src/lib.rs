@@ -147,6 +147,24 @@ impl Store {
         Ok(())
     }
 
+    /// Rename a session.
+    pub fn set_session_title(&self, id: &str, title: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE id = ?1",
+            params![id, title],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a session and its transcript. Clears segments first so the FTS
+    /// index is kept consistent (FK cascade doesn't fire triggers by default).
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        self.clear_segments(id)?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     /// Update which model is recorded for a session.
     pub fn set_session_model(&self, id: &str, model: &str) -> Result<()> {
         self.conn.execute(
