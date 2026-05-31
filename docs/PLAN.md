@@ -476,10 +476,42 @@ Original scope notes:
 Done in sub-steps (config+store → summarize params → GUI), feature-aware
 (summary bits under `summaries`). Not started.
 
-### Phase 16 — Per-speaker diarization (within "Others")
-Distinguish individual speakers inside the system channel (e.g. sherpa-onnx
-speaker-diarization / embeddings). Channel separation already covers Me-vs-Others;
-this adds Others → Speaker 1/2/3.
+### Phase 16 — Per-speaker diarization (within "Others") ✅
+Distinguish individual speakers inside the system channel, turning **Others →
+Speaker 1/2/3**. Channel separation already covers Me-vs-Others; this layers
+identity *within* the Others track. Feature-gated (`diarization`) so the default
+build stays lean; reuses the already-resolved `sherpa-onnx` crate (no new heavy
+dep).
+
+**Architecture — offline-first.** Diarization = embed each speech chunk +
+**cluster** embeddings into speakers. Clustering is inherently *global* (you must
+see every speaker, and their count is unknown until the end), so the accurate,
+source-of-truth pass is **offline**, run after recording. It also avoids
+competing with ASR for CPU/Metal during the call.
+- `zord-diarize` crate: pyannote segmentation + speaker-embedding models
+  (TitaNet small/large, WeSpeaker CAM++) downloaded/selected/deleted via the same
+  model-management UI as Whisper/summary models. `Diarizer` wraps
+  `OfflineSpeakerDiarization`; `LiveLabeler` wraps `SpeakerEmbeddingManager`.
+- The "Others" 16 kHz mono track is written to a WAV during recording (a temp
+  file when audio retention is off, deleted after the pass), then diarized and
+  mapped onto stored segments by **max temporal overlap**.
+- **Triggers:** auto at stop *and* an on-demand "Identify speakers" button /
+  `zord diarize <session>` CLI (on-demand needs retained audio).
+- **Live mode (optional, off by default):** `diarize_live` shows rough
+  provisional labels during recording via incremental embedding-match; these are
+  always replaced by the offline pass at stop. Gated by a settings toggle to
+  spare constrained hardware.
+- Storage: nullable `speaker` column on segments + a per-session `speaker_names`
+  table (rename "Speaker 1" → "Alex"). Labels flow into the transcript view
+  (per-speaker colors), search, and MD/SRT/JSON exports.
+
+Done in sub-steps: 16a config/core/store foundations → 16b `zord-diarize` crate →
+16c engine offline pass + on-demand worker → 16d live labeling → 16e GUI → 16f
+exports + CLI + docs.
+
+> **Runtime note:** the sherpa-onnx model download URLs and GPU/ONNX inference
+> are wired but not exercised headlessly — first-run download + accuracy need a
+> manual check on-device (see `verification-limits`).
 
 ### Cross-cutting / smaller
 - Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language

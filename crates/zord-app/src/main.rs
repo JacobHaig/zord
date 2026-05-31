@@ -107,6 +107,13 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Label individual speakers in a session's "Others" channel (requires
+    /// `--features diarization` and retained audio for that session).
+    Diarize {
+        session_id: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -148,6 +155,7 @@ fn main() -> Result<()> {
         Cmd::Encrypt { db, remember } => cmd_encrypt(db, remember),
         Cmd::Decrypt { db } => cmd_decrypt(db),
         Cmd::Summarize { session_id, db } => cmd_summarize(&session_id, db),
+        Cmd::Diarize { session_id, db } => cmd_diarize(&session_id, db),
     }
 }
 
@@ -192,6 +200,63 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
 #[cfg(not(feature = "summaries"))]
 fn cmd_summarize(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
+}
+
+#[cfg(feature = "diarization")]
+fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
+    let db_path = resolve_db(db)?;
+    let store = Store::open(&db_path)?;
+    let session = store
+        .get_session(session_id)?
+        .with_context(|| format!("no such session '{session_id}'"))?;
+    let prefix = session
+        .audio_path
+        .with_context(|| "this session didn't retain audio, so speakers can't be identified")?;
+    let wav = PathBuf::from(format!("{prefix}.others.wav"));
+    anyhow::ensure!(wav.exists(), "the 'Others' audio for this session is missing: {wav:?}");
+
+    let samples = zord_audio::read_wav_mono_f32(&wav)?;
+    anyhow::ensure!(!samples.is_empty(), "no 'Others' audio to diarize");
+
+    let settings = zord_config::Settings::load();
+    let model = zord_diarize::EmbeddingModel::parse_or_default(&settings.diarize_embedding_model);
+    eprintln!("Preparing speaker models '{}'…", model.name());
+    zord_diarize::ensure_diar_models(model, &mut |done, total| {
+        if let Some(total) = total {
+            eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
+        }
+    })?;
+    eprintln!("\r  models ready. Identifying speakers…       ");
+
+    let diarizer = zord_diarize::Diarizer::load_default(model)?;
+    let spans = diarizer.diarize(&samples)?;
+
+    let segs = store.segments(session_id)?;
+    store.clear_speakers(session_id)?;
+    let mut speakers = std::collections::HashSet::new();
+    for seg in segs.iter().filter(|s| s.source == zord_core::Source::Others) {
+        let Some(id) = seg.id else { continue };
+        let best = spans
+            .iter()
+            .map(|sp| {
+                let lo = seg.t_start_ms.max(sp.start_ms);
+                let hi = seg.t_end_ms.min(sp.end_ms);
+                (sp.speaker, hi.saturating_sub(lo))
+            })
+            .filter(|(_, ov)| *ov > 0)
+            .max_by_key(|(_, ov)| *ov);
+        if let Some((speaker, _)) = best {
+            store.set_segment_speaker(id, Some(speaker))?;
+            speakers.insert(speaker);
+        }
+    }
+    println!("Identified {} speaker(s) in session '{session_id}'.", speakers.len());
+    Ok(())
+}
+
+#[cfg(not(feature = "diarization"))]
+fn cmd_diarize(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
+    anyhow::bail!("this build has no diarization support — rebuild with `--features diarization`")
 }
 
 #[cfg(feature = "encryption")]
@@ -313,7 +378,8 @@ fn cmd_export(
         .get_session(session_id)?
         .with_context(|| format!("no such session '{session_id}'"))?;
     let segments = store.segments(session_id)?;
-    let rendered = zord_export::render(&session, &segments, fmt);
+    let names = store.speaker_names(session_id).unwrap_or_default();
+    let rendered = zord_export::render(&session, &segments, &names, fmt);
 
     match out {
         Some(path) => {

@@ -580,7 +580,8 @@ fn export_session(
         .get_session(id)?
         .ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let segments = store.segments(id)?;
-    let rendered = zord_export::render(&session, &segments, format);
+    let names = store.speaker_names(id).unwrap_or_default();
+    let rendered = zord_export::render(&session, &segments, &names, format);
 
     let dir = zord_transcribe::model_cache_dir()?
         .parent()

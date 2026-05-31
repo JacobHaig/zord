@@ -20,6 +20,10 @@ storage happen on your machine.
 - ✨ **Local AI summaries** *(optional)* — a local LLM (llama.cpp) turns a
   session into Markdown notes, fully offline. Pick the model (Qwen2.5 1.5B/3B/7B),
   a style preset, or write your own prompt — all in settings.
+- 🗣 **Per-speaker diarization** *(optional)* — split the "Others" channel into
+  **Speaker 1/2/3** (sherpa-onnx), rename them, and see them colored in the
+  transcript + exports. Runs offline after recording (and on demand); an optional
+  live mode shows provisional labels while recording.
 - 🎚️ **Configurable** — capture mic-only / system-only / both, edit transcript
   lines inline, and tune summary model + prompt from the settings panel.
 - 📤 **Export** — Markdown, SRT, or JSON, with one-click **Reveal in
@@ -90,6 +94,22 @@ cargo build -p zord-app --features summaries   # CLI: `zord summarize <session-i
 
 This compiles llama.cpp (Metal on Apple Silicon) and, on first use, downloads a
 ~2 GB instruct model (Qwen2.5-3B-Instruct, Q4_K_M) to the models folder.
+
+### Optional: per-speaker diarization
+
+Label individual speakers within the "Others" channel, build with the
+`diarization` feature:
+
+```bash
+cargo run -p zord-gui --features diarization     # GUI: 🗣 Identify speakers on a saved session
+cargo build -p zord-app --features diarization   # CLI: `zord diarize <session-id>`
+```
+
+On first use this downloads two small ONNX models (a pyannote segmentation model
++ a speaker-embedding model) to the models folder; manage them in Settings →
+Speakers. Diarization runs **offline after recording** (accurate) and on demand;
+the on-demand path needs retained audio. An optional **live** toggle shows rough
+labels while recording (off by default — it's recomputed accurately at stop).
 
 ### Optional: database encryption (SQLCipher)
 
@@ -186,6 +206,10 @@ zord serve --port 8080
 
 # Re-transcribe a kept-audio session with a different/better model
 zord retranscribe <session-id> --model large-v3-turbo
+
+# Label individual speakers in the "Others" channel (needs --features diarization
+# + retained audio for that session)
+zord diarize <session-id>
 ```
 
 **Models** (`--model`): `large-v3-turbo-q5_0` (default — best size/speed),
@@ -242,12 +266,14 @@ A Cargo workspace of focused crates:
 | Crate | Responsibility |
 |---|---|
 | `zord-core` | shared types (`Source`, `Segment`, `Session`) |
-| `zord-audio` | resample → 16 kHz mono, voice-activity segmentation, WAV writer |
+| `zord-audio` | resample → 16 kHz mono, voice-activity segmentation, WAV read/write |
 | `zord-capture` | audio sources: `Microphone` (cpal) + `SystemAudio` (ScreenCaptureKit / WASAPI loopback) |
 | `zord-transcribe` | `TranscribeBackend` trait + Whisper (whisper-rs) always, Parakeet (sherpa-onnx) under `parakeet`; model catalog + downloads |
 | `zord-store` | SQLite storage + FTS5 search |
 | `zord-config` | persisted settings + paths + retention |
 | `zord-export` | Markdown / SRT / JSON renderers |
+| `zord-summarize` | local-LLM summaries (llama.cpp) under `summaries`; summary-model catalog |
+| `zord-diarize` | per-speaker diarization (sherpa-onnx) under `diarization`; speaker-model catalog |
 | `zord-web` | axum `localhost` review dashboard |
 | `zord-app` | the `zord` CLI |
 | `zord-gui` | the Dioxus desktop app |
