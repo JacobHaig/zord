@@ -8,6 +8,7 @@ members = [
     "crates/zord-store",
     "crates/zord-config",
     "crates/zord-export",
+    "crates/zord-summarize",
     "crates/zord-web",
     "crates/zord-app",
     "crates/zord-gui",
@@ -28,6 +29,7 @@ zord-transcribe = { path = "crates/zord-transcribe" }
 zord-store = { path = "crates/zord-store" }
 zord-config = { path = "crates/zord-config" }
 zord-export = { path = "crates/zord-export" }
+zord-summarize = { path = "crates/zord-summarize" }
 zord-web = { path = "crates/zord-web" }
 
 # shared third-party
