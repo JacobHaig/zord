@@ -792,10 +792,36 @@ fn run_session(
                     return;
                 }
             };
+            // Optional live (provisional) speaker labeling for the "Others"
+            // channel. These rough labels are replaced by the accurate offline
+            // pass at stop. Silently disabled if the model isn't downloaded.
+            #[cfg(feature = "diarization")]
+            let mut live_labeler = {
+                let s = zord_config::Settings::load();
+                if s.diarize_live {
+                    let m =
+                        zord_diarize::EmbeddingModel::parse_or_default(&s.diarize_embedding_model);
+                    zord_diarize::LiveLabeler::new_default(m).ok()
+                } else {
+                    None
+                }
+            };
             while let Ok(job) = job_rx.recv() {
+                // Provisional speaker for this whole VAD chunk (Others only).
+                #[allow(unused_mut)]
+                let mut live_speaker: Option<i32> = None;
+                #[cfg(feature = "diarization")]
+                if job.source == Source::Others {
+                    if let Some(ll) = live_labeler.as_mut() {
+                        live_speaker = ll.label(&job.vad.samples, zord_core::WHISPER_SAMPLE_RATE);
+                    }
+                }
                 match transcriber.transcribe(&job.vad.samples, job.source, job.vad.t_start_ms) {
                     Ok(segs) => {
-                        for seg in segs {
+                        for mut seg in segs {
+                            if seg.speaker.is_none() {
+                                seg.speaker = live_speaker;
+                            }
                             let _ = store.insert_segment(&session, &seg);
                             let _ = ev.send(Event::Segment(seg));
                         }
