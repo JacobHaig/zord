@@ -6793,6 +6793,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zord-diarize"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bzip2",
+ "directories",
+ "sherpa-onnx",
+ "tar",
+ "tracing",
+ "ureq",
+ "zord-core",
+]
+
+[[package]]
 name = "zord-export"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,22 @@
+[package]
+name = "zord-diarize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Per-speaker diarization via sherpa-onnx (pyannote segmentation + speaker
+# embeddings + clustering). Heavy build (downloads/links sherpa-onnx); the
+# default build leaves this crate empty so the workspace stays lean.
+sherpa = ["dep:sherpa-onnx", "dep:tar", "dep:bzip2", "dep:directories", "dep:ureq"]
+
+[dependencies]
+zord-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+sherpa-onnx = { version = "1.13", optional = true }
+tar = { version = "0.4", optional = true }
+bzip2 = { version = "0.4", optional = true }
+directories = { version = "5", optional = true }
+ureq = { version = "2", optional = true }
