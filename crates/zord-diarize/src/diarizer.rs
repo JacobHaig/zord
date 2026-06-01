@@ -35,6 +35,10 @@ pub enum EmbeddingModel {
     CamPlusPlus,
     /// NVIDIA NeMo TitaNet large — best quality, heavier.
     TitanetLarge,
+    /// 3D-Speaker CAM++ — robust general-purpose embedding.
+    ThreeDSpeakerCampPlus,
+    /// WeSpeaker ResNet34 (VoxCeleb, English).
+    WespeakerResnet34,
 }
 
 impl EmbeddingModel {
@@ -42,6 +46,8 @@ impl EmbeddingModel {
         EmbeddingModel::TitanetSmall,
         EmbeddingModel::CamPlusPlus,
         EmbeddingModel::TitanetLarge,
+        EmbeddingModel::ThreeDSpeakerCampPlus,
+        EmbeddingModel::WespeakerResnet34,
     ];
 
     pub fn name(self) -> &'static str {
@@ -49,6 +55,8 @@ impl EmbeddingModel {
             EmbeddingModel::TitanetSmall => "nemo-titanet-small",
             EmbeddingModel::CamPlusPlus => "wespeaker-cam++",
             EmbeddingModel::TitanetLarge => "nemo-titanet-large",
+            EmbeddingModel::ThreeDSpeakerCampPlus => "3dspeaker-campplus",
+            EmbeddingModel::WespeakerResnet34 => "wespeaker-resnet34",
         }
     }
 
@@ -57,6 +65,8 @@ impl EmbeddingModel {
             EmbeddingModel::TitanetSmall => "TitaNet small — balanced (default)",
             EmbeddingModel::CamPlusPlus => "WeSpeaker CAM++ — lightest, fastest",
             EmbeddingModel::TitanetLarge => "TitaNet large — best quality, slower",
+            EmbeddingModel::ThreeDSpeakerCampPlus => "3D-Speaker CAM++ — robust, general-purpose",
+            EmbeddingModel::WespeakerResnet34 => "WeSpeaker ResNet34 — solid mid-range (English)",
         }
     }
 
@@ -65,6 +75,8 @@ impl EmbeddingModel {
             EmbeddingModel::TitanetSmall => "~38 MB",
             EmbeddingModel::CamPlusPlus => "~28 MB",
             EmbeddingModel::TitanetLarge => "~97 MB",
+            EmbeddingModel::ThreeDSpeakerCampPlus => "~27 MB",
+            EmbeddingModel::WespeakerResnet34 => "~25 MB",
         }
     }
 
@@ -74,6 +86,10 @@ impl EmbeddingModel {
             EmbeddingModel::TitanetSmall => "nemo_en_titanet_small.onnx",
             EmbeddingModel::CamPlusPlus => "wespeaker_en_voxceleb_CAM++.onnx",
             EmbeddingModel::TitanetLarge => "nemo_en_titanet_large.onnx",
+            EmbeddingModel::ThreeDSpeakerCampPlus => {
+                "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+            }
+            EmbeddingModel::WespeakerResnet34 => "wespeaker_en_voxceleb_resnet34.onnx",
         }
     }
 

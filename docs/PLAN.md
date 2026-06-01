@@ -558,6 +558,23 @@ and use the OS trust store (native-tls), across all three download paths
 Phase 17's URL + open-folder fallback already unblocks these users and is
 network-policy-proof; this just makes the happy path automatic.
 
+### Phase 19 — Flexible model sourcing (no-HuggingFace) ✅
+For users who can't reach HuggingFace (Whisper ggml + Qwen GGUFs live there) but
+*can* reach GitHub (Parakeet + diarization models do):
+- **Custom summary GGUF:** any `.gguf` dropped into the models folder is scanned
+  and appears in Settings → Summaries as a selectable "Custom GGUF" model
+  (`zord_summarize::list_custom_models` / `custom_model_path` /
+  `delete_custom_model`). The summarizer + CLI resolve a selected id as either a
+  built-in catalog model (download) or a local custom file — fully source-
+  agnostic, so a model obtained through any channel works. No download needed.
+- **More GitHub diarization models:** added 3D-Speaker CAM++ and WeSpeaker
+  ResNet34 embedding models (sherpa-onnx GitHub release) to the catalog.
+- Transcription is already GitHub-sourced via **Parakeet** (Whisper is the
+  HF one to skip on HF-blocked networks).
+
+Note: GGUF LLMs are HF-centric, so there's no good *catalog* of GitHub-hosted
+summary models — the custom-GGUF drop-in is the intended path there.
+
 ### Cross-cutting / smaller
 - Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language
   setting beyond English).

@@ -14,7 +14,9 @@ storage happen on your machine.
   (sherpa-onnx) behind a build feature. Models download on demand and run offline.
 - ⚙️ **Model management** — pick from several Whisper sizes (and Parakeet) in a
   settings panel; download / select / delete locally; re-transcribe old sessions
-  with a better model.
+  with a better model. No HuggingFace access? Parakeet + diarization models come
+  from GitHub, and any **custom `.gguf`** dropped in the models folder shows up
+  as a selectable summary model — no download required.
 - 🔎 **Searchable history** — every session stored in local SQLite with
   full-text search.
 - ✨ **Local AI summaries** *(optional)* — a local LLM (llama.cpp) turns a

@@ -928,7 +928,7 @@ fn MainApp() -> Element {
                                             }
                                         } else {
                                             rsx! {
-                                                p { class: "field-note", "Download and pick the summary model. Bigger = better notes but slower." }
+                                                p { class: "field-note", "Download and pick the summary model. Bigger = better notes but slower. No HuggingFace access? Drop any GGUF into the models folder (Files & folders, below) and it appears here as a custom model." }
                                                 for m in summary_models.iter() {
                                                     {
                                                         let name = m.name.clone();

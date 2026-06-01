@@ -95,6 +95,47 @@ pub fn delete_summary_model(model: SummaryModel) -> Result<()> {
     Ok(())
 }
 
+/// List user-supplied GGUF files in the models folder that aren't one of the
+/// built-in catalog models. Lets people use a model from any source (e.g. a
+/// GitHub mirror) by simply dropping the `.gguf` in — no HuggingFace needed.
+pub fn list_custom_models() -> Vec<String> {
+    let Ok(dir) = models_dir() else {
+        return Vec::new();
+    };
+    let known: Vec<&str> = SummaryModel::ALL.iter().map(|m| m.filename()).collect();
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_gguf = name.to_ascii_lowercase().ends_with(".gguf");
+            let nonempty = entry.metadata().map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+            if is_gguf && nonempty && !known.contains(&name.as_str()) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Resolve a custom (non-catalog) summary model file by name to its path. Only
+/// accepts a bare `.gguf` filename in the models folder (no path traversal).
+pub fn custom_model_path(name: &str) -> Option<PathBuf> {
+    if name.contains('/') || name.contains('\\') || !name.to_ascii_lowercase().ends_with(".gguf") {
+        return None;
+    }
+    let path = models_dir().ok()?.join(name);
+    path.is_file().then_some(path)
+}
+
+/// Delete a user-supplied custom GGUF from the models folder (no-op if absent).
+pub fn delete_custom_model(name: &str) -> Result<()> {
+    if let Some(path) = custom_model_path(name) {
+        std::fs::remove_file(&path).with_context(|| format!("deleting {path:?}"))?;
+    }
+    Ok(())
+}
+
 pub fn summary_model_present(model: SummaryModel) -> bool {
     models_dir()
         .map(|d| d.join(model.filename()))

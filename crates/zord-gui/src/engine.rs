@@ -113,6 +113,18 @@ fn catalog() -> Vec<ModelInfo> {
             urls: vec![m.url().to_string()],
         });
     }
+    // User-supplied GGUFs dropped into the models folder (any source — no HF).
+    #[cfg(feature = "summaries")]
+    for name in zord_summarize::list_custom_models() {
+        models.push(ModelInfo {
+            name,
+            size: "local".to_string(),
+            description: "Custom GGUF (in models folder)".to_string(),
+            downloaded: true,
+            kind: "summary".to_string(),
+            urls: Vec::new(),
+        });
+    }
     #[cfg(feature = "diarization")]
     for &m in zord_diarize::EmbeddingModel::ALL {
         models.push(ModelInfo {
@@ -271,15 +283,25 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
         .join("\n");
 
     let settings = zord_config::Settings::load();
-    let model = zord_summarize::SummaryModel::parse(&settings.summary_model)
-        .unwrap_or(zord_summarize::SummaryModel::Qwen3B);
     let _ = ev.send(Event::Notice("Preparing summary model…".to_string()));
-    let model_path = match zord_summarize::ensure_summary_model(model, &mut |_d, _t| {}) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = ev.send(Event::Notice(format!("summary model: {e}")));
-            return;
+    // Resolve the selected id: a built-in catalog model (download if needed), or
+    // a user-supplied custom GGUF already in the models folder.
+    let model_path = if let Some(model) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
+        match zord_summarize::ensure_summary_model(model, &mut |_d, _t| {}) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("summary model: {e}")));
+                return;
+            }
         }
+    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
+        p
+    } else {
+        let _ = ev.send(Event::Notice(format!(
+            "Summary model '{}' not found — pick one in Settings or drop its .gguf in the models folder.",
+            settings.summary_model
+        )));
+        return;
     };
     let _ = ev.send(Event::Notice("Summarizing…".to_string()));
     let summarizer = match zord_summarize::Summarizer::load(&model_path) {
@@ -359,6 +381,9 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 #[cfg(feature = "summaries")]
                 if let Some(sm) = zord_summarize::SummaryModel::parse(&name) {
                     let _ = zord_summarize::delete_summary_model(sm);
+                } else {
+                    // A user-supplied custom GGUF (no-op if it's not one).
+                    let _ = zord_summarize::delete_custom_model(&name);
                 }
                 #[cfg(feature = "diarization")]
                 if let Some(dm) = zord_diarize::EmbeddingModel::parse(&name) {

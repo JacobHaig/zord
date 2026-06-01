@@ -185,14 +185,26 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let transcript = transcript_text(&segs, &names);
 
     let settings = zord_config::Settings::load();
-    let model = zord_summarize::SummaryModel::parse(&settings.summary_model)
-        .unwrap_or(zord_summarize::SummaryModel::Qwen3B);
-    eprintln!("Preparing summary model '{}'…", model.name());
-    let model_path = zord_summarize::ensure_summary_model(model, &mut |done, total| {
-        if let Some(total) = total {
-            eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
-        }
-    })?;
+    // Built-in catalog model (download if needed), or a custom GGUF the user
+    // dropped into the models folder (any source — no HuggingFace required).
+    let model_path = if let Some(model) =
+        zord_summarize::SummaryModel::parse(&settings.summary_model)
+    {
+        eprintln!("Preparing summary model '{}'…", model.name());
+        zord_summarize::ensure_summary_model(model, &mut |done, total| {
+            if let Some(total) = total {
+                eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
+            }
+        })?
+    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
+        eprintln!("Using custom model '{}'…", settings.summary_model);
+        p
+    } else {
+        anyhow::bail!(
+            "summary model '{}' not found — set one in the GUI, or drop its .gguf in the models folder",
+            settings.summary_model
+        );
+    };
     eprintln!("\r  model ready. Summarizing…              ");
 
     let summarizer = zord_summarize::Summarizer::load(&model_path)?;

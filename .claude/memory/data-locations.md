@@ -29,4 +29,11 @@ the pass when audio isn't retained), `exports/` (GUI export output). `storage_di
 in settings can relocate db/audio/exports (NOT models, config, or logs). Models
 download on first use — never embedded; a failed in-app download shows the direct
 URL + "Open models folder" so users can drop the file in manually (Phase 17).
+
+**Model sources** (matters on HF-blocked / corporate networks): Whisper ggml +
+Qwen summary GGUFs are on **HuggingFace**; Parakeet + diarization models are on
+**GitHub** (k2-fsa/sherpa-onnx releases). So an HF-blocked user should use
+Parakeet for ASR. For summaries, Phase 19 added **custom GGUF** support: any
+`.gguf` dropped into `models/` is auto-listed in Settings → Summaries (filename
+is the id), so a model from any source works without HuggingFace.
 Related: [[architecture]], [[diarization-design]].
