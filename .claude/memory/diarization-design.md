@@ -26,7 +26,12 @@ stop**. User asked for both triggers + a live toggle.
 
 **How it's wired:**
 - `zord-diarize`: `Diarizer` wraps `OfflineSpeakerDiarization` (pyannote
-  segmentation + speaker-embedding + `FastClusteringConfig{num_clusters:-1}`);
+  segmentation + speaker-embedding + `FastClusteringConfig{num_clusters,threshold:0.5}`).
+  `num_clusters:-1` = auto, but auto OVER-SPLITS noisy meeting mixes (a 10-person
+  call came out as ~80 "speakers", because the Others channel is the call's
+  compressed/echo-cancelled output). The `diarize_num_speakers` setting (0=auto)
+  pins a fixed count via `Diarizer::load_with_speakers` — the deterministic fix;
+  a bigger embedding model alone does NOT reliably fix the count.
   `LiveLabeler` wraps `SpeakerEmbeddingExtractor`+`SpeakerEmbeddingManager`.
   Two ONNX models (pyannote seg ~6MB + embedding: TitaNet small/large or
   WeSpeaker CAM++) managed via the same download/select/delete model UI

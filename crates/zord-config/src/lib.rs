@@ -62,6 +62,11 @@ pub struct Settings {
     /// later (e.g. with a different/bigger model), even when `keep_audio` is off.
     #[serde(default)]
     pub diarize_keep_audio: bool,
+    /// Force a fixed number of speakers for diarization (0 = auto-detect).
+    /// Set this to a known headcount when auto-clustering over-splits (e.g. a
+    /// 10-person call coming out as 80 "speakers").
+    #[serde(default)]
+    pub diarize_num_speakers: u32,
 }
 
 fn default_true() -> bool {
@@ -126,6 +131,7 @@ impl Default for Settings {
             diarize_live: false,
             diarize_embedding_model: default_embedding_model(),
             diarize_keep_audio: false,
+            diarize_num_speakers: 0,
         }
     }
 }

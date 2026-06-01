@@ -562,7 +562,9 @@ fn apply_diarization(
     }
 
     let _ = ev.send(Event::Notice("Identifying speakers…".to_string()));
-    let diarizer = match zord_diarize::Diarizer::load_default(model) {
+    // Pin the speaker count when the user set one (0 = auto-detect).
+    let num_speakers = (settings.diarize_num_speakers > 0).then_some(settings.diarize_num_speakers as i32);
+    let diarizer = match zord_diarize::Diarizer::load_with_speakers(model, num_speakers) {
         Ok(d) => d,
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("diarizer: {e}")));

@@ -245,7 +245,9 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     })?;
     eprintln!("\r  models ready. Identifying speakers…       ");
 
-    let diarizer = zord_diarize::Diarizer::load_default(model)?;
+    let num_speakers =
+        (settings.diarize_num_speakers > 0).then_some(settings.diarize_num_speakers as i32);
+    let diarizer = zord_diarize::Diarizer::load_with_speakers(model, num_speakers)?;
     let spans = diarizer.diarize(&samples)?;
 
     let segs = store.segments(session_id)?;

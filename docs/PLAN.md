@@ -574,7 +574,14 @@ For users who can't reach HuggingFace (Whisper ggml + Qwen GGUFs live there) but
   `diarize_keep_audio` opt-in (Settings → Speakers) that keeps just the Others
   track (even with Keep-audio off) so "Identify speakers" can be re-run later
   with a bigger/different model. Without it, the on-demand notice now explains
-  how to enable it.
+  how to enable it. Re-diarization re-reads the original Others WAV and
+  re-clusters from scratch (`clear_speakers` + reassign) — never builds on a
+  prior pass.
+- **Expected-speaker-count control:** `diarize_num_speakers` (0 = auto) forces a
+  fixed speaker count. The auto-clustering can over-split a noisy meeting *mix*
+  (the Others channel is the call's compressed/echo-cancelled output) into far
+  too many "speakers" (e.g. 80 for a 10-person call); pinning the headcount fixes
+  it deterministically. Wired into GUI + engine + `zord diarize`.
 - Transcription is already GitHub-sourced via **Parakeet** (Whisper is the
   HF one to skip on HF-blocked networks).
 

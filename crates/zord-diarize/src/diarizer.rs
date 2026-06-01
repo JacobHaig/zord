@@ -293,6 +293,12 @@ impl Diarizer {
         Self::load(model, None, DEFAULT_THRESHOLD)
     }
 
+    /// Like [`load_default`], but pin a fixed speaker count (`None` = auto).
+    /// Forcing the known headcount avoids auto-clustering over-splitting.
+    pub fn load_with_speakers(model: EmbeddingModel, num_speakers: Option<i32>) -> Result<Self> {
+        Self::load(model, num_speakers, DEFAULT_THRESHOLD)
+    }
+
     /// Sample rate the segmentation model expects (typically 16 kHz).
     pub fn sample_rate(&self) -> u32 {
         self.inner.sample_rate().max(0) as u32

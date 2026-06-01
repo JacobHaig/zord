@@ -1058,6 +1058,20 @@ fn MainApp() -> Element {
                                                         }
                                                     }
                                                 }
+                                                div { class: "field",
+                                                    label { "Expected number of speakers (0 = auto-detect)" }
+                                                    input {
+                                                        r#type: "number", min: "0", class: "days", placeholder: "auto",
+                                                        value: if settings.read().diarize_num_speakers > 0 { settings.read().diarize_num_speakers.to_string() } else { String::new() },
+                                                        oninput: move |e: FormEvent| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.diarize_num_speakers = e.value().trim().parse::<u32>().unwrap_or(0);
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                    }
+                                                }
+                                                p { class: "field-note", "Auto-clustering can over-split a noisy meeting mix into far too many speakers. If you know the headcount, set it here to force exactly that many. Re-run Identify speakers to apply." }
                                                 div { class: "field-row",
                                                     label { class: "field-label", "Identify speakers automatically after recording" }
                                                     button {
