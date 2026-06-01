@@ -28,6 +28,11 @@ storage happen on your machine.
   lines inline, and tune summary model + prompt from the settings panel.
 - 📤 **Export** — Markdown, SRT, or JSON, with one-click **Reveal in
   Finder/Explorer** and **Open in editor**.
+- 🧰 **Diagnostics** — Settings → *Files & folders* jumps straight to the
+  models / data / logs folders (and reveals the config + database). Errors are
+  written to a `zord.log` you can open or copy. And if a model download is
+  blocked (e.g. a corporate proxy), Zord shows the direct URL + *Open models
+  folder* so you can fetch it in a browser and drop it in.
 - 🖥️ **Two front-ends** — a native desktop GUI (Dioxus) and a `localhost` web
   dashboard for reviewing transcripts in a browser.
 - 🔒 **Private by design** — retention controls (keep/auto-delete audio), a
