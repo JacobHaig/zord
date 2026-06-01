@@ -513,17 +513,24 @@ exports + CLI + docs.
 > are wired but not exercised headlessly — first-run download + accuracy need a
 > manual check on-device (see `verification-limits`).
 
-### Phase 17 — Diagnostics & on-disk shortcuts (pending)
-Make the app's on-disk locations discoverable and make errors easy to grab. A
-row of "Open…" buttons at the bottom of the settings panel that reveal the
-important paths in Finder/Explorer, plus real file logging so there's actually a
-log to open and copy/paste when something fails.
+### Phase 17 — Diagnostics, on-disk shortcuts & manual-download fallback (pending) ⭐ next
+Make the app's on-disk locations discoverable, make errors easy to grab, and
+make the **manual model-download workaround first-class** — because dropping a
+file into the `models/` folder works on *any* network (proxy, HTTPS-inspection,
+air-gapped), unlike the automatic downloader. Prioritized **above** Phase 18:
+this is the network-agnostic safety net, validated in practice (a user behind a
+corporate proxy fetched the model in a browser and dropped it in — seamless).
 
 - **Settings "Open…" shortcuts:** reveal each of — **models** folder, **data**
   folder (config/db/audio/exports; already has an "Open data folder" button to
   build on), **logs** folder, the **config.json** file, and the **database**
   file. Reuse the existing `osutil::open_folder` / `reveal_in_file_manager` /
   `open_in_editor` helpers.
+- **Graceful download-failure fallback:** when an in-app model download fails,
+  don't just show an error — surface the **exact download URL** (one-click copy)
+  and an **"Open models folder"** button, so the user can grab it in a browser
+  (which uses the proxy) and drop it in. Document the expected folder/layout per
+  model. This is the highest-value bit and works regardless of network policy.
 - **File logging (prerequisite):** today `tracing` only writes to stderr, so a
   bundled GUI app leaves no log behind. Add a rotating file sink (e.g.
   `tracing-appender`) writing to `<data>/logs/zord.log` alongside stderr, so
@@ -534,15 +541,19 @@ log to open and copy/paste when something fails.
 - Keep it lean: no new runtime deps beyond a small log-rotation crate; pure UI +
   logging plumbing, no feature gate.
 
+### Phase 18 — Proxy-aware / resilient downloads (pending; lower priority than 17)
+The *automatic* counterpart to Phase 17's manual fallback: make in-app downloads
+actually succeed on managed networks. The downloader (`ureq`, direct HTTPS)
+currently ignores system proxies and the OS cert store, so first-run model
+fetches fail behind a proxy / HTTPS-inspection. Honor `HTTP(S)_PROXY` env vars
+and use the OS trust store (native-tls), across all three download paths
+(transcribe / summarize / diarize), with retry/resume. Lower priority because
+Phase 17's URL + open-folder fallback already unblocks these users and is
+network-policy-proof; this just makes the happy path automatic.
+
 ### Cross-cutting / smaller
 - Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language
   setting beyond English).
-- **Corporate-network model downloads:** the in-app downloader (`ureq`, direct
-  HTTPS) ignores system proxies and the OS cert store, so first-run model
-  fetches fail behind a proxy / HTTPS-inspection (managed machines). Honor
-  `HTTP(S)_PROXY` env vars and use the OS trust store (native-tls), across all
-  three download paths (transcribe / summarize / diarize). Workaround until then:
-  download the model in a browser and drop it in the `models/` folder.
 - CUDA release builds for Windows/Linux NVIDIA GPUs.
 - macOS code-sign + notarize automation (needs Apple Developer account).
 - Windows code-signing (Authenticode) so SmartScreen/managed machines don't
