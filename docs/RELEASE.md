@@ -58,9 +58,10 @@ All artifacts follow one scheme — `Zord-<version>-<os>-<arch>[-<kind>].<ext>`:
 
 | File | What |
 |---|---|
-| `Zord-<ver>-macos-arm64.dmg` | macOS GUI installer |
-| `Zord-<ver>-macos-arm64-app.zip` | macOS GUI `.app`, zipped |
+| `Zord-<ver>-macos-arm64.dmg` | macOS GUI installer (disk image) |
+| `Zord-<ver>-macos-arm64-gui.zip` | macOS GUI `.app`, zipped (portable) |
 | `zord-<ver>-macos-arm64-cli` | macOS `zord` CLI |
+| `Zord-<ver>-macos-arm64.zip` | macOS GUI `.app` + CLI, zipped together |
 | `Zord-<ver>-windows-x64-setup.exe` | Windows GUI installer |
 | `Zord-<ver>-windows-x64-gui.exe` | Windows GUI, portable single `.exe` (no install; needs the OS WebView2 runtime) |
 | `zord-<ver>-windows-x64-cli.exe` | Windows `zord` CLI |

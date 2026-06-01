@@ -97,15 +97,27 @@ jobs:
         run: |
           mkdir -p dist
           # Unified naming: Zord-<ver>-<os>-<arch>[-<kind>].<ext> (tag → version,
-          # otherwise "dev"). One scheme for every artifact, from any source.
+          # otherwise "dev"). Four macOS artifacts mirroring Windows: installer
+          # (.dmg), portable GUI (.app zipped), CLI, and a GUI+CLI zip.
           VER="${GITHUB_REF_NAME#v}"; [ "$GITHUB_REF_TYPE" = "tag" ] || VER="dev"
-          # GUI installer (dx-produced .dmg) and the .app as a zip.
+          # GUI installer (dx-produced .dmg).
           DMG=$(find target -name "*.dmg" -maxdepth 6 | head -1)
           if [ -n "$DMG" ]; then cp "$DMG" "dist/Zord-$VER-macos-arm64.dmg"; fi
+          # Portable GUI: the .app, zipped (a bundle can't be a single file).
           APP=$(find target -path "*bundle*" -name "*.app" -maxdepth 8 -type d | head -1)
-          if [ -n "$APP" ]; then ditto -c -k --keepParent "$APP" "dist/Zord-$VER-macos-arm64-app.zip"; fi
+          if [ -n "$APP" ]; then ditto -c -k --keepParent "$APP" "dist/Zord-$VER-macos-arm64-gui.zip"; fi
           # CLI binary.
           if [ -f target/release/zord ]; then cp target/release/zord "dist/zord-$VER-macos-arm64-cli"; fi
+          # Combined portable zip: the GUI .app + the CLI together (mirrors the
+          # Windows GUI+CLI zip). Staged under a named folder so it extracts cleanly.
+          if [ -n "$APP" ] && [ -f target/release/zord ]; then
+            STAGE="Zord-$VER-macos-arm64"
+            rm -rf "$STAGE"; mkdir -p "$STAGE"
+            cp -R "$APP" "$STAGE/"
+            cp target/release/zord "$STAGE/zord"
+            ditto -c -k --keepParent "$STAGE" "dist/Zord-$VER-macos-arm64.zip"
+            rm -rf "$STAGE"
+          fi
           ls -la dist
 
       - name: Upload to release
