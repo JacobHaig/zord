@@ -121,6 +121,12 @@ jobs:
   windows:
     name: Windows (x64)
     runs-on: windows-latest # has MSVC, CMake, and WebView2 preinstalled
+    env:
+      # Build the cmake C++ deps (llama.cpp, whisper.cpp) against the STATIC MSVC
+      # runtime so they match sherpa-onnx's prebuilt /MT libs and Rust's
+      # crt-static (set in .cargo/config.toml). Avoids LNK2038/LNK2005.
+      CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+      CMAKE_POLICY_DEFAULT_CMP0091: NEW # honor CMAKE_MSVC_RUNTIME_LIBRARY
     steps:
       - uses: actions/checkout@v4
 

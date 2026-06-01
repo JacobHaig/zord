@@ -9,3 +9,12 @@ MACOSX_DEPLOYMENT_TARGET = "13.0"
 # NOTE: Phase 6 (packaging) will detect this path instead of hardcoding it.
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift/macosx"]
+
+# Windows: sherpa-onnx's prebuilt libs (diarization/parakeet) link the STATIC
+# MSVC CRT (/MT). Rust + the cmake-built C++ deps (llama.cpp for summaries,
+# whisper.cpp) default to the DYNAMIC CRT (/MD), which collides at link time
+# (LNK2038/LNK2005). Force the whole binary onto the static CRT so they match.
+# Paired with CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded (set in CI) so the cmake
+# deps build static too.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
