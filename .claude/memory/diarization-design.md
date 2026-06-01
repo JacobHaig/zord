@@ -37,7 +37,13 @@ stop**. User asked for both triggers + a live toggle.
   speaker}` is mapped onto stored Others segments by **max temporal overlap**.
 - Triggers: auto at stop (control thread) + on-demand `DbCmd::Diarize` (spawns a
   worker so the db thread stays responsive) + `zord diarize <session>` CLI.
-  On-demand needs retained audio (reads `session.audio_path` + `.others.wav`).
+  On-demand re-reads `session.audio_path` + `.others.wav`, so **re-diarizing
+  (e.g. swapping to a bigger model) only works if that WAV was retained.** The
+  `diarize_keep_audio` setting (Phase 19) keeps just the Others track even when
+  Keep-audio is off, precisely so users can re-run with a different model later;
+  otherwise the temp Others WAV is deleted after the first pass. apply_diarization
+  reads the current `diarize_embedding_model` from settings each run, so a model
+  swap takes effect on the next "Identify speakers".
 - Storage: nullable `segments.speaker` + per-session `speaker_names` table
   (rename Speaker 1 → Alex). `Segment::speaker_label(&names)` renders Me /
   Speaker N / custom; flows into transcript (per-speaker colors), search, and

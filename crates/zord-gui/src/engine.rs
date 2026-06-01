@@ -502,7 +502,10 @@ fn diarize_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedS
         };
         let Some(prefix) = session.audio_path else {
             let _ = ev.send(Event::Notice(
-                "This session didn't retain audio, so speakers can't be re-identified.".to_string(),
+                "This session didn't retain audio, so speakers can't be re-identified. Turn on \
+                 Settings → Speakers → \"Keep audio for re-diarization\" (or Keep audio) before \
+                 recording to enable re-running with a different model."
+                    .to_string(),
             ));
             return;
         };
@@ -741,12 +744,26 @@ fn run_session(
     // When keeping audio, we store per-channel WAVs as <audio_dir>/<id>.<src>.wav;
     // record the prefix so re-transcribe / playback can find them.
     let audio_prefix = audio_dir.join(&session_id);
+
+    // Diarization retention. The offline pass needs the full "Others" track:
+    // - `diarize_auto`: run diarization at stop (writes a temp Others WAV).
+    // - `keep_others_for_diar`: retain that WAV (+ record audio_path) so the user
+    //   can re-identify speakers later with a different model, even with
+    //   keep_audio off.
+    let settings = zord_config::Settings::load();
+    let diarize_auto = cfg!(feature = "diarization") && record_system && settings.diarize_auto;
+    let keep_others_for_diar =
+        cfg!(feature = "diarization") && record_system && settings.diarize_keep_audio;
+    // We persist audio (so re-transcribe / re-diarize can find it) when the user
+    // keeps audio, or opts to keep the Others track for re-diarization.
+    let persist_audio = keep_audio || keep_others_for_diar;
+
     let _ = store.create_session(&Session {
         id: session_id.clone(),
         started_at,
         ended_at: None,
         title: None,
-        audio_path: if keep_audio {
+        audio_path: if persist_audio {
             Some(audio_prefix.display().to_string())
         } else {
             None
@@ -762,17 +779,15 @@ fn run_session(
         }
     };
 
-    // Diarization runs offline at stop. It needs the full "Others" track, so we
-    // write that WAV even when the user isn't retaining audio (deleted after the
-    // pass). Only when the feature is built and auto-diarize is enabled.
-    let settings = zord_config::Settings::load();
-    let diarize_auto = cfg!(feature = "diarization") && record_system && settings.diarize_auto;
-    let others_wav: Option<PathBuf> = if record_system && (keep_audio || diarize_auto) {
-        let _ = std::fs::create_dir_all(&audio_dir);
-        Some(audio_dir.join(format!("{session_id}.others.wav")))
-    } else {
-        None
-    };
+    // Write the Others WAV if anything needs it: kept audio, the auto pass, or
+    // retaining it for later re-diarization.
+    let others_wav: Option<PathBuf> =
+        if record_system && (keep_audio || diarize_auto || keep_others_for_diar) {
+            let _ = std::fs::create_dir_all(&audio_dir);
+            Some(audio_dir.join(format!("{session_id}.others.wav")))
+        } else {
+            None
+        };
 
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
@@ -900,14 +915,15 @@ fn run_session(
     let _ = store.end_session(&session_id, now_ms());
 
     // Offline speaker diarization (accurate, source of truth) over the "Others"
-    // track, then drop the temp WAV if the user isn't retaining audio.
+    // track, then drop the temp WAV unless we're retaining it (kept audio, or
+    // kept-for-re-diarization).
     #[cfg(feature = "diarization")]
     if diarize_auto {
         if let Some(wav) = others_wav.as_ref() {
             apply_diarization(&store, &session_id, wav, ev);
         }
     }
-    if !keep_audio {
+    if !persist_audio {
         if let Some(wav) = others_wav.as_ref() {
             let _ = std::fs::remove_file(wav);
         }

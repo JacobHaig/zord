@@ -58,6 +58,10 @@ pub struct Settings {
     /// Speaker-embedding model id for diarization (see zord-diarize catalog).
     #[serde(default = "default_embedding_model")]
     pub diarize_embedding_model: String,
+    /// Keep the "Others" track after recording so speakers can be re-identified
+    /// later (e.g. with a different/bigger model), even when `keep_audio` is off.
+    #[serde(default)]
+    pub diarize_keep_audio: bool,
 }
 
 fn default_true() -> bool {
@@ -121,6 +125,7 @@ impl Default for Settings {
             diarize_auto: true,
             diarize_live: false,
             diarize_embedding_model: default_embedding_model(),
+            diarize_keep_audio: false,
         }
     }
 }

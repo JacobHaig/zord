@@ -569,6 +569,12 @@ For users who can't reach HuggingFace (Whisper ggml + Qwen GGUFs live there) but
   agnostic, so a model obtained through any channel works. No download needed.
 - **More GitHub diarization models:** added 3D-Speaker CAM++ and WeSpeaker
   ResNet34 embedding models (sherpa-onnx GitHub release) to the catalog.
+- **Re-diarize with a different model:** on-demand diarization re-reads the
+  session's "Others" WAV, so it only worked when audio was retained. Added a
+  `diarize_keep_audio` opt-in (Settings → Speakers) that keeps just the Others
+  track (even with Keep-audio off) so "Identify speakers" can be re-run later
+  with a bigger/different model. Without it, the on-demand notice now explains
+  how to enable it.
 - Transcription is already GitHub-sourced via **Parakeet** (Whisper is the
   HF one to skip on HF-blocked networks).
 

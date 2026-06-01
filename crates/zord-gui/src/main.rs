@@ -1085,6 +1085,20 @@ fn MainApp() -> Element {
                                                     }
                                                 }
                                                 p { class: "field-note", "Live labels are rough and get replaced by the accurate pass at stop. Leave off on lighter hardware." }
+                                                div { class: "field-row",
+                                                    label { class: "field-label", "Keep audio for re-diarization (re-run with a different model later)" }
+                                                    button {
+                                                        class: if settings.read().diarize_keep_audio { "toggle on" } else { "toggle" },
+                                                        onclick: move |_| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.diarize_keep_audio = !s.diarize_keep_audio;
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                        if settings.read().diarize_keep_audio { "On" } else { "Off" }
+                                                    }
+                                                }
+                                                p { class: "field-note", "Retains the 'Others' track on disk (even when Keep audio is off) so you can press Identify speakers again with another model. Off = the audio is dropped after the first pass." }
                                             }
                                         }
                                     }
