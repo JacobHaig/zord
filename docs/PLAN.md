@@ -513,11 +513,40 @@ exports + CLI + docs.
 > are wired but not exercised headlessly — first-run download + accuracy need a
 > manual check on-device (see `verification-limits`).
 
+### Phase 17 — Diagnostics & on-disk shortcuts (pending)
+Make the app's on-disk locations discoverable and make errors easy to grab. A
+row of "Open…" buttons at the bottom of the settings panel that reveal the
+important paths in Finder/Explorer, plus real file logging so there's actually a
+log to open and copy/paste when something fails.
+
+- **Settings "Open…" shortcuts:** reveal each of — **models** folder, **data**
+  folder (config/db/audio/exports; already has an "Open data folder" button to
+  build on), **logs** folder, the **config.json** file, and the **database**
+  file. Reuse the existing `osutil::open_folder` / `reveal_in_file_manager` /
+  `open_in_editor` helpers.
+- **File logging (prerequisite):** today `tracing` only writes to stderr, so a
+  bundled GUI app leaves no log behind. Add a rotating file sink (e.g.
+  `tracing-appender`) writing to `<data>/logs/zord.log` alongside stderr, so
+  errors (failed model downloads, capture/transcribe/diarize failures, etc.)
+  persist. Respect the same `storage_dir` relocation as the rest of the data.
+- **Copy affordance:** a "Open log" (in editor) and/or "Copy last error" button
+  so users can paste diagnostics into a bug report without hunting for the file.
+- Keep it lean: no new runtime deps beyond a small log-rotation crate; pure UI +
+  logging plumbing, no feature gate.
+
 ### Cross-cutting / smaller
 - Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language
   setting beyond English).
+- **Corporate-network model downloads:** the in-app downloader (`ureq`, direct
+  HTTPS) ignores system proxies and the OS cert store, so first-run model
+  fetches fail behind a proxy / HTTPS-inspection (managed machines). Honor
+  `HTTP(S)_PROXY` env vars and use the OS trust store (native-tls), across all
+  three download paths (transcribe / summarize / diarize). Workaround until then:
+  download the model in a browser and drop it in the `models/` folder.
 - CUDA release builds for Windows/Linux NVIDIA GPUs.
 - macOS code-sign + notarize automation (needs Apple Developer account).
+- Windows code-signing (Authenticode) so SmartScreen/managed machines don't
+  block the binaries (CI step ready to wire once a cert/signing service exists).
 
 ---
 
