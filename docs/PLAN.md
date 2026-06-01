@@ -513,7 +513,7 @@ exports + CLI + docs.
 > are wired but not exercised headlessly — first-run download + accuracy need a
 > manual check on-device (see `verification-limits`).
 
-### Phase 17 — Diagnostics, on-disk shortcuts & manual-download fallback (pending) ⭐ next
+### Phase 17 — Diagnostics, on-disk shortcuts & manual-download fallback ✅
 Make the app's on-disk locations discoverable, make errors easy to grab, and
 make the **manual model-download workaround first-class** — because dropping a
 file into the `models/` folder works on *any* network (proxy, HTTPS-inspection,
@@ -540,6 +540,13 @@ corporate proxy fetched the model in a browser and dropped it in — seamless).
   so users can paste diagnostics into a bug report without hunting for the file.
 - Keep it lean: no new runtime deps beyond a small log-rotation crate; pure UI +
   logging plumbing, no feature gate.
+
+**Done.** Settings → "Files & folders" reveals models / data / logs / config /
+database; "Open log" + "Copy recent log" for diagnostics; file logging to
+`<app-data>/logs/zord.log` (via `tracing-appender`, alongside stderr); and on a
+failed model download the settings panel shows the direct URL(s) (copy / open in
+browser) + "Open models folder". Model `urls` are carried in the catalog
+(`ModelInfo.urls`); engine emits `Event::DownloadFailed`.
 
 ### Phase 18 — Proxy-aware / resilient downloads (pending; lower priority than 17)
 The *automatic* counterpart to Phase 17's manual fallback: make in-app downloads

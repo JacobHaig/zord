@@ -66,6 +66,9 @@ pub enum Event {
     Models(Vec<ModelInfo>),
     /// Download progress for a model (0..100).
     ModelProgress { name: String, pct: u8 },
+    /// A model download failed — the UI offers the manual-fetch fallback
+    /// (direct URL + open models folder) for this model.
+    DownloadFailed { name: String },
     /// A session's summary (loaded or freshly generated). `None` = none yet.
     Summary(Option<String>),
     /// Custom names for diarized speakers in the viewed session (index → name).
@@ -73,7 +76,8 @@ pub enum Event {
 }
 
 /// A model in the catalog plus whether it's downloaded locally. `kind` is
-/// "transcription" or "summary" so the UI can group them.
+/// "transcription", "summary", or "diarization" so the UI can group them.
+/// `urls` are the direct download links for the manual-fetch fallback.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelInfo {
     pub name: String,
@@ -81,6 +85,7 @@ pub struct ModelInfo {
     pub description: String,
     pub downloaded: bool,
     pub kind: String,
+    pub urls: Vec<String>,
 }
 
 fn catalog() -> Vec<ModelInfo> {
@@ -94,6 +99,7 @@ fn catalog() -> Vec<ModelInfo> {
             description: m.description().to_string(),
             downloaded: zord_transcribe::is_downloaded(m),
             kind: "transcription".to_string(),
+            urls: vec![m.download_url()],
         })
         .collect();
     #[cfg(feature = "summaries")]
@@ -104,16 +110,18 @@ fn catalog() -> Vec<ModelInfo> {
             description: m.label().to_string(),
             downloaded: zord_summarize::summary_model_present(m),
             kind: "summary".to_string(),
+            urls: vec![m.url().to_string()],
         });
     }
     #[cfg(feature = "diarization")]
-    for (name, label, size, present) in zord_diarize::list_embedding_models() {
+    for &m in zord_diarize::EmbeddingModel::ALL {
         models.push(ModelInfo {
-            name: name.to_string(),
-            size: size.to_string(),
-            description: label.to_string(),
-            downloaded: present,
+            name: m.name().to_string(),
+            size: m.size_label().to_string(),
+            description: m.label().to_string(),
+            downloaded: zord_diarize::diar_models_present(m),
             kind: "diarization".to_string(),
+            urls: m.download_urls(),
         });
     }
     models
@@ -314,7 +322,8 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 #[cfg(feature = "summaries")]
                 let handled_summary = if let Some(sm) = zord_summarize::SummaryModel::parse(&name) {
                     if let Err(e) = zord_summarize::ensure_summary_model(sm, &mut progress) {
-                        let _ = ev.send(Event::Notice(format!("download failed: {e}")));
+                        tracing::warn!("model download failed for {name}: {e}");
+                        let _ = ev.send(Event::DownloadFailed { name: name.clone() });
                     }
                     true
                 } else {
@@ -326,7 +335,8 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 #[cfg(feature = "diarization")]
                 let handled_diar = if let Some(dm) = zord_diarize::EmbeddingModel::parse(&name) {
                     if let Err(e) = zord_diarize::ensure_diar_models(dm, &mut progress) {
-                        let _ = ev.send(Event::Notice(format!("download failed: {e}")));
+                        tracing::warn!("model download failed for {name}: {e}");
+                        let _ = ev.send(Event::DownloadFailed { name: name.clone() });
                     }
                     true
                 } else {
@@ -338,7 +348,8 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 if !handled_summary && !handled_diar {
                     if let Some(model) = ModelId::parse(&name) {
                         if let Err(e) = ensure_model(model, &mut progress) {
-                            let _ = ev.send(Event::Notice(format!("download failed: {e}")));
+                            tracing::warn!("model download failed for {name}: {e}");
+                            let _ = ev.send(Event::DownloadFailed { name: name.clone() });
                         }
                     }
                 }

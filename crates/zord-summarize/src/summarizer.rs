@@ -63,7 +63,7 @@ impl SummaryModel {
         }
     }
 
-    fn url(self) -> &'static str {
+    pub fn url(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
             SummaryModel::Qwen3B => "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",

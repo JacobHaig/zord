@@ -30,6 +30,7 @@ zord-export = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
 dioxus = { version = "0.7", features = ["desktop"] }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 zord-summarize = { workspace = true, optional = true }

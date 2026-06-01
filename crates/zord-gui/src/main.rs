@@ -18,12 +18,10 @@ use zord_transcribe::ModelId;
 const CSS: &str = include_str!("style.css");
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zord=info,whisper_rs=warn".into()),
-        )
-        .init();
+    // Logging: always to stderr, plus a rotating file at <app-data>/logs/zord.log
+    // so a bundled GUI leaves a copy/pasteable trail when something fails. The
+    // returned guard must outlive the app, so keep it in `main`'s scope.
+    let _log_guard = init_logging();
     zord_transcribe::install_logging_hooks();
 
     let window = WindowBuilder::new()
@@ -35,6 +33,36 @@ fn main() {
         cfg = cfg.with_icon(icon);
     }
     LaunchBuilder::desktop().with_cfg(cfg).launch(App);
+}
+
+/// Set up tracing: an stderr layer always, plus a file layer at
+/// `<app-data>/logs/zord.log` when that directory is writable. Returns the file
+/// writer's guard, which must be held for the process lifetime so buffered logs
+/// flush (hence it lives in `main`).
+fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "zord=info,whisper_rs=warn".into());
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+
+    match zord_config::logs_dir() {
+        Ok(dir) => {
+            let (writer, guard) =
+                tracing_appender::non_blocking(tracing_appender::rolling::never(&dir, "zord.log"));
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stderr_layer)
+                .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(writer))
+                .init();
+            tracing::info!(path = %dir.join("zord.log").display(), "file logging enabled");
+            Some(guard)
+        }
+        Err(e) => {
+            tracing_subscriber::registry().with(filter).with(stderr_layer).init();
+            tracing::warn!("file logging disabled: {e}");
+            None
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -223,6 +251,8 @@ fn MainApp() -> Element {
     let mut models = use_signal(Vec::<ModelInfo>::new);
     // (model name currently downloading, percent).
     let mut model_progress = use_signal(|| Option::<(String, u8)>::None);
+    // Name of a model whose download failed → show the manual-fetch fallback.
+    let mut download_help = use_signal(|| Option::<String>::None);
 
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
@@ -260,6 +290,10 @@ fn MainApp() -> Element {
                     }
                     Event::ModelProgress { name, pct } => {
                         model_progress.set(Some((name, pct)));
+                    }
+                    Event::DownloadFailed { name } => {
+                        model_progress.set(None);
+                        download_help.set(Some(name));
                     }
                     Event::Summary(v) => summary.set(v),
                     Event::Speakers(v) => speaker_names.set(v),
@@ -704,6 +738,58 @@ fn MainApp() -> Element {
                                 button { class: "close-btn", onclick: move |_| show_settings.set(false), "✕" }
                             }
                             div { class: "overlay-body",
+                                // Manual-download fallback when an in-app fetch fails
+                                // (e.g. behind a corporate proxy). Show the direct
+                                // URL(s) + a jump to the models folder.
+                                if let Some(failed) = download_help.read().clone() {
+                                    {
+                                        let urls = models.read().iter()
+                                            .find(|m| m.name == failed)
+                                            .map(|m| m.urls.clone())
+                                            .unwrap_or_default();
+                                        rsx! {
+                                            div { class: "dl-help",
+                                                div { class: "dl-help-head",
+                                                    span { "⚠ Couldn't download \"{failed}\"" }
+                                                    button { class: "notice-x", onclick: move |_| download_help.set(None), "✕" }
+                                                }
+                                                p { class: "field-note", "Often a proxy / network block. Fetch it in your browser (which uses your proxy), then drop it in the models folder. Archives (.tar.bz2) must be extracted there first." }
+                                                for u in urls.iter() {
+                                                    {
+                                                        let u_copy = u.clone();
+                                                        let u_open = u.clone();
+                                                        rsx! {
+                                                            div { class: "dl-help-url",
+                                                                code { class: "dl-url", "{u}" }
+                                                                button {
+                                                                    class: "mbtn ghost",
+                                                                    onclick: move |_| { osutil::copy_to_clipboard(&u_copy); notice.set(Some("Download URL copied".to_string())); },
+                                                                    "Copy"
+                                                                }
+                                                                button {
+                                                                    class: "mbtn ghost",
+                                                                    onclick: move |_| osutil::open_in_browser(&u_open),
+                                                                    "Open in browser"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "btn-row",
+                                                    button {
+                                                        class: "mbtn",
+                                                        onclick: move |_| {
+                                                            if let Ok(d) = zord_config::models_dir() {
+                                                                osutil::open_folder(&d.display().to_string());
+                                                            }
+                                                        },
+                                                        "📁 Open models folder"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 section { class: "settings-section",
                                     h3 { "Transcription model" }
                                     p { class: "field-note", "Pick a downloaded model, or download another. Bigger = more accurate but slower; the quantized turbo is the best all-round." }
@@ -1007,15 +1093,85 @@ fn MainApp() -> Element {
                                 EncryptionSettings { settings, notice }
 
                                 section { class: "settings-section",
-                                    h3 { "Storage" }
-                                    button {
-                                        class: "mbtn",
-                                        onclick: move |_| {
-                                            if let Ok(dir) = settings.peek().storage_dir() {
-                                                osutil::open_folder(&dir.display().to_string());
-                                            }
-                                        },
-                                        "Open data folder"
+                                    h3 { "Files & folders" }
+                                    p { class: "field-note", "Jump to Zord's files on disk — handy for dropping in a manually-downloaded model, or grabbing logs when something fails." }
+                                    div { class: "btn-row",
+                                        button {
+                                            class: "mbtn",
+                                            title: "Downloaded transcription / summary / speaker models",
+                                            onclick: move |_| {
+                                                if let Ok(d) = zord_config::models_dir() {
+                                                    osutil::open_folder(&d.display().to_string());
+                                                }
+                                            },
+                                            "📁 Models"
+                                        }
+                                        button {
+                                            class: "mbtn",
+                                            title: "Database, recordings, and exports",
+                                            onclick: move |_| {
+                                                if let Ok(d) = settings.peek().storage_dir() {
+                                                    osutil::open_folder(&d.display().to_string());
+                                                }
+                                            },
+                                            "📁 Data"
+                                        }
+                                        button {
+                                            class: "mbtn",
+                                            onclick: move |_| {
+                                                if let Ok(d) = zord_config::logs_dir() {
+                                                    osutil::open_folder(&d.display().to_string());
+                                                }
+                                            },
+                                            "📁 Logs"
+                                        }
+                                        button {
+                                            class: "mbtn ghost",
+                                            onclick: move |_| {
+                                                if let Ok(p) = zord_config::config_path() {
+                                                    osutil::reveal_in_file_manager(&p.display().to_string());
+                                                }
+                                            },
+                                            "📄 Config"
+                                        }
+                                        button {
+                                            class: "mbtn ghost",
+                                            onclick: move |_| {
+                                                if let Ok(p) = settings.peek().db_path() {
+                                                    osutil::reveal_in_file_manager(&p.display().to_string());
+                                                }
+                                            },
+                                            "📄 Database"
+                                        }
+                                    }
+                                    div { class: "btn-row",
+                                        button {
+                                            class: "mbtn ghost",
+                                            onclick: move |_| {
+                                                match zord_config::logs_dir().map(|d| d.join("zord.log")) {
+                                                    Ok(p) if p.exists() => osutil::open_in_editor(&p.display().to_string()),
+                                                    _ => notice.set(Some("No log file yet — it appears after the next launch.".to_string())),
+                                                }
+                                            },
+                                            "📝 Open log"
+                                        }
+                                        button {
+                                            class: "mbtn ghost",
+                                            title: "Copy the most recent log lines to share in a bug report",
+                                            onclick: move |_| {
+                                                let log = zord_config::logs_dir().map(|d| d.join("zord.log"));
+                                                match log.and_then(|p| std::fs::read_to_string(p).map_err(Into::into)) {
+                                                    Ok(txt) => {
+                                                        let lines: Vec<&str> = txt.lines().collect();
+                                                        let start = lines.len().saturating_sub(200);
+                                                        osutil::copy_to_clipboard(&lines[start..].join("\n"));
+                                                        notice.set(Some(format!("Copied last {} log lines to clipboard", lines.len() - start)));
+                                                    }
+                                                    Err(_) => notice.set(Some("No log file to copy yet.".to_string())),
+                                                }
+                                            },
+                                            "📋 Copy recent log"
+                                        }
                                     }
                                 }
 

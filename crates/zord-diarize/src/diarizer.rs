@@ -84,6 +84,16 @@ impl EmbeddingModel {
     pub fn parse_or_default(s: &str) -> Self {
         Self::parse(s).unwrap_or(EmbeddingModel::TitanetSmall)
     }
+
+    /// Direct download URLs for manual fetch when the in-app download fails.
+    /// Diarization needs two files: the shared pyannote segmentation archive
+    /// (`.tar.bz2`, extract into the models folder) and this embedding `.onnx`.
+    pub fn download_urls(self) -> Vec<String> {
+        vec![
+            format!("{SEG_TAG}/{SEG_STEM}.tar.bz2"),
+            format!("{EMB_TAG}/{}", self.filename()),
+        ]
+    }
 }
 
 fn models_dir() -> Result<PathBuf> {

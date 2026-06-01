@@ -49,6 +49,24 @@ pub fn open_folder(path: &str) {
     }
 }
 
+/// Open a URL in the default web browser (used for the manual model-download
+/// fallback — the browser honors the system proxy where our fetch may not).
+pub fn open_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `start` is a cmd builtin; the empty "" is the window title arg.
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
 /// Copy `text` to the system clipboard. Best-effort.
 pub fn copy_to_clipboard(text: &str) {
     if let Ok(mut cb) = arboard::Clipboard::new() {

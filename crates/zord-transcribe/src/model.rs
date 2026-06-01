@@ -125,6 +125,19 @@ impl ModelId {
     pub fn parse(s: &str) -> Option<Self> {
         EVERY.iter().copied().find(|m| m.name() == s)
     }
+
+    /// Direct download URL for manual fetch (browser) when the in-app download
+    /// fails — e.g. behind a corporate proxy. Whisper is a single `.bin`;
+    /// Parakeet is a `.tar.bz2` archive (extract into the models folder).
+    pub fn download_url(self) -> String {
+        match self.engine() {
+            Engine::Whisper => format!("{HF_BASE}/{}", self.filename()),
+            Engine::Parakeet => format!(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/{}.tar.bz2",
+                self.filename()
+            ),
+        }
+    }
 }
 
 /// Directory where models are cached (`~/Library/Application Support/Zord/models`

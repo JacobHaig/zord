@@ -142,7 +142,13 @@ body {
 .mbtn:hover:not(:disabled) { border-color: var(--me); }
 .mbtn:disabled { opacity: 0.5; cursor: default; }
 .mbtn.ghost { color: var(--muted); }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .dl-prog { width: 160px; }
+/* Manual-download fallback card (shown when an in-app model download fails). */
+.dl-help { border: 1px solid var(--others); background: var(--panel-2); border-radius: 10px; padding: 12px; margin-bottom: 14px; }
+.dl-help-head { display: flex; justify-content: space-between; align-items: center; color: var(--others); font-weight: 700; font-size: 13px; }
+.dl-help-url { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.dl-url { flex: 1; word-break: break-all; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 11px/1.4 ui-monospace, monospace; color: var(--text); }
 .dl-bar { height: 6px; background: var(--me); border-radius: 4px; transition: width 120ms linear; }
 .dl-txt { font-size: 11px; color: var(--muted); }
 

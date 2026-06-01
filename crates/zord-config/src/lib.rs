@@ -181,8 +181,25 @@ pub fn app_data_dir() -> Result<PathBuf> {
     Ok(dirs.data_dir().to_path_buf())
 }
 
-fn config_path() -> Result<PathBuf> {
+/// Path to the `config.json` settings file.
+pub fn config_path() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("config.json"))
+}
+
+/// Directory where downloaded models live. Always under the app-data dir
+/// (independent of `storage_dir`) — matches `zord_transcribe::model_cache_dir`.
+pub fn models_dir() -> Result<PathBuf> {
+    let d = app_data_dir()?.join("models");
+    std::fs::create_dir_all(&d)?;
+    Ok(d)
+}
+
+/// Directory for app log files (`zord.log`). Kept in the app-data dir so
+/// diagnostics are always writable regardless of any `storage_dir` relocation.
+pub fn logs_dir() -> Result<PathBuf> {
+    let d = app_data_dir()?.join("logs");
+    std::fs::create_dir_all(&d)?;
+    Ok(d)
 }
 
 impl Settings {
