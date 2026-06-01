@@ -54,8 +54,18 @@ Verify: `spctl -a -vvv "$APP"` should report `accepted / source=Notarized`.
 `.github/workflows/release.yml` builds on every `v*` tag (and on manual
 dispatch), producing for **both macOS (Apple Silicon) and Windows (x64)**:
 
-- the GUI app bundle (`.app`/`.dmg` on macOS, `.exe`/`.msi` on Windows), and
-- the `zord` CLI binary (`zord-macos-arm64`, `zord-windows-x64.exe`).
+All artifacts follow one scheme — `Zord-<version>-<os>-<arch>[-<kind>].<ext>`:
+
+| File | What |
+|---|---|
+| `Zord-<ver>-macos-arm64.dmg` | macOS GUI installer |
+| `Zord-<ver>-macos-arm64-app.zip` | macOS GUI `.app`, zipped |
+| `zord-<ver>-macos-arm64-cli` | macOS `zord` CLI |
+| `Zord-<ver>-windows-x64-setup.exe` | Windows GUI installer |
+| `zord-<ver>-windows-x64-cli.exe` | Windows `zord` CLI |
+
+(The raw, unwrapped Windows GUI `.exe` from the bundle dir is intentionally not
+shipped — use the installer.)
 
 Both are built with the `FEATURES` set at the top of the workflow
 (`diarization,summaries,parakeet`). `encryption` is intentionally excluded from

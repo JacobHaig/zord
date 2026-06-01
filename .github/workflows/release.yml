@@ -96,12 +96,16 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          # GUI: .app (zipped) and any .dmg dx produced.
+          # Unified naming: Zord-<ver>-<os>-<arch>[-<kind>].<ext> (tag → version,
+          # otherwise "dev"). One scheme for every artifact, from any source.
+          VER="${GITHUB_REF_NAME#v}"; [ "$GITHUB_REF_TYPE" = "tag" ] || VER="dev"
+          # GUI installer (dx-produced .dmg) and the .app as a zip.
+          DMG=$(find target -name "*.dmg" -maxdepth 6 | head -1)
+          if [ -n "$DMG" ]; then cp "$DMG" "dist/Zord-$VER-macos-arm64.dmg"; fi
           APP=$(find target -path "*bundle*" -name "*.app" -maxdepth 8 -type d | head -1)
-          if [ -n "$APP" ]; then ditto -c -k --keepParent "$APP" "dist/Zord-macos-arm64.zip"; fi
-          find target -name "*.dmg" -maxdepth 6 -exec cp {} dist/ \;
+          if [ -n "$APP" ]; then ditto -c -k --keepParent "$APP" "dist/Zord-$VER-macos-arm64-app.zip"; fi
           # CLI binary.
-          if [ -f target/release/zord ]; then cp target/release/zord dist/zord-macos-arm64; fi
+          if [ -f target/release/zord ]; then cp target/release/zord "dist/zord-$VER-macos-arm64-cli"; fi
           ls -la dist
 
       - name: Upload to release
@@ -149,14 +153,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          # GUI installer/exe from the bundle.
-          find target -maxdepth 8 \( -name "*.msi" -o -name "*.exe" \) -path "*bundle*" -exec cp {} dist/ \; || true
+          # Unified naming: Zord-<ver>-<os>-<arch>[-<kind>].<ext> (tag → version,
+          # otherwise "dev"). Only the installer + CLI ship — the raw unwrapped
+          # GUI .exe inside the bundle dir is intentionally excluded.
+          VER="${GITHUB_REF_NAME#v}"; [ "$GITHUB_REF_TYPE" = "tag" ] || VER="dev"
+          # GUI installer: prefer the NSIS "-setup.exe", else an .msi.
+          SETUP=$(find target -maxdepth 8 -path "*bundle*" -name "*setup*.exe" | head -1)
+          [ -z "$SETUP" ] && SETUP=$(find target -maxdepth 8 -path "*bundle*" -name "*.msi" | head -1)
+          if [ -n "$SETUP" ]; then cp "$SETUP" "dist/Zord-$VER-windows-x64-setup.${SETUP##*.}"; fi
           # CLI binary.
-          if [ -f target/release/zord.exe ]; then cp target/release/zord.exe dist/zord-windows-x64.exe; fi
-          # Best-effort: gather any sherpa-onnx / onnxruntime DLLs the ONNX
-          # engines need at runtime, alongside the CLI. (GUI bundle DLL inclusion
-          # is verified separately — see note in the workflow PR.)
-          find target/release -maxdepth 2 -name "*.dll" \( -iname "*onnx*" -o -iname "*sherpa*" \) -exec cp {} dist/ \; || true
+          if [ -f target/release/zord.exe ]; then cp target/release/zord.exe "dist/zord-$VER-windows-x64-cli.exe"; fi
           ls -la dist
 
       - name: Upload to release
