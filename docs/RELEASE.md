@@ -62,8 +62,9 @@ All artifacts follow one scheme — `Zord-<version>-<os>-<arch>[-<kind>].<ext>`:
 | `Zord-<ver>-macos-arm64-app.zip` | macOS GUI `.app`, zipped |
 | `zord-<ver>-macos-arm64-cli` | macOS `zord` CLI |
 | `Zord-<ver>-windows-x64-setup.exe` | Windows GUI installer |
+| `Zord-<ver>-windows-x64-gui.exe` | Windows GUI, portable single `.exe` (no install; needs the OS WebView2 runtime) |
 | `zord-<ver>-windows-x64-cli.exe` | Windows `zord` CLI |
-| `Zord-<ver>-windows-x64.zip` | Both Windows EXEs zipped (extract, then run — avoids SmartScreen prompts on a direct `.exe` download) |
+| `Zord-<ver>-windows-x64.zip` | The portable GUI + CLI EXEs zipped (extract, then run — avoids SmartScreen prompts on a direct `.exe` download) |
 
 (The raw, unwrapped Windows GUI `.exe` from the bundle dir is intentionally not
 shipped — use the installer.)

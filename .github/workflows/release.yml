@@ -154,20 +154,23 @@ jobs:
         run: |
           mkdir -p dist
           # Unified naming: Zord-<ver>-<os>-<arch>[-<kind>].<ext> (tag → version,
-          # otherwise "dev"). Only the installer + CLI ship — the raw unwrapped
-          # GUI .exe inside the bundle dir is intentionally excluded.
+          # otherwise "dev"). Four Windows artifacts: GUI installer, portable GUI
+          # .exe, CLI, and a zip of the two portable EXEs.
           VER="${GITHUB_REF_NAME#v}"; [ "$GITHUB_REF_TYPE" = "tag" ] || VER="dev"
           # GUI installer: prefer the NSIS "-setup.exe", else an .msi.
           SETUP=$(find target -maxdepth 8 -path "*bundle*" -name "*setup*.exe" | head -1)
           [ -z "$SETUP" ] && SETUP=$(find target -maxdepth 8 -path "*bundle*" -name "*.msi" | head -1)
           if [ -n "$SETUP" ]; then cp "$SETUP" "dist/Zord-$VER-windows-x64-setup.${SETUP##*.}"; fi
+          # Portable GUI .exe (no installer; needs the OS WebView2 runtime).
+          GUIEXE=$(find target -path "*bundle*" -name "zord-gui.exe" | head -1)
+          [ -z "$GUIEXE" ] && GUIEXE=$(find target -name "zord-gui.exe" -not -path "*/deps/*" | head -1)
+          if [ -n "$GUIEXE" ]; then cp "$GUIEXE" "dist/Zord-$VER-windows-x64-gui.exe"; fi
           # CLI binary.
           if [ -f target/release/zord.exe ]; then cp target/release/zord.exe "dist/zord-$VER-windows-x64-cli.exe"; fi
-          # Also bundle both EXEs into a single zip (some prefer a zipped
-          # download — extract, then run — which sidesteps SmartScreen prompts
-          # on the raw .exe). Raw .exe files are kept alongside.
+          # Portable zip: the GUI exe + CLI exe (extract, then run — also sidesteps
+          # SmartScreen prompts on a direct .exe download). Installer not included.
           EXES=()
-          [ -f "dist/Zord-$VER-windows-x64-setup.exe" ] && EXES+=("dist/Zord-$VER-windows-x64-setup.exe")
+          [ -f "dist/Zord-$VER-windows-x64-gui.exe" ] && EXES+=("dist/Zord-$VER-windows-x64-gui.exe")
           [ -f "dist/zord-$VER-windows-x64-cli.exe" ] && EXES+=("dist/zord-$VER-windows-x64-cli.exe")
           if [ ${#EXES[@]} -gt 0 ]; then
             PATHS=$(printf "'%s'," "${EXES[@]}"); PATHS=${PATHS%,}
