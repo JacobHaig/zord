@@ -163,6 +163,16 @@ jobs:
           if [ -n "$SETUP" ]; then cp "$SETUP" "dist/Zord-$VER-windows-x64-setup.${SETUP##*.}"; fi
           # CLI binary.
           if [ -f target/release/zord.exe ]; then cp target/release/zord.exe "dist/zord-$VER-windows-x64-cli.exe"; fi
+          # Also bundle both EXEs into a single zip (some prefer a zipped
+          # download — extract, then run — which sidesteps SmartScreen prompts
+          # on the raw .exe). Raw .exe files are kept alongside.
+          EXES=()
+          [ -f "dist/Zord-$VER-windows-x64-setup.exe" ] && EXES+=("dist/Zord-$VER-windows-x64-setup.exe")
+          [ -f "dist/zord-$VER-windows-x64-cli.exe" ] && EXES+=("dist/zord-$VER-windows-x64-cli.exe")
+          if [ ${#EXES[@]} -gt 0 ]; then
+            PATHS=$(printf "'%s'," "${EXES[@]}"); PATHS=${PATHS%,}
+            powershell -NoProfile -Command "Compress-Archive -Force -Path $PATHS -DestinationPath 'dist/Zord-$VER-windows-x64.zip'"
+          fi
           ls -la dist
 
       - name: Upload to release
