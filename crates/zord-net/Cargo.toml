@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
+serde_json = { workspace = true }
 # native-tls → OS certificate store (Windows schannel / macOS Secure Transport),
 # so corporate HTTPS-inspection root CAs are trusted like the browser. rustls
 # (ureq's default) only trusts the bundled Mozilla roots and fails on those.

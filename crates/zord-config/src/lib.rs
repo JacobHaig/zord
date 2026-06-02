@@ -71,6 +71,14 @@ pub struct Settings {
     /// model). Never overwrites a title you set manually.
     #[serde(default = "default_true")]
     pub auto_title: bool,
+    /// Diarization clustering threshold (0.1–0.95) used when the speaker count is
+    /// auto. Lower = split into more speakers; higher = merge into fewer.
+    #[serde(default = "default_diarize_threshold")]
+    pub diarize_threshold: f32,
+}
+
+fn default_diarize_threshold() -> f32 {
+    0.5
 }
 
 /// System prompt for auto-titling a recorded session from its summary/transcript.
@@ -157,6 +165,7 @@ impl Default for Settings {
             diarize_keep_audio: false,
             diarize_num_speakers: 0,
             auto_title: true,
+            diarize_threshold: default_diarize_threshold(),
         }
     }
 }

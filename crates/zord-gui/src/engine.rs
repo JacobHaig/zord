@@ -116,6 +116,18 @@ fn catalog() -> Vec<ModelInfo> {
             urls: vec![m.url().to_string(), m.mirror_url().to_string()],
         });
     }
+    // Small instruct models downloadable from the Ollama registry (non-HF source).
+    #[cfg(feature = "summaries")]
+    for m in zord_summarize::ollama_models() {
+        models.push(ModelInfo {
+            name: m.filename.to_string(),
+            size: m.size_label.to_string(),
+            description: m.label.to_string(),
+            downloaded: zord_summarize::ollama_model_present(m.filename),
+            kind: "summary".to_string(),
+            urls: Vec::new(),
+        });
+    }
     // User-supplied GGUFs dropped into the models folder (any source — no HF).
     #[cfg(feature = "summaries")]
     for name in zord_summarize::list_custom_models() {
@@ -377,6 +389,12 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                         let _ = ev.send(Event::DownloadFailed { name: name.clone() });
                     }
                     true
+                } else if zord_summarize::ollama_models().iter().any(|m| m.filename == name) {
+                    if let Err(e) = zord_summarize::ensure_ollama_model(&name, &mut progress) {
+                        tracing::warn!("Ollama download failed for {name}: {e}");
+                        let _ = ev.send(Event::DownloadFailed { name: name.clone() });
+                    }
+                    true
                 } else {
                     false
                 };
@@ -593,7 +611,8 @@ fn apply_diarization(
     let _ = ev.send(Event::Notice("Identifying speakers…".to_string()));
     // Pin the speaker count when the user set one (0 = auto-detect).
     let num_speakers = (settings.diarize_num_speakers > 0).then_some(settings.diarize_num_speakers as i32);
-    let diarizer = match zord_diarize::Diarizer::load_with_speakers(model, num_speakers) {
+    let threshold = settings.diarize_threshold.clamp(0.1, 0.95);
+    let diarizer = match zord_diarize::Diarizer::load(model, num_speakers, threshold) {
         Ok(d) => d,
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("diarizer: {e}")));

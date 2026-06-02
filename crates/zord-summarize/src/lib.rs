@@ -8,6 +8,7 @@ mod summarizer;
 
 #[cfg(feature = "llama")]
 pub use summarizer::{
-    custom_model_path, delete_custom_model, delete_summary_model, ensure_summary_model,
-    list_custom_models, summary_model_present, Summarizer, SummaryModel,
+    custom_model_path, delete_custom_model, delete_summary_model, ensure_ollama_model,
+    ensure_summary_model, list_custom_models, ollama_model_present, ollama_models,
+    summary_model_present, OllamaModel, Summarizer, SummaryModel,
 };

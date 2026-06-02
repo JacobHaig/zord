@@ -40,8 +40,9 @@ GGUF sources (Phase 22): **ModelScope** (`modelscope.cn/models/Qwen/Qwen2.5-<sz>
 — same filenames as the built-ins, so a browser download drops in and is
 recognized; surfaced in the download-failure fallback via `SummaryModel::mirror_url`.
 And **Ollama registry** (`registry.ollama.ai/v2/library/<m>/manifests/<tag>` →
-`application/vnd.ollama.image.model` layer digest → `/blobs/<digest>` = raw GGUF;
-in-app download pending).
+`application/vnd.ollama.image.model` layer digest → `/blobs/<digest>` = raw GGUF)
+— one-click in-app download via `zord_net::download_ollama_model` (Ollama used as
+a CDN only, no engine/daemon); catalog in `zord-summarize::ollama_models`.
 
 All in-app downloads go through the shared **`zord-net`** crate
 (`download_to_file`): native-tls (OS cert store → trusts corporate HTTPS-

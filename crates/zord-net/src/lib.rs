@@ -78,6 +78,47 @@ pub fn download_to_file(
     Err(last_err.unwrap_or_else(|| anyhow!("download failed")))
 }
 
+/// Download a GGUF model from the **Ollama registry** (used purely as a model
+/// CDN — no Ollama install/daemon/engine). Resolves the model manifest, picks
+/// the `application/vnd.ollama.image.model` layer, and downloads that blob (a
+/// standard GGUF) to `dest`. Reaches the registry via the same OS-cert-store +
+/// proxy agent as everything else.
+pub fn download_ollama_model(
+    repo: &str,
+    tag: &str,
+    dest: &Path,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<()> {
+    let blob_url = ollama_blob_url(&agent(), repo, tag)?;
+    tracing::info!(%blob_url, "downloading GGUF from Ollama registry");
+    download_to_file(&blob_url, dest, progress)
+}
+
+/// Resolve an Ollama `repo:tag` to the direct blob URL of its GGUF model layer.
+fn ollama_blob_url(agent: &ureq::Agent, repo: &str, tag: &str) -> Result<String> {
+    let base = format!("https://registry.ollama.ai/v2/library/{repo}");
+    let manifest_url = format!("{base}/manifests/{tag}");
+    let body = agent
+        .get(&manifest_url)
+        .set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .call()
+        .with_context(|| format!("fetching Ollama manifest {manifest_url}"))?
+        .into_string()
+        .context("reading Ollama manifest")?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&body).context("parsing Ollama manifest")?;
+    let digest = manifest["layers"]
+        .as_array()
+        .and_then(|layers| {
+            layers
+                .iter()
+                .find(|l| l["mediaType"] == "application/vnd.ollama.image.model")
+        })
+        .and_then(|l| l["digest"].as_str())
+        .ok_or_else(|| anyhow!("no model layer in Ollama manifest for {repo}:{tag}"))?;
+    Ok(format!("{base}/blobs/{digest}"))
+}
+
 fn try_download(
     agent: &ureq::Agent,
     url: &str,
@@ -123,5 +164,15 @@ mod tests {
         )
         .unwrap();
         assert!(std::fs::metadata(&dest).unwrap().len() > 0);
+    }
+
+    /// Hits the network — `cargo test -p zord-net -- --ignored`. Validates the
+    /// Ollama manifest fetch + JSON parse + model-layer digest extraction
+    /// (without downloading the ~1 GB blob).
+    #[test]
+    #[ignore]
+    fn resolves_ollama_blob_url() {
+        let url = ollama_blob_url(&agent(), "qwen2.5", "1.5b").unwrap();
+        assert!(url.contains("/blobs/sha256:"), "unexpected blob url: {url}");
     }
 }

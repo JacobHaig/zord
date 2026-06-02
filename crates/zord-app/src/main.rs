@@ -264,7 +264,8 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
 
     let num_speakers =
         (settings.diarize_num_speakers > 0).then_some(settings.diarize_num_speakers as i32);
-    let diarizer = zord_diarize::Diarizer::load_with_speakers(model, num_speakers)?;
+    let diarizer =
+        zord_diarize::Diarizer::load(model, num_speakers, settings.diarize_threshold.clamp(0.1, 0.95))?;
     let spans = diarizer.diarize(&samples)?;
 
     let segs = store.segments(session_id)?;

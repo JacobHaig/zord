@@ -610,22 +610,23 @@ Claude/ChatGPT auto-title a conversation so it's findable later.
   title) and re-run path.
 - Cheap: a single short generation; no new deps, no feature beyond `summaries`.
 
-### Phase 21 — Upgraded diarization (Sortformer / pyannote community-1) (pending)
-The current pipeline (sherpa pyannote-segmentation + embedding + fast clustering)
-over-splits noisy meeting *mixes* — a 10-person call came out as ~80 speakers.
-Research (June 2026) points at much stronger models:
-- **NVIDIA Sortformer** — end-to-end neural diarization that **more than halves
-  DER vs the pyannote pipeline**, far better on overlap / rapid turn-taking, with
-  a streaming variant. Prime candidate if exportable to ONNX / supported by
-  sherpa-onnx.
-- **pyannote community-1 (pyannote.audio 4.0, 2025)** — newer open-source
-  segmentation/diarization model.
-- Optional: **speech-separation-guided diarization** (run a separation model on
-  overlapped segments before clustering) for heavy crosstalk.
-Plan: investigate sherpa-onnx support for Sortformer/newer pyannote (or a small
-ONNX-runtime path), add as selectable model(s) in the existing diarization
-catalog (GitHub-hosted, no HF), keep the `diarize_num_speakers` override. Expected
-to largely fix the over-clustering without any cloud/auth.
+### Phase 21 — Diarization tuning (Sortformer found infeasible) 🟡
+Goal was to fix over-splitting (a 10-person call → ~80 speakers) with a stronger
+model. **Sortformer was investigated and ruled out** (June 2026):
+- ONNX **export is broken** (NVIDIA-NeMo issue #15077, unresolved — dynamic
+  slicing incompatible with ONNX), so there's no ONNX model to run via sherpa /
+  onnxruntime;
+- the models are PyTorch/NeMo on **HuggingFace** (which HF-blocked users can't
+  reach anyway), and embedding a Torch runtime in the desktop app is a non-starter.
+So sherpa-onnx stays the engine (pyannote-seg + embedding + fast clustering).
+
+Shipped the tractable levers instead — full manual control over the clustering:
+- `diarize_num_speakers` (Phase 19) — pin the exact headcount (deterministic fix).
+- `diarize_threshold` (0.1–0.95, default 0.5) — clustering granularity when count
+  is auto: lower splits into more speakers, higher merges into fewer. Settings →
+  Speakers, wired into engine + `zord diarize`.
+Future option if ever needed: speech-separation-guided diarization, or revisit
+Sortformer if/when a working ONNX export lands.
 
 > **Researched June 2026 — deferred (not selected now), kept so we don't re-research:**
 > - **Teams real speaker names without a bot:** Microsoft Graph `callTranscript`
@@ -643,7 +644,7 @@ to largely fix the over-clustering without any cloud/auth.
 > - **Audio playback + click-to-seek** transcript (also aids diarization review).
 > - **Follow-up draft + richer export** (Obsidian/Markdown), tags.
 
-### Phase 22 — Non-HuggingFace model sources (🟡 ModelScope mirror done; Ollama in-app pending)
+### Phase 22 — Non-HuggingFace model sources ✅ (ModelScope mirror + Ollama in-app)
 For networks that block HuggingFace (where the Whisper ggml + Qwen GGUFs live).
 Two reliable non-HF sources verified June 2026:
 - **ModelScope** (`modelscope.cn`) ✅ — mirrors the Qwen GGUFs at
@@ -654,14 +655,16 @@ Two reliable non-HF sources verified June 2026:
   `modelscope.cn` link alongside the HF one — the user fetches it in the browser
   (which uses their proxy) and drops it in. This is the path for proxy/browser-
   only networks.
-- **Ollama registry** (`registry.ollama.ai`) 🟡 pending — reliable CDN hosting
-  small instruct GGUFs (qwen2.5 1.5b/3b, llama3.2 1b/3b, phi3.5, gemma2:2b,
-  smollm2). Direct download without Ollama installed: GET
-  `/v2/library/<model>/manifests/<tag>`, take the `application/vnd.ollama.image.
-  model` layer digest, GET `/v2/library/<model>/blobs/<digest>` → raw GGUF. Plan:
-  add an in-app "Ollama" download path (manifest→blob, save as `.gguf`) + a small
-  catalog, for one-click non-HF models. (Only works where the app can reach the
-  net directly; proxy-only-via-browser users use ModelScope above.)
+- **Ollama registry** (`registry.ollama.ai`) ✅ — one-click in-app download,
+  using Ollama purely as a model **CDN** (no Ollama install/daemon/engine). For a
+  curated model we GET `/v2/library/<repo>/manifests/<tag>`, take the
+  `application/vnd.ollama.image.model` layer digest, then GET `/blobs/<digest>`
+  (a standard GGUF) and run it via the same llama.cpp path. `zord-net::
+  download_ollama_model` (manifest parse + blob fetch); `zord-summarize` exposes a
+  small catalog (qwen2.5 3b/1.5b, llama3.2 3b, phi3.5) shown in the Summaries
+  list. Reaches the registry through the Phase 18 OS-cert-store + proxy agent, so
+  it works on direct-allowed networks; proxy-only-via-browser users still use the
+  ModelScope link.
 
 ### Cross-cutting / smaller
 - Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language

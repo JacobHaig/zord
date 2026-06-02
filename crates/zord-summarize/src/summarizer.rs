@@ -113,7 +113,8 @@ pub fn list_custom_models() -> Vec<String> {
     let Ok(dir) = models_dir() else {
         return Vec::new();
     };
-    let known: Vec<&str> = SummaryModel::ALL.iter().map(|m| m.filename()).collect();
+    let mut known: Vec<&str> = SummaryModel::ALL.iter().map(|m| m.filename()).collect();
+    known.extend(ollama_models().iter().map(|m| m.filename)); // shown via the Ollama catalog
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for entry in rd.flatten() {
@@ -145,6 +146,55 @@ pub fn delete_custom_model(name: &str) -> Result<()> {
         std::fs::remove_file(&path).with_context(|| format!("deleting {path:?}"))?;
     }
     Ok(())
+}
+
+/// A small instruct model downloadable from the **Ollama registry** (used purely
+/// as a model CDN — no Ollama engine/daemon). Downloaded as a `.gguf` and run via
+/// the same llama.cpp path as the built-ins. Reachable on many networks that
+/// block HuggingFace.
+pub struct OllamaModel {
+    pub repo: &'static str,
+    pub tag: &'static str,
+    pub filename: &'static str,
+    pub label: &'static str,
+    pub size_label: &'static str,
+}
+
+/// Curated small instruct models offered via the Ollama registry.
+pub fn ollama_models() -> &'static [OllamaModel] {
+    &[
+        OllamaModel { repo: "qwen2.5", tag: "3b", filename: "qwen2.5-3b-ollama.gguf", label: "Qwen2.5 3B Instruct — via Ollama (non-HF)", size_label: "~1.9 GB" },
+        OllamaModel { repo: "qwen2.5", tag: "1.5b", filename: "qwen2.5-1.5b-ollama.gguf", label: "Qwen2.5 1.5B Instruct — via Ollama (non-HF)", size_label: "~1 GB" },
+        OllamaModel { repo: "llama3.2", tag: "3b", filename: "llama3.2-3b-ollama.gguf", label: "Llama 3.2 3B Instruct — via Ollama (non-HF)", size_label: "~2 GB" },
+        OllamaModel { repo: "phi3.5", tag: "latest", filename: "phi3.5-ollama.gguf", label: "Phi-3.5 mini Instruct — via Ollama (non-HF)", size_label: "~2.2 GB" },
+    ]
+}
+
+/// Whether a curated Ollama model has been downloaded into the models folder.
+pub fn ollama_model_present(filename: &str) -> bool {
+    ollama_models().iter().any(|m| m.filename == filename)
+        && models_dir()
+            .map(|d| d.join(filename))
+            .map(|p| p.exists() && std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false))
+            .unwrap_or(false)
+}
+
+/// Download a curated Ollama model (by its `.gguf` filename) to the models folder.
+pub fn ensure_ollama_model(
+    filename: &str,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf> {
+    let spec = ollama_models()
+        .iter()
+        .find(|m| m.filename == filename)
+        .ok_or_else(|| anyhow!("unknown Ollama model '{filename}'"))?;
+    let path = models_dir()?.join(spec.filename);
+    if path.exists() && std::fs::metadata(&path)?.len() > 0 {
+        return Ok(path);
+    }
+    tracing::info!(repo = spec.repo, tag = spec.tag, "downloading model via Ollama registry");
+    zord_net::download_ollama_model(spec.repo, spec.tag, &path, progress)?;
+    Ok(path)
 }
 
 pub fn summary_model_present(model: SummaryModel) -> bool {

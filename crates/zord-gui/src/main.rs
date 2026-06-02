@@ -1122,6 +1122,22 @@ fn MainApp() -> Element {
                                                     }
                                                 }
                                                 p { class: "field-note", "Auto-clustering can over-split a noisy meeting mix into far too many speakers. If you know the headcount, set it here to force exactly that many. Re-run Identify speakers to apply." }
+                                                div { class: "field",
+                                                    label { "Clustering threshold (auto mode): {settings.read().diarize_threshold:.2}" }
+                                                    input {
+                                                        r#type: "number", min: "0.1", max: "0.95", step: "0.05", class: "days",
+                                                        value: "{settings.read().diarize_threshold:.2}",
+                                                        oninput: move |e: FormEvent| {
+                                                            if let Ok(v) = e.value().trim().parse::<f32>() {
+                                                                let mut s = settings.peek().clone();
+                                                                s.diarize_threshold = v.clamp(0.1, 0.95);
+                                                                let _ = s.save();
+                                                                settings.set(s);
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                                p { class: "field-note", "Only used when speaker count is auto (0 above). Lower = split into more speakers; higher = merge into fewer. Default 0.50." }
                                                 div { class: "field-row",
                                                     label { class: "field-label", "Identify speakers automatically after recording" }
                                                     button {
