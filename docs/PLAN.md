@@ -588,6 +588,52 @@ For users who can't reach HuggingFace (Whisper ggml + Qwen GGUFs live there) but
 Note: GGUF LLMs are HF-centric, so there's no good *catalog* of GitHub-hosted
 summary models — the custom-GGUF drop-in is the intended path there.
 
+### Phase 20 — Auto meeting title (pending) ⭐ next
+After a recording is summarized (or at stop), make one small LLM call to generate
+a concise title from the transcript/summary and set it as the session title —
+today sessions default to `sess-<timestamp>` until manually renamed, like how
+Claude/ChatGPT auto-title a conversation so it's findable later.
+- Reuse the loaded summary model (`summaries` feature); a dedicated short "title"
+  prompt (≤8 words, no quotes/punctuation). Falls back gracefully (keeps the
+  timestamp id) when summaries aren't built/available.
+- Only auto-set when the user hasn't already named the session; never overwrite a
+  manual title. Wire into the summarize worker (GUI) + `zord summarize` (print/set
+  title) and re-run path.
+- Cheap: a single short generation; no new deps, no feature beyond `summaries`.
+
+### Phase 21 — Upgraded diarization (Sortformer / pyannote community-1) (pending)
+The current pipeline (sherpa pyannote-segmentation + embedding + fast clustering)
+over-splits noisy meeting *mixes* — a 10-person call came out as ~80 speakers.
+Research (June 2026) points at much stronger models:
+- **NVIDIA Sortformer** — end-to-end neural diarization that **more than halves
+  DER vs the pyannote pipeline**, far better on overlap / rapid turn-taking, with
+  a streaming variant. Prime candidate if exportable to ONNX / supported by
+  sherpa-onnx.
+- **pyannote community-1 (pyannote.audio 4.0, 2025)** — newer open-source
+  segmentation/diarization model.
+- Optional: **speech-separation-guided diarization** (run a separation model on
+  overlapped segments before clustering) for heavy crosstalk.
+Plan: investigate sherpa-onnx support for Sortformer/newer pyannote (or a small
+ONNX-runtime path), add as selectable model(s) in the existing diarization
+catalog (GitHub-hosted, no HF), keep the `diarize_num_speakers` override. Expected
+to largely fix the over-clustering without any cloud/auth.
+
+> **Researched June 2026 — deferred (not selected now), kept so we don't re-research:**
+> - **Teams real speaker names without a bot:** Microsoft Graph `callTranscript`
+>   API (GA) returns Teams' own transcript (VTT) with real `speakerName` + text +
+>   timing — *if* the meeting had Teams live transcription on and the app has
+>   Azure AD/Graph permissions (tenant-admin / RSC; an org tenant may restrict).
+>   No bot. This is the highest-fidelity path to real names. See
+>   `teams-audio-options` memory.
+> - **Per-participant audio streams** require a Graph real-time-media **bot that
+>   joins the call** (`Calls.AccessMedia.All`, Windows-Server host) — rejected:
+>   it's "another participant" + heavy enterprise setup.
+> - **Smarter notes:** structured action items + owners, per-speaker summaries,
+>   topic/chapter segmentation.
+> - **Chat-with-meeting:** local-LLM Q&A over a transcript.
+> - **Audio playback + click-to-seek** transcript (also aids diarization review).
+> - **Follow-up draft + richer export** (Obsidian/Markdown), tags.
+
 ### Cross-cutting / smaller
 - Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language
   setting beyond English).

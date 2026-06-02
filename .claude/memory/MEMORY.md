@@ -4,6 +4,7 @@
 - [Feature flags](feature-flags.md) — parakeet/encryption/summaries are opt-in Cargo features; default build is lean
 - [Capture design](capture-design.md) — dual-channel Me/Others; per-OS loopback; ML diarization layered within Others
 - [Diarization design](diarization-design.md) — Phase 16 per-speaker diarization: offline-first, optional live, sherpa-onnx
+- [Teams audio options](teams-audio-options.md) — getting Teams audio/speaker names without a bot (Graph callTranscript); per-participant needs a bot
 - [macOS build](macos-build.md) — deployment target 13, Swift lib path, build.rs links libclang_rt.osx
 - [CI macOS Xcode 26](ci-macos-xcode26.md) — release macOS job needs macos-15 (Xcode 26 / macOS 26 SDK) for the screencapturekit Swift bridge
 - [CI Windows CRT](ci-windows-crt.md) — Windows release must force static MSVC CRT (sherpa /MT vs llama/whisper /MD link clash)
