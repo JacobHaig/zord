@@ -986,7 +986,12 @@ fn spawn_proc(
         };
         let mut segmenter = Segmenter::new(SegmenterConfig::default());
         let mut wav = wav_path.and_then(|p| WavWriter::create(p).ok());
-        let mut base_ms: Option<u64> = None;
+        // Wall-clock-aligned mono sample count emitted so far. Capture sources
+        // (notably WASAPI loopback) deliver no samples during silence, so a raw
+        // running count drifts behind real time; we pad the gaps with silence so
+        // this channel's timeline == wall-clock — keeping mic + desktop aligned
+        // (and the saved WAV / diarization in sync).
+        let mut produced: u64 = 0;
         // Smoothed loudness state for the level meter (see constants above).
         let mut level = 0.0f32;
         // Opt-in meter diagnostics (set ZORD_METER_DEBUG=1).
@@ -1002,7 +1007,6 @@ fn spawn_proc(
                 Some(ref m) if m.load(Ordering::Relaxed) => vec![0.0f32; frame.len()],
                 _ => frame,
             };
-            let base = *base_ms.get_or_insert_with(|| session_start.elapsed().as_millis() as u64);
             // RMS loudness of this buffer, gained, smoothed with time-based
             // exponential attack/release so both channels react at the same
             // real-world speed regardless of their buffer size/cadence.
@@ -1041,19 +1045,38 @@ fn spawn_proc(
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            if let Some(w) = wav.as_mut() {
-                let _ = w.write(&mono);
+
+            // Pad the gap (if any) between real elapsed time and samples produced
+            // with silence, so the segmenter's sample-based timestamps equal the
+            // shared wall clock. This is what keeps the two channels in sync: a
+            // capture source that goes quiet (WASAPI loopback emits nothing during
+            // silence) no longer falls behind real time.
+            const SR: u64 = zord_core::WHISPER_SAMPLE_RATE as u64;
+            let elapsed_ms = session_start.elapsed().as_millis() as u64;
+            let target = elapsed_ms * SR / 1000;
+            let mut pad = target.saturating_sub(produced + mono.len() as u64) as usize;
+            if pad <= (SR * 30 / 1000) as usize {
+                pad = 0; // ignore sub-30ms jitter
             }
-            for mut seg in segmenter.push(&mono) {
-                seg.t_start_ms += base;
-                seg.t_end_ms += base;
+            pad = pad.min((SR * 300) as usize); // never inject more than 5 min at once
+
+            let out: Vec<f32> = if pad > 0 {
+                let mut b = vec![0.0f32; pad];
+                b.extend_from_slice(&mono);
+                b
+            } else {
+                mono
+            };
+            produced += out.len() as u64;
+            if let Some(w) = wav.as_mut() {
+                let _ = w.write(&out);
+            }
+            // Timestamps are now wall-clock (the stream is padded to real time).
+            for seg in segmenter.push(&out) {
                 let _ = job_tx.send(Job { source, vad: seg });
             }
         }
-        if let Some(mut seg) = segmenter.flush() {
-            let base = base_ms.unwrap_or(0);
-            seg.t_start_ms += base;
-            seg.t_end_ms += base;
+        if let Some(seg) = segmenter.flush() {
             let _ = job_tx.send(Job { source, vad: seg });
         }
         if let Some(w) = wav {
