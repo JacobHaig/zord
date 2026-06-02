@@ -677,12 +677,16 @@ So compress first:
    (lazily generated if it doesn't exist). The compression is *working memory*,
    not the record — the full transcript stays for drill-down + citations.
 2. **Synthesize (Overview):** feed the stored compressions (lazily compressing any
-   missing, in the background) into the overview model in **one pass** — ~30–50
-   compressions ≈ ~20–35K tokens **fit a 32K-context model** → a holistic,
-   project-grouped rollup. CPU prefill of ~30K tokens is minutes → exactly the
-   "churn slowly in the background" model. **Fallback at scale** (70+ meetings, or
-   exceeding context): hierarchical — group by project and compress-the-
-   compressions before the final pass.
+   missing, in the background) into the overview model in **one pass** → a
+   holistic, project-grouped rollup. The context window is **configurable**
+   (default ~32K; can raise to 64–128K). RAM is the limit (KV cache), and on a
+   16 GB / CPU laptop the **3B model** is the sweet spot: ~6 GB at 64K, ~9 GB at
+   128K (vs 7B which is tight at 64K, risky at 128K). The model is loaded only for
+   the background pass then unloaded, so context costs RAM only during the run.
+   The real cost is **CPU prefill time** — tens of minutes at 64–100K — which is
+   fine for background churn. Future lever: KV-cache quantization (q8) ~halves KV.
+   **Fallback at scale** (exceeding the chosen context): hierarchical — group by
+   project and compress-the-compressions before the final pass.
 3. **Overview output** = per-project rollups (state / pending / done / owners /
    unknowns) + a pinned **"My open action items"**.
 
@@ -696,8 +700,11 @@ So compress first:
   with normalization to merge fuzzy/duplicate names.
 
 **Gaps to handle:** **context window** — the summarizer hard-caps `N_CTX = 8192`
-and truncates input; the overview pass needs ~32K (configurable, model must
-support it; Qwen2.5 does). Compression is **lossy** → keep full transcript + cite
+and truncates input. Make context **configurable** for both compress (≥16K to
+ingest a full ~1 hr meeting) and synthesis (default 32K, up to 64–128K). Pick a
+default that's safe on 16 GB and warn that 64K+ wants the 3B model; model must
+support the context (Qwen2.5 does, to 128K). Loaded only during the background
+run, then unloaded. Compression is **lossy** → keep full transcript + cite
 sources. Faithful, non-editorializing compress prompt. Topic normalization.
 Owner attribution leans on diarization+names ("Me" always known). First-run
 compute over the backlog (background, incremental, progress). Recency weighting +
