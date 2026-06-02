@@ -1,7 +1,6 @@
 //! llama.cpp-backed summarizer. Loads a GGUF instruct model and runs a single
 //! chat completion to turn a transcript into Markdown notes.
 
-use std::io::{Read, Write};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -166,25 +165,7 @@ pub fn ensure_summary_model(
     }
     let url = model.url();
     tracing::info!(%url, "downloading summary model (first run)");
-    let resp = ureq::get(url).call().with_context(|| format!("requesting {url}"))?;
-    let total = resp.header("Content-Length").and_then(|h| h.parse::<u64>().ok());
-    let tmp = path.with_extension("partial");
-    let mut file = std::fs::File::create(&tmp)?;
-    let mut reader = resp.into_reader();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut downloaded = 0u64;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])?;
-        downloaded += n as u64;
-        progress(downloaded, total);
-    }
-    file.flush()?;
-    drop(file);
-    std::fs::rename(&tmp, &path)?;
+    zord_net::download_to_file(url, &path, progress)?;
     Ok(path)
 }
 

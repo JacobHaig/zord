@@ -1,0 +1,14 @@
+[package]
+name = "zord-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+# native-tls → OS certificate store (Windows schannel / macOS Secure Transport),
+# so corporate HTTPS-inspection root CAs are trusted like the browser. rustls
+# (ureq's default) only trusts the bundled Mozilla roots and fails on those.
+ureq = { version = "2", default-features = false, features = ["native-tls", "gzip"] }
+native-tls = "0.2"

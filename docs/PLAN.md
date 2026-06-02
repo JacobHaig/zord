@@ -548,15 +548,24 @@ failed model download the settings panel shows the direct URL(s) (copy / open in
 browser) + "Open models folder". Model `urls` are carried in the catalog
 (`ModelInfo.urls`); engine emits `Event::DownloadFailed`.
 
-### Phase 18 — Proxy-aware / resilient downloads (pending; lower priority than 17)
-The *automatic* counterpart to Phase 17's manual fallback: make in-app downloads
-actually succeed on managed networks. The downloader (`ureq`, direct HTTPS)
-currently ignores system proxies and the OS cert store, so first-run model
-fetches fail behind a proxy / HTTPS-inspection. Honor `HTTP(S)_PROXY` env vars
-and use the OS trust store (native-tls), across all three download paths
-(transcribe / summarize / diarize), with retry/resume. Lower priority because
-Phase 17's URL + open-folder fallback already unblocks these users and is
-network-policy-proof; this just makes the happy path automatic.
+### Phase 18 — Proxy-aware / resilient downloads ✅
+The automatic counterpart to Phase 17's manual fallback. All model downloads now
+go through a shared **`zord-net`** crate (`download_to_file`) that:
+- uses the **OS certificate store** via **native-tls** (Windows schannel / macOS
+  Secure Transport) instead of ureq's bundled Mozilla roots — so corporate
+  **HTTPS-inspection** root CAs are trusted, like the browser (the most likely
+  cause of in-app downloads failing while the browser works);
+- honors an explicit **proxy** from `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` env
+  vars; and
+- retries transient failures (3×) and streams atomically (`.partial` + rename).
+`zord-transcribe` / `zord-summarize` / `zord-diarize` dropped their own `ureq`
+and call `zord_net::download_to_file`. Verified with an (ignored) native-tls
+download test.
+
+> Not covered: a **PAC/WPAD or Windows-registry (WinINET) system proxy** with no
+> env var set isn't auto-detected — the Phase 17 manual browser-download fallback
+> still covers that. (Possible follow-up: read the WinINET system proxy on
+> Windows.)
 
 ### Phase 19 — Flexible model sourcing (no-HuggingFace) ✅
 For users who can't reach HuggingFace (Whisper ggml + Qwen GGUFs live there) but

@@ -5562,6 +5562,7 @@ dependencies = [
  "base64",
  "flate2",
  "log",
+ "native-tls",
  "once_cell",
  "rustls",
  "rustls-pki-types",
@@ -6822,8 +6823,8 @@ dependencies = [
  "sherpa-onnx",
  "tar",
  "tracing",
- "ureq",
  "zord-core",
+ "zord-net",
 ]
 
 [[package]]
@@ -6858,6 +6859,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zord-net"
+version = "0.2.5"
+dependencies = [
+ "anyhow",
+ "native-tls",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "zord-store"
 version = "0.2.5"
 dependencies = [
@@ -6876,7 +6887,7 @@ dependencies = [
  "directories",
  "llama-cpp-2",
  "tracing",
- "ureq",
+ "zord-net",
 ]
 
 [[package]]
@@ -6889,9 +6900,9 @@ dependencies = [
  "sherpa-onnx",
  "tar",
  "tracing",
- "ureq",
  "whisper-rs",
  "zord-core",
+ "zord-net",
 ]
 
 [[package]]

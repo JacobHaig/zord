@@ -2,7 +2,6 @@
 //! downloading it from Hugging Face on first run (never embedded in the app).
 
 use anyhow::{anyhow, Context, Result};
-use std::io::{Read, Write};
 use std::path::PathBuf;
 
 const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
@@ -170,38 +169,8 @@ fn ensure_whisper(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) ->
     }
     let url = format!("{HF_BASE}/{}", model.filename());
     tracing::info!(%url, "downloading whisper model (first run)");
-    download_to_file(&url, &path, progress)?;
+    zord_net::download_to_file(&url, &path, progress)?;
     Ok(path)
-}
-
-/// Stream `url` to `dest` via a `.partial` temp + atomic rename, reporting
-/// (downloaded, total) progress.
-fn download_to_file(
-    url: &str,
-    dest: &std::path::Path,
-    progress: &mut dyn FnMut(u64, Option<u64>),
-) -> Result<()> {
-    let resp = ureq::get(url).call().with_context(|| format!("requesting {url}"))?;
-    let total = resp.header("Content-Length").and_then(|h| h.parse::<u64>().ok());
-    let tmp = dest.with_extension("partial");
-    let mut file = std::fs::File::create(&tmp)?;
-    let mut reader = resp.into_reader();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut downloaded = 0u64;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])?;
-        downloaded += n as u64;
-        progress(downloaded, total);
-    }
-    file.flush()?;
-    drop(file);
-    std::fs::rename(&tmp, dest)?;
-    tracing::info!(bytes = downloaded, ?dest, "download complete");
-    Ok(())
 }
 
 #[cfg(feature = "parakeet")]
@@ -216,7 +185,7 @@ fn ensure_parakeet(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) -
     let archive_url = format!("{base}/{}.tar.bz2", model.filename());
     tracing::info!(%archive_url, "downloading Parakeet model (first run)");
     let tarball = dir.join(format!("{}.tar.bz2", model.filename()));
-    download_to_file(&archive_url, &tarball, progress)?;
+    zord_net::download_to_file(&archive_url, &tarball, progress)?;
 
     // Decompress .tar.bz2 and unpack into the cache dir. The archive's top
     // folder is the model name, so this yields dir/<filename>/...

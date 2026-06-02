@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/zord-core",
+    "crates/zord-net",
     "crates/zord-audio",
     "crates/zord-capture",
     "crates/zord-transcribe",
@@ -24,6 +25,7 @@ authors = ["Zord"]
 [workspace.dependencies]
 # internal
 zord-core = { path = "crates/zord-core" }
+zord-net = { path = "crates/zord-net" }
 zord-audio = { path = "crates/zord-audio" }
 zord-capture = { path = "crates/zord-capture" }
 zord-transcribe = { path = "crates/zord-transcribe" }

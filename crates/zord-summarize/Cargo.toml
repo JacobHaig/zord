@@ -8,12 +8,12 @@ license.workspace = true
 default = []
 # Local LLM summaries via llama.cpp. Heavy build (compiles llama.cpp); the
 # default build leaves this crate empty so the workspace stays lean.
-llama = ["dep:llama-cpp-2", "dep:ureq", "dep:directories"]
+llama = ["dep:llama-cpp-2", "dep:zord-net", "dep:directories"]
 
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
-ureq = { version = "2", optional = true }
+zord-net = { workspace = true, optional = true }
 directories = { version = "5", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

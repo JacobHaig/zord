@@ -16,7 +16,9 @@ storage happen on your machine.
   settings panel; download / select / delete locally; re-transcribe old sessions
   with a better model. No HuggingFace access? Parakeet + diarization models come
   from GitHub, and any **custom `.gguf`** dropped in the models folder shows up
-  as a selectable summary model — no download required.
+  as a selectable summary model — no download required. In-app downloads use your
+  **OS certificate store + proxy env vars**, so they work behind corporate
+  HTTPS-inspection/proxies (and there's always the manual drop-in fallback).
 - 🔎 **Searchable history** — every session stored in local SQLite with
   full-text search.
 - ✨ **Local AI summaries** *(optional)* — a local LLM (llama.cpp) turns a

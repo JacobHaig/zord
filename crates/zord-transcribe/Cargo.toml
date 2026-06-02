@@ -15,7 +15,7 @@ zord-core = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 directories = "5"
-ureq = "2"
+zord-net = { workspace = true }
 sherpa-onnx = { version = "1.13", optional = true }
 tar = { version = "0.4", optional = true }
 bzip2 = { version = "0.4", optional = true }

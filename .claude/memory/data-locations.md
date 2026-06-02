@@ -42,4 +42,10 @@ recognized; surfaced in the download-failure fallback via `SummaryModel::mirror_
 And **Ollama registry** (`registry.ollama.ai/v2/library/<m>/manifests/<tag>` →
 `application/vnd.ollama.image.model` layer digest → `/blobs/<digest>` = raw GGUF;
 in-app download pending).
+
+All in-app downloads go through the shared **`zord-net`** crate
+(`download_to_file`): native-tls (OS cert store → trusts corporate HTTPS-
+inspection CAs) + `HTTP(S)_PROXY`/`ALL_PROXY` env proxy + retries (Phase 18). Not
+covered: PAC/WPAD or Windows WinINET system proxy with no env var — the manual
+browser drop-in still covers that.
 Related: [[architecture]], [[diarization-design]], [[teams-audio-options]].

@@ -2,7 +2,6 @@
 //! optional online (provisional) labeler.
 
 use anyhow::{anyhow, Context, Result};
-use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use sherpa_onnx::{
@@ -172,7 +171,7 @@ fn ensure_segmentation(progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<Pat
     let archive_url = format!("{SEG_TAG}/{SEG_STEM}.tar.bz2");
     tracing::info!(%archive_url, "downloading diarization segmentation model (first run)");
     let tarball = dir.join(format!("{SEG_STEM}.tar.bz2"));
-    download_to_file(&archive_url, &tarball, progress)?;
+    zord_net::download_to_file(&archive_url, &tarball, progress)?;
 
     let file = std::fs::File::open(&tarball)?;
     let bz = bzip2::read::BzDecoder::new(file);
@@ -197,7 +196,7 @@ fn ensure_embedding(
     }
     let url = format!("{EMB_TAG}/{}", model.filename());
     tracing::info!(%url, "downloading speaker-embedding model (first run)");
-    download_to_file(&url, &path, progress)?;
+    zord_net::download_to_file(&url, &path, progress)?;
     Ok(path)
 }
 
@@ -208,34 +207,6 @@ pub fn delete_embedding(model: EmbeddingModel) -> Result<()> {
     if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("deleting {path:?}"))?;
     }
-    Ok(())
-}
-
-/// Stream `url` to `dest` via a `.partial` temp + atomic rename.
-fn download_to_file(
-    url: &str,
-    dest: &std::path::Path,
-    progress: &mut dyn FnMut(u64, Option<u64>),
-) -> Result<()> {
-    let resp = ureq::get(url).call().with_context(|| format!("requesting {url}"))?;
-    let total = resp.header("Content-Length").and_then(|h| h.parse::<u64>().ok());
-    let tmp = dest.with_extension("partial");
-    let mut file = std::fs::File::create(&tmp)?;
-    let mut reader = resp.into_reader();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut downloaded = 0u64;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])?;
-        downloaded += n as u64;
-        progress(downloaded, total);
-    }
-    file.flush()?;
-    drop(file);
-    std::fs::rename(&tmp, dest)?;
     Ok(())
 }
 
