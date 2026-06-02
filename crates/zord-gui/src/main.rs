@@ -1005,6 +1005,20 @@ fn MainApp() -> Element {
                                                         }
                                                     }
                                                 }
+                                                div { class: "field-row",
+                                                    label { class: "field-label", "Auto-generate a meeting title after summarizing" }
+                                                    button {
+                                                        class: if settings.read().auto_title { "toggle on" } else { "toggle" },
+                                                        onclick: move |_| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.auto_title = !s.auto_title;
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                        if settings.read().auto_title { "On" } else { "Off" }
+                                                    }
+                                                }
+                                                p { class: "field-note", "Names each recording from its summary (never overwrites a title you set yourself), so sessions are easy to find later." }
                                                 SummaryPromptSettings { settings }
                                             }
                                         }

@@ -67,6 +67,30 @@ pub struct Settings {
     /// 10-person call coming out as 80 "speakers").
     #[serde(default)]
     pub diarize_num_speakers: u32,
+    /// Auto-generate a short session title from the summary (needs a summary
+    /// model). Never overwrites a title you set manually.
+    #[serde(default = "default_true")]
+    pub auto_title: bool,
+}
+
+/// System prompt for auto-titling a recorded session from its summary/transcript.
+pub fn title_prompt() -> &'static str {
+    "You write a short, specific title for a meeting from its notes. Reply with \
+     ONLY the title: 4–8 words, no surrounding quotes, no trailing punctuation, \
+     no preamble or explanation."
+}
+
+/// Clean an LLM-produced title: first non-empty line, strip wrapping quotes and
+/// a leading "Title:" label, trim trailing punctuation, and cap the length.
+pub fn clean_title(raw: &str) -> String {
+    let line = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = line
+        .trim_start_matches("Title:")
+        .trim_start_matches("title:")
+        .trim();
+    let line = line.trim_matches(|c| c == '"' || c == '\'' || c == '`').trim();
+    let line = line.trim_end_matches(['.', ',', ';', ':']).trim();
+    line.chars().take(80).collect()
 }
 
 fn default_true() -> bool {
@@ -132,6 +156,7 @@ impl Default for Settings {
             diarize_embedding_model: default_embedding_model(),
             diarize_keep_audio: false,
             diarize_num_speakers: 0,
+            auto_title: true,
         }
     }
 }

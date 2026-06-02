@@ -320,7 +320,29 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
     match summarizer.summarize(&transcript, &settings.effective_summary_prompt()) {
         Ok(text) => {
             let _ = store.set_summary(session_id, &text);
-            let _ = ev.send(Event::Summary(Some(text)));
+            let _ = ev.send(Event::Summary(Some(text.clone())));
+
+            // Auto-title (best-effort): reuse the loaded model to title the
+            // session, unless the user already named it or turned this off.
+            if settings.auto_title {
+                let unnamed = store
+                    .get_session(session_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.title.as_deref().unwrap_or("").trim().is_empty())
+                    .unwrap_or(false);
+                if unnamed {
+                    if let Ok(raw) = summarizer.summarize(&text, zord_config::title_prompt()) {
+                        let title = zord_config::clean_title(&raw);
+                        if !title.is_empty() {
+                            let _ = store.set_session_title(session_id, &title);
+                            if let Ok(v) = store.list_sessions() {
+                                let _ = ev.send(Event::Sessions(v));
+                            }
+                        }
+                    }
+                }
+            }
         }
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("summary failed: {e}")));

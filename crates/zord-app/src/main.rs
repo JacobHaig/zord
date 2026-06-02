@@ -211,6 +211,23 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let summary = summarizer.summarize(&transcript, &settings.effective_summary_prompt())?;
     store.set_summary(session_id, &summary)?;
     println!("{summary}");
+
+    // Auto-title (best-effort) if enabled and the session isn't already named.
+    if settings.auto_title {
+        let unnamed = store
+            .get_session(session_id)?
+            .map(|s| s.title.as_deref().unwrap_or("").trim().is_empty())
+            .unwrap_or(false);
+        if unnamed {
+            if let Ok(raw) = summarizer.summarize(&summary, zord_config::title_prompt()) {
+                let title = zord_config::clean_title(&raw);
+                if !title.is_empty() {
+                    store.set_session_title(session_id, &title)?;
+                    eprintln!("Titled: {title}");
+                }
+            }
+        }
+    }
     Ok(())
 }
 
