@@ -400,6 +400,19 @@ fn MainApp() -> Element {
         }
     };
 
+    // Toggle settings; re-scan the models folder when opening so a freshly
+    // dropped-in custom GGUF (or manually-placed model) shows up without a restart.
+    let on_toggle_settings = {
+        let engine = engine.clone();
+        move |_| {
+            let opening = !*show_settings.peek();
+            show_settings.set(opening);
+            if opening {
+                let _ = engine.model_tx.send(ModelCmd::List);
+            }
+        }
+    };
+
     let on_search = {
         let engine = engine.clone();
         move |e: FormEvent| {
@@ -519,7 +532,7 @@ fn MainApp() -> Element {
                         button {
                             class: "gear",
                             title: "Settings",
-                            onclick: move |_| { let v = *show_settings.peek(); show_settings.set(!v); },
+                            onclick: on_toggle_settings,
                             "⚙"
                         }
                         if recording && mic_in_capture {
