@@ -628,21 +628,14 @@ Shipped the tractable levers instead — full manual control over the clustering
 Future option if ever needed: speech-separation-guided diarization, or revisit
 Sortformer if/when a working ONNX export lands.
 
-> **Researched June 2026 — deferred (not selected now), kept so we don't re-research:**
-> - **Teams real speaker names without a bot:** Microsoft Graph `callTranscript`
->   API (GA) returns Teams' own transcript (VTT) with real `speakerName` + text +
->   timing — *if* the meeting had Teams live transcription on and the app has
->   Azure AD/Graph permissions (tenant-admin / RSC; an org tenant may restrict).
->   No bot. This is the highest-fidelity path to real names. See
->   `teams-audio-options` memory.
-> - **Per-participant audio streams** require a Graph real-time-media **bot that
->   joins the call** (`Calls.AccessMedia.All`, Windows-Server host) — rejected:
->   it's "another participant" + heavy enterprise setup.
-> - **Smarter notes:** structured action items + owners, per-speaker summaries,
->   topic/chapter segmentation.
-> - **Chat-with-meeting:** local-LLM Q&A over a transcript.
-> - **Audio playback + click-to-seek** transcript (also aids diarization review).
-> - **Follow-up draft + richer export** (Obsidian/Markdown), tags.
+> **Researched June 2026 — decisions:**
+> - **Teams real speaker names (Graph `callTranscript`)** — **DECLINED**: no
+>   tenant access/authorization available to the user. (Per-participant audio
+>   would need a Graph media **bot** joining the call — also rejected.) Kept in
+>   the `teams-audio-options` memory in case access changes.
+> - **Audio playback + click-to-seek transcript** — nice-to-have; **kept as a
+>   note, not a planned phase** for now.
+> - Smarter notes + chat-with-meeting → promoted to Phase 23 below.
 
 ### Phase 22 — Non-HuggingFace model sources ✅ (ModelScope mirror + Ollama in-app)
 For networks that block HuggingFace (where the Whisper ggml + Qwen GGUFs live).
@@ -666,11 +659,23 @@ Two reliable non-HF sources verified June 2026:
   it works on direct-allowed networks; proxy-only-via-browser users still use the
   ModelScope link.
 
+### Phase 23 — Smarter notes (next major enhancement) ⭐ next
+The big LLM-over-transcript step, building on summaries + diarized speaker names:
+- **Structured notes:** action items with **owners** + due dates, decisions,
+  per-speaker summaries ("what each person covered"), topic/chapter segmentation.
+- **Chat-with-meeting (post-recording Q&A):** ask free-form questions about a
+  recorded session; the local LLM answers from the transcript. The lighter,
+  higher-leverage first cut.
+- **Live rolling summary (optional, later):** a periodic "what's been said so
+  far" *during* recording — distinct from the above; runs the LLM mid-meeting so
+  it carries the same hardware caveat as live diarization (opt-in toggle).
+- Possible extras: follow-up email/message draft; richer export (Obsidian/MD), tags.
+Reuses the loaded summary model; no new heavy deps expected. Scope the exact
+sections + whether to include live rolling summary when we start.
+
 ### Cross-cutting / smaller
-- Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language
-  setting beyond English).
-- CUDA release builds for Windows/Linux NVIDIA GPUs.
 - macOS code-sign + notarize automation (needs Apple Developer account).
+- ~~Multilingual UX~~ / ~~CUDA release builds~~ — **declined** (not wanted).
 - Windows code-signing (Authenticode) so SmartScreen/managed machines don't
   block the binaries (CI step ready to wire once a cert/signing service exists).
 
