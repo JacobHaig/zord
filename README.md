@@ -26,8 +26,9 @@ storage happen on your machine.
   **Speaker 1/2/3** (sherpa-onnx), rename them, and see them colored in the
   transcript + exports. Runs offline after recording (and on demand); an optional
   live mode shows provisional labels while recording.
-- 🎚️ **Configurable** — capture mic-only / system-only / both, edit transcript
-  lines inline, and tune summary model + prompt from the settings panel.
+- 🎚️ **Configurable** — capture mic-only / system-only / both, **mute your mic
+  mid-recording** with a toggle next to Record, edit transcript lines inline, and
+  tune summary model + prompt from the settings panel.
 - 📤 **Export** — Markdown, SRT, or JSON, with one-click **Reveal in
   Finder/Explorer** and **Open in editor**.
 - 🧰 **Diagnostics** — Settings → *Files & folders* jumps straight to the

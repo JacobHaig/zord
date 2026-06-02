@@ -71,6 +71,9 @@ body {
 }
 .record:hover { filter: brightness(1.08); }
 .record.stop { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); }
+/* Mic mute toggle (shown while recording). */
+.record.mute { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); }
+.record.muted { background: var(--others); color: #06222f; border: 1px solid var(--others); }
 
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
 .gear {

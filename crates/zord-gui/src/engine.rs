@@ -8,7 +8,9 @@
 //! [`DbCmd`] over std channels.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -150,6 +152,10 @@ pub enum RecorderCmd {
         record_system: bool,
     },
     Stop,
+    /// Mute/unmute the microphone ("Me") mid-recording without stopping. While
+    /// muted, mic audio is dropped (recorded as silence) — no transcript, meter
+    /// falls to zero.
+    SetMicMuted(bool),
     /// Stop the engine entirely (process exit normally handles this; kept for
     /// completeness / future graceful shutdown).
     #[allow(dead_code)]
@@ -683,7 +689,8 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 }
             }
             RecorderCmd::Shutdown => break,
-            RecorderCmd::Stop => {} // nothing recording
+            RecorderCmd::Stop => {}            // nothing recording
+            RecorderCmd::SetMicMuted(_) => {} // nothing recording
         }
     }
 }
@@ -794,13 +801,15 @@ fn run_session(
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let mut procs = Vec::new();
+    // Toggled live by RecorderCmd::SetMicMuted; read by the mic proc thread.
+    let mic_muted = Arc::new(AtomicBool::new(false));
 
     // Microphone ("Me") — only if the capture mode includes it.
     let mic = if record_mic {
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
         match Microphone::start_with(mic_tx, input_device.as_deref()) {
             Ok(m) => {
-                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me")));
+                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone())));
                 Some(m)
             }
             Err(e) => {
@@ -817,7 +826,7 @@ fn run_session(
         let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
         match SystemAudio::start(sys_tx) {
             Ok(s) => {
-                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone()));
+                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), None));
                 Some(s)
             }
             Err(e) => {
@@ -895,7 +904,7 @@ fn run_session(
         })
     };
 
-    // Wait for Stop / Shutdown.
+    // Wait for Stop / Shutdown (also handle live mic mute toggles).
     let mut shutdown = false;
     loop {
         match rx.recv() {
@@ -904,6 +913,7 @@ fn run_session(
                 shutdown = true;
                 break;
             }
+            Ok(RecorderCmd::SetMicMuted(m)) => mic_muted.store(m, Ordering::Relaxed),
             Ok(RecorderCmd::Start { .. }) => {} // ignore double-start
         }
     }
@@ -944,6 +954,7 @@ fn spawn_proc(
     job_tx: mpsc::Sender<Job>,
     ev: UnboundedSender<Event>,
     wav_path: Option<PathBuf>,
+    muted: Option<Arc<AtomicBool>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut resampler = match MonoResampler::new(sample_rate, 1) {
@@ -961,6 +972,13 @@ fn spawn_proc(
         let mut dbg_last = session_start.elapsed();
 
         while let Ok(frame) = rx.recv() {
+            // Muted mic: replace this buffer with silence so timing stays aligned
+            // (segmenter/WAV keep advancing) but nothing is transcribed and the
+            // meter naturally falls to zero.
+            let frame = match muted {
+                Some(ref m) if m.load(Ordering::Relaxed) => vec![0.0f32; frame.len()],
+                _ => frame,
+            };
             let base = *base_ms.get_or_insert_with(|| session_start.elapsed().as_millis() as u64);
             // RMS loudness of this buffer, gained, smoothed with time-based
             // exponential attack/release so both channels react at the same

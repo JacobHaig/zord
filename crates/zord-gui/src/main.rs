@@ -245,6 +245,8 @@ fn MainApp() -> Element {
     let mut confirm_delete = use_signal(|| Option::<String>::None);
     // Seconds elapsed in the current recording (0 when idle).
     let mut rec_secs = use_signal(|| 0u64);
+    // Whether the mic ("Me") is muted during the current recording.
+    let mut mic_muted = use_signal(|| false);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
@@ -364,6 +366,7 @@ fn MainApp() -> Element {
                 notice.set(None);
                 summary.set(None);
                 speaker_names.write().clear();
+                mic_muted.set(false);
                 view.set(View::Live);
                 let s = settings.peek().clone();
                 let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
@@ -382,6 +385,18 @@ fn MainApp() -> Element {
                     record_system,
                 });
             }
+        }
+    };
+
+    // Whether the mic is part of the current capture mode (system-only = no mic).
+    let mic_in_capture = settings.read().capture_mode != "system";
+
+    let on_mute = {
+        let engine = engine.clone();
+        move |_| {
+            let next = !*mic_muted.peek();
+            let _ = engine.rec_tx.send(RecorderCmd::SetMicMuted(next));
+            mic_muted.set(next);
         }
     };
 
@@ -506,6 +521,14 @@ fn MainApp() -> Element {
                             title: "Settings",
                             onclick: move |_| { let v = *show_settings.peek(); show_settings.set(!v); },
                             "⚙"
+                        }
+                        if recording && mic_in_capture {
+                            button {
+                                class: if *mic_muted.read() { "record muted" } else { "record mute" },
+                                title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
+                                onclick: on_mute,
+                                if *mic_muted.read() { "🔇 Unmute" } else { "🎤 Mute" }
+                            }
                         }
                         button {
                             class: if recording { "record stop" } else { "record" },
