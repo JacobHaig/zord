@@ -112,7 +112,8 @@ fn catalog() -> Vec<ModelInfo> {
             description: m.label().to_string(),
             downloaded: zord_summarize::summary_model_present(m),
             kind: "summary".to_string(),
-            urls: vec![m.url().to_string()],
+            // HuggingFace first, then a non-HF mirror (ModelScope) for blocked nets.
+            urls: vec![m.url().to_string(), m.mirror_url().to_string()],
         });
     }
     // User-supplied GGUFs dropped into the models folder (any source — no HF).

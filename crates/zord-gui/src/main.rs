@@ -776,7 +776,7 @@ fn MainApp() -> Element {
                                                     span { "⚠ Couldn't download \"{failed}\"" }
                                                     button { class: "notice-x", onclick: move |_| download_help.set(None), "✕" }
                                                 }
-                                                p { class: "field-note", "Often a proxy / network block. Fetch it in your browser (which uses your proxy), then drop it in the models folder. Archives (.tar.bz2) must be extracted there first." }
+                                                p { class: "field-note", "Often a proxy / network block. Fetch it in your browser (which uses your proxy), then drop it in the models folder. If HuggingFace is blocked, use the modelscope.cn link below. Archives (.tar.bz2) must be extracted there first." }
                                                 for u in urls.iter() {
                                                     {
                                                         let u_copy = u.clone();

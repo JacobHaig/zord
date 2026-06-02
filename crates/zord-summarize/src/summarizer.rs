@@ -74,6 +74,18 @@ impl SummaryModel {
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|m| m.name() == s)
     }
+
+    /// Non-HuggingFace mirror URL (ModelScope) for the same GGUF — for users
+    /// whose network blocks HuggingFace. Same filename as [`filename`], so a
+    /// browser-download dropped into the models folder is recognized as this
+    /// built-in model.
+    pub fn mirror_url(self) -> &'static str {
+        match self {
+            SummaryModel::Qwen1_5B => "https://modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/master/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen3B => "https://modelscope.cn/models/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/master/qwen2.5-3b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen7B => "https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/master/qwen2.5-7b-instruct-q4_k_m.gguf",
+        }
+    }
 }
 
 fn models_dir() -> Result<PathBuf> {

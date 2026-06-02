@@ -27,8 +27,10 @@ storage happen on your machine.
   transcript + exports. Runs offline after recording (and on demand); an optional
   live mode shows provisional labels while recording.
 - 🎚️ **Configurable** — capture mic-only / system-only / both, **mute your mic
-  mid-recording** with a toggle next to Record, edit transcript lines inline, and
-  tune summary model + prompt from the settings panel.
+  mid-recording** with a toggle next to Record, auto-generate a meeting **title**,
+  edit transcript lines inline, and tune summary model + prompt from the settings
+  panel. HuggingFace blocked? Summary models have a **ModelScope** mirror link in
+  the download-failure panel (browser-download, drop in the models folder).
 - 📤 **Export** — Markdown, SRT, or JSON, with one-click **Reveal in
   Finder/Explorer** and **Open in editor**.
 - 🧰 **Diagnostics** — Settings → *Files & folders* jumps straight to the

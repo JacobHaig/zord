@@ -634,6 +634,26 @@ to largely fix the over-clustering without any cloud/auth.
 > - **Audio playback + click-to-seek** transcript (also aids diarization review).
 > - **Follow-up draft + richer export** (Obsidian/Markdown), tags.
 
+### Phase 22 — Non-HuggingFace model sources (🟡 ModelScope mirror done; Ollama in-app pending)
+For networks that block HuggingFace (where the Whisper ggml + Qwen GGUFs live).
+Two reliable non-HF sources verified June 2026:
+- **ModelScope** (`modelscope.cn`) ✅ — mirrors the Qwen GGUFs at
+  `…/resolve/master/<same-filename>` (browser-pasteable). Because the filename
+  matches the built-in model, a manual browser-download dropped into the models
+  folder is recognized as that built-in model. Wired: `SummaryModel::mirror_url`
+  is included in `ModelInfo.urls`, so the download-failure fallback now shows a
+  `modelscope.cn` link alongside the HF one — the user fetches it in the browser
+  (which uses their proxy) and drops it in. This is the path for proxy/browser-
+  only networks.
+- **Ollama registry** (`registry.ollama.ai`) 🟡 pending — reliable CDN hosting
+  small instruct GGUFs (qwen2.5 1.5b/3b, llama3.2 1b/3b, phi3.5, gemma2:2b,
+  smollm2). Direct download without Ollama installed: GET
+  `/v2/library/<model>/manifests/<tag>`, take the `application/vnd.ollama.image.
+  model` layer digest, GET `/v2/library/<model>/blobs/<digest>` → raw GGUF. Plan:
+  add an in-app "Ollama" download path (manifest→blob, save as `.gguf`) + a small
+  catalog, for one-click non-HF models. (Only works where the app can reach the
+  net directly; proxy-only-via-browser users use ModelScope above.)
+
 ### Cross-cutting / smaller
 - Multilingual UX (large-v3 + Parakeet v3 already capable; expose a language
   setting beyond English).

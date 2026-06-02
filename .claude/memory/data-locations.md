@@ -35,5 +35,11 @@ Qwen summary GGUFs are on **HuggingFace**; Parakeet + diarization models are on
 **GitHub** (k2-fsa/sherpa-onnx releases). So an HF-blocked user should use
 Parakeet for ASR. For summaries, Phase 19 added **custom GGUF** support: any
 `.gguf` dropped into `models/` is auto-listed in Settings → Summaries (filename
-is the id), so a model from any source works without HuggingFace.
-Related: [[architecture]], [[diarization-design]].
+is the id), so a model from any source works without HuggingFace. Verified non-HF
+GGUF sources (Phase 22): **ModelScope** (`modelscope.cn/models/Qwen/Qwen2.5-<sz>-Instruct-GGUF/resolve/master/<file>`)
+— same filenames as the built-ins, so a browser download drops in and is
+recognized; surfaced in the download-failure fallback via `SummaryModel::mirror_url`.
+And **Ollama registry** (`registry.ollama.ai/v2/library/<m>/manifests/<tag>` →
+`application/vnd.ollama.image.model` layer digest → `/blobs/<digest>` = raw GGUF;
+in-app download pending).
+Related: [[architecture]], [[diarization-design]], [[teams-audio-options]].
