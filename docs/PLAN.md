@@ -659,19 +659,53 @@ Two reliable non-HF sources verified June 2026:
   it works on direct-allowed networks; proxy-only-via-browser users still use the
   ModelScope link.
 
-### Phase 23 — Smarter notes (next major enhancement) ⭐ next
-The big LLM-over-transcript step, building on summaries + diarized speaker names:
-- **Structured notes:** action items with **owners** + due dates, decisions,
-  per-speaker summaries ("what each person covered"), topic/chapter segmentation.
-- **Chat-with-meeting (post-recording Q&A):** ask free-form questions about a
-  recorded session; the local LLM answers from the transcript. The lighter,
-  higher-leverage first cut.
-- **Live rolling summary (optional, later):** a periodic "what's been said so
-  far" *during* recording — distinct from the above; runs the LLM mid-meeting so
-  it carries the same hardware caveat as live diarization (opt-in toggle).
-- Possible extras: follow-up email/message draft; richer export (Obsidian/MD), tags.
-Reuses the loaded summary model; no new heavy deps expected. Scope the exact
-sections + whether to include live rolling summary when we start.
+### Phase 23 — Cross-meeting synthesis ("Overview") ⭐ next — major
+The headline uplift: a standing, holistic picture across the **last ~30–50
+meetings** — per-project state, what's pending, what's accomplished, who owns
+what, open questions — oriented around the user ("Me"). So when asked "where's
+project X?", the user reads off a current, faithful rollup.
+
+**Architecture — map-reduce over structured extracts (NOT one giant context).**
+50 meetings ≈ 400–650K tokens — far beyond any practical local/CPU context. So:
+1. **Map (per meeting, once, cached):** extract a compact **structured JSON
+   record** — project/topic tag(s), action items `{what, owner, status, due}`,
+   decisions, status updates, open questions, source refs (session id +
+   timestamps). One meeting fits in context; runs incrementally as recorded.
+2. **Reduce (per project):** group records by canonical project and synthesize a
+   per-project rollup (state / pending / done / owners / unknowns). Operates on
+   the *extracts* (≈0.5–1.5K tokens each), reduced per project, so it fits even
+   for 50 meetings — current Qwen2.5 (3B extract, 7B synth; selectable) is enough
+   on CPU. Background worker churns slowly; first run over the backlog is the
+   only expensive pass, then incremental.
+3. **Overview** = all per-project rollups + a pinned **"My open action items"**.
+
+**Decisions (locked):**
+- **UI:** a dedicated full **Overview view** (third top-level mode beside
+  live/session), opened via a "📊 Overview" button above the session list.
+  Project list → expand for state/pending/done/owners/open-questions; pinned "My
+  action items"; refresh + "last updated"; each item links back to its source
+  meeting/timestamp (trust/verification).
+- **Projects:** **LLM auto-detects + names** topics, with a normalization pass to
+  merge fuzzy/duplicate names. (User rename/merge is a later nicety.)
+
+**Gaps to handle:** topic normalization; source citations (anti-hallucination);
+owner attribution leans on diarization+names ("Me" always known); first-run
+compute (background, incremental, progress); recency weighting + drop closed
+items; reliable JSON extraction (structured prompt + tolerant parsing).
+
+**Sub-steps:**
+- **23a** — per-meeting structured JSON extraction + schema/storage (also yields
+  single-meeting structured notes: action items + owners, decisions).
+- **23b** — project grouping + canonicalization + per-project rollup (reduce),
+  background incremental worker.
+- **23c** — the **Overview view** UI (project rollups + "My action items" + source links).
+- **23d** — refresh/recency, mark-done/edit, optional **cross-meeting chat** (ask
+  across all meetings) and per-meeting **chat-with-meeting** (post-recording Q&A).
+
+Reuses the existing llama.cpp summary model; no new heavy deps. The earlier
+"smarter per-meeting notes" + "chat-with-meeting" fold in here (23a / 23d).
+Optional much later: a **live rolling summary** during recording (same
+mid-meeting hardware caveat as live diarization).
 
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
