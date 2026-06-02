@@ -665,47 +665,56 @@ meetings** — per-project state, what's pending, what's accomplished, who owns
 what, open questions — oriented around the user ("Me"). So when asked "where's
 project X?", the user reads off a current, faithful rollup.
 
-**Architecture — map-reduce over structured extracts (NOT one giant context).**
-50 meetings ≈ 400–650K tokens — far beyond any practical local/CPU context. So:
-1. **Map (per meeting, once, cached):** extract a compact **structured JSON
-   record** — project/topic tag(s), action items `{what, owner, status, due}`,
-   decisions, status updates, open questions, source refs (session id +
-   timestamps). One meeting fits in context; runs incrementally as recorded.
-2. **Reduce (per project):** group records by canonical project and synthesize a
-   per-project rollup (state / pending / done / owners / unknowns). Operates on
-   the *extracts* (≈0.5–1.5K tokens each), reduced per project, so it fits even
-   for 50 meetings — current Qwen2.5 (3B extract, 7B synth; selectable) is enough
-   on CPU. Background worker churns slowly; first run over the backlog is the
-   only expensive pass, then incremental.
-3. **Overview** = all per-project rollups + a pinned **"My open action items"**.
+**Architecture — compress, then synthesize (NOT one giant raw context).**
+50 raw meetings ≈ 400–650K tokens — far beyond any practical local/CPU context.
+So compress first:
+1. **Compress (per meeting, once, cached):** the LLM condenses a meeting into a
+   token-minimal, **free-form dense prose** representation that preserves the
+   facts — projects + current state, action items (owner → what → status), what
+   was completed, decisions, open questions — terse, low/no formatting, written
+   **model-to-model** (not for display). ~300–800 tokens vs 8–13K raw. Stored on
+   the session; exposed via a **"Compress"** button and **"Copy compressed"**
+   (lazily generated if it doesn't exist). The compression is *working memory*,
+   not the record — the full transcript stays for drill-down + citations.
+2. **Synthesize (Overview):** feed the stored compressions (lazily compressing any
+   missing, in the background) into the overview model in **one pass** — ~30–50
+   compressions ≈ ~20–35K tokens **fit a 32K-context model** → a holistic,
+   project-grouped rollup. CPU prefill of ~30K tokens is minutes → exactly the
+   "churn slowly in the background" model. **Fallback at scale** (70+ meetings, or
+   exceeding context): hierarchical — group by project and compress-the-
+   compressions before the final pass.
+3. **Overview output** = per-project rollups (state / pending / done / owners /
+   unknowns) + a pinned **"My open action items"**.
 
 **Decisions (locked):**
+- **Compression format:** **free-form dense prose** (max compression, LLM-to-LLM).
 - **UI:** a dedicated full **Overview view** (third top-level mode beside
-  live/session), opened via a "📊 Overview" button above the session list.
-  Project list → expand for state/pending/done/owners/open-questions; pinned "My
-  action items"; refresh + "last updated"; each item links back to its source
-  meeting/timestamp (trust/verification).
-- **Projects:** **LLM auto-detects + names** topics, with a normalization pass to
-  merge fuzzy/duplicate names. (User rename/merge is a later nicety.)
+  live/session), opened via a "📊 Overview" button above the session list;
+  project list → expand for state/pending/done/owners/open-questions; pinned "My
+  action items"; refresh + "last updated"; items cite their source meeting.
+- **Projects:** **LLM auto-detects + names** topics within the synthesis pass,
+  with normalization to merge fuzzy/duplicate names.
 
-**Gaps to handle:** topic normalization; source citations (anti-hallucination);
-owner attribution leans on diarization+names ("Me" always known); first-run
-compute (background, incremental, progress); recency weighting + drop closed
-items; reliable JSON extraction (structured prompt + tolerant parsing).
+**Gaps to handle:** **context window** — the summarizer hard-caps `N_CTX = 8192`
+and truncates input; the overview pass needs ~32K (configurable, model must
+support it; Qwen2.5 does). Compression is **lossy** → keep full transcript + cite
+sources. Faithful, non-editorializing compress prompt. Topic normalization.
+Owner attribution leans on diarization+names ("Me" always known). First-run
+compute over the backlog (background, incremental, progress). Recency weighting +
+drop closed items.
 
 **Sub-steps:**
-- **23a** — per-meeting structured JSON extraction + schema/storage (also yields
-  single-meeting structured notes: action items + owners, decisions).
-- **23b** — project grouping + canonicalization + per-project rollup (reduce),
-  background incremental worker.
+- **23a** — per-meeting **compress** (free-form dense prose) + storage + the
+  Compress / Copy-compressed buttons; lazy generation.
+- **23b** — **Overview synthesis** worker: gather compressions (generate missing),
+  one-pass synthesis at ~32K ctx (hierarchical fallback), store the rollup.
 - **23c** — the **Overview view** UI (project rollups + "My action items" + source links).
-- **23d** — refresh/recency, mark-done/edit, optional **cross-meeting chat** (ask
-  across all meetings) and per-meeting **chat-with-meeting** (post-recording Q&A).
+- **23d** — refresh/recency, mark-done/edit, optional **cross-meeting chat** and
+  per-meeting **chat-with-meeting** (post-recording Q&A).
 
-Reuses the existing llama.cpp summary model; no new heavy deps. The earlier
-"smarter per-meeting notes" + "chat-with-meeting" fold in here (23a / 23d).
-Optional much later: a **live rolling summary** during recording (same
-mid-meeting hardware caveat as live diarization).
+Reuses the existing llama.cpp summary model (with a larger configurable context
+for compress/synthesis); no new heavy deps. Optional much later: a **live rolling
+summary** during recording (same mid-meeting hardware caveat as live diarization).
 
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
