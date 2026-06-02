@@ -740,9 +740,15 @@ drop closed items.
   - `zord-summarize`: `count_tokens()` for budgeting + `GenOpts::overview()`;
     `generate()` now takes the user message verbatim (framing moved into
     `summarize`/`compress`). CLI: `zord overview [--max N]`.
-- **23c** — the **Overview view** UI (project rollups + "My action items" + source
-  links): GUI engine `SummCmd::Overview` + `DbCmd::LoadOverview` + `Event::Overview`,
-  a 📊 Overview top-level view, generate/refresh + "last updated".
+- **23c** — ✅ **done.** The GUI **Overview view**.
+  - Engine: `SummCmd::Overview` (runs `zord_overview::synthesize` on the summarize
+    worker, relays progress as notices), `DbCmd::LoadOverview` (reads stored meta),
+    `Event::Overview(Option<OverviewData>)` (feature-independent mirror struct).
+  - GUI: a 📊 **Overview** button above the session list opens a third top-level
+    view; **Generate / Refresh** + "N meetings · updated …" + Copy; the rollup is
+    rendered as collapsible `## `-headed sections (My open action items open first).
+    Summary/compressed panels are now gated to Session/Live views so they don't
+    bleed into Overview.
 - **23d** — refresh/recency, mark-done/edit, optional **cross-meeting chat** and
   per-meeting **chat-with-meeting** (post-recording Q&A).
 

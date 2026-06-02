@@ -7,7 +7,9 @@ mod osutil;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
-use engine::{DbCmd, Engine, Event, ModelCmd, ModelInfo, RecorderCmd, Status, SummCmd};
+use engine::{
+    DbCmd, Engine, Event, ModelCmd, ModelInfo, OverviewData, RecorderCmd, Status, SummCmd,
+};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zord_config::Settings;
@@ -70,6 +72,7 @@ enum View {
     Live,
     Session(String),
     Search,
+    Overview,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +244,9 @@ fn MainApp() -> Element {
     // its (machine-oriented) body is expanded for the user to read.
     let mut compressed = use_signal(|| Option::<String>::None);
     let mut show_compressed = use_signal(|| false);
+    // Cross-meeting Overview rollup (Phase 23c) + whether a synthesis is running.
+    let mut overview = use_signal(|| Option::<OverviewData>::None);
+    let mut overview_busy = use_signal(|| false);
     // Custom names for diarized speakers in the viewed session (index → name).
     let mut speaker_names = use_signal(std::collections::HashMap::<i32, String>::new);
     // Session id currently being renamed (+ its edit buffer); pending delete.
@@ -303,6 +309,10 @@ fn MainApp() -> Element {
                     }
                     Event::Summary(v) => summary.set(v),
                     Event::Compressed(v) => compressed.set(v),
+                    Event::Overview(v) => {
+                        overview.set(v);
+                        overview_busy.set(false);
+                    }
                     Event::Speakers(v) => speaker_names.set(v),
                 }
             }
@@ -420,6 +430,27 @@ fn MainApp() -> Element {
         }
     };
 
+    // Open the cross-meeting Overview view and load any stored rollup.
+    let on_open_overview = {
+        let engine = engine.clone();
+        move |_| {
+            view.set(View::Overview);
+            let _ = engine.db_tx.send(DbCmd::LoadOverview);
+        }
+    };
+
+    // Kick off a (re)synthesis of the Overview (heavy; runs in the background).
+    let on_generate_overview = {
+        let engine = engine.clone();
+        move |_| {
+            overview_busy.set(true);
+            notice.set(Some(
+                "Synthesizing overview… compresses any new meetings first, then rolls them up. Runs in the background.".to_string(),
+            ));
+            let _ = engine.summ_tx.send(SummCmd::Overview);
+        }
+    };
+
     let on_search = {
         let engine = engine.clone();
         move |e: FormEvent| {
@@ -450,6 +481,12 @@ fn MainApp() -> Element {
             // ---- Sidebar: session history ----
             aside { class: "sidebar",
                 div { class: "brand", "ZORD" }
+                button {
+                    class: if matches!(&*view.read(), View::Overview) { "overview-btn active" } else { "overview-btn" },
+                    title: "A holistic, project-grouped rollup across your recent meetings",
+                    onclick: on_open_overview,
+                    "📊 Overview"
+                }
                 div { class: "side-label", "Sessions" }
                 div { class: "session-list",
                     if sessions.read().is_empty() {
@@ -670,7 +707,7 @@ fn MainApp() -> Element {
                 }
 
                 // AI summary (when present for the viewed session).
-                if *view.read() != View::Search {
+                if matches!(&*view.read(), View::Session(_) | View::Live) {
                     if let Some(text) = summary.read().clone() {
                         {
                             let text_copy = text.clone();
@@ -696,7 +733,7 @@ fn MainApp() -> Element {
 
                 // Dense-prose compression (Phase 23). Machine-oriented, so the
                 // body is collapsed by default; the user can expand or copy it.
-                if *view.read() != View::Search {
+                if matches!(&*view.read(), View::Session(_) | View::Live) {
                     if let Some(text) = compressed.read().clone() {
                         {
                             let text_copy = text.clone();
@@ -780,7 +817,9 @@ fn MainApp() -> Element {
                 // Transcript / results. Pass signals so the list subscribes and
                 // re-renders itself; App is not re-rendered on each new segment.
                 div { class: "transcript",
-                    if *view.read() == View::Search {
+                    if *view.read() == View::Overview {
+                        OverviewView { overview, busy: overview_busy, notice, on_generate: on_generate_overview }
+                    } else if *view.read() == View::Search {
                         SearchResultsView { results: search_results }
                     } else {
                         TranscriptView { segments, speaker_names, on_edit: on_edit_segment }
@@ -1577,6 +1616,117 @@ fn SearchResultsView(results: Signal<Vec<(String, Segment)>>) -> Element {
             }
         }
     }
+}
+
+#[component]
+fn OverviewView(
+    overview: Signal<Option<OverviewData>>,
+    busy: Signal<bool>,
+    notice: Signal<Option<String>>,
+    on_generate: EventHandler<()>,
+) -> Element {
+    let data = overview.read().clone();
+    let is_busy = busy();
+    let btn_label = if is_busy {
+        "Synthesizing…"
+    } else if data.is_some() {
+        "Refresh"
+    } else {
+        "Generate"
+    };
+    rsx! {
+        div { class: "overview",
+            div { class: "overview-head",
+                h2 { "📊 Overview" }
+                div { class: "overview-actions",
+                    if let Some(d) = &data {
+                        span { class: "overview-meta",
+                            "{d.meetings} meetings · updated {relative_time(d.generated_at)}"
+                        }
+                        {
+                            let text = d.text.clone();
+                            rsx! {
+                                button {
+                                    class: "mbtn ghost",
+                                    onclick: move |_| {
+                                        osutil::copy_to_clipboard(&text);
+                                        notice.set(Some("Overview copied to clipboard".to_string()));
+                                    },
+                                    "Copy"
+                                }
+                            }
+                        }
+                    }
+                    button {
+                        class: "mbtn",
+                        disabled: is_busy,
+                        onclick: move |_| on_generate.call(()),
+                        "{btn_label}"
+                    }
+                }
+            }
+            match data {
+                None => rsx! {
+                    div { class: "empty",
+                        if is_busy {
+                            "Synthesizing your overview — this runs in the background and can take a few minutes on CPU."
+                        } else {
+                            "No overview yet. Generate a holistic, project-grouped rollup across your recent meetings (any not-yet-compressed are compressed first)."
+                        }
+                    }
+                },
+                Some(d) => {
+                    let (preamble, sections) = split_sections(&d.text);
+                    rsx! {
+                        div { class: "overview-body",
+                            if !preamble.is_empty() {
+                                div { class: "overview-pre", "{preamble}" }
+                            }
+                            if sections.is_empty() {
+                                div { class: "summary-body", "{d.text}" }
+                            } else {
+                                for (i, (heading, body)) in sections.into_iter().enumerate() {
+                                    details {
+                                        key: "{i}",
+                                        class: "overview-sec",
+                                        open: i == 0,
+                                        summary { class: "overview-sec-head", "{heading}" }
+                                        div { class: "overview-sec-body", "{body}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Split overview Markdown into an optional preamble and `## `-headed sections,
+/// so the UI can render each project as a collapsible block.
+fn split_sections(md: &str) -> (String, Vec<(String, String)>) {
+    let mut preamble = String::new();
+    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut cur: Option<(String, String)> = None;
+    for line in md.lines() {
+        if let Some(h) = line.strip_prefix("## ") {
+            if let Some(s) = cur.take() {
+                sections.push(s);
+            }
+            cur = Some((h.trim().to_string(), String::new()));
+        } else if let Some((_, body)) = cur.as_mut() {
+            body.push_str(line);
+            body.push('\n');
+        } else {
+            preamble.push_str(line);
+            preamble.push('\n');
+        }
+    }
+    if let Some(s) = cur.take() {
+        sections.push(s);
+    }
+    (preamble.trim().to_string(), sections.into_iter().map(|(h, b)| (h, b.trim().to_string())).collect())
 }
 
 fn source_class(s: Source) -> &'static str {

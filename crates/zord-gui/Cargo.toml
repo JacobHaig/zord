@@ -14,8 +14,8 @@ default = []
 parakeet = ["zord-transcribe/parakeet"]
 # Enable SQLCipher at-rest encryption (unlock screen + enable/disable in settings).
 encryption = ["zord-store/encryption", "zord-config/encryption"]
-# Enable local LLM summaries (llama.cpp).
-summaries = ["dep:zord-summarize", "zord-summarize/llama"]
+# Enable local LLM summaries (llama.cpp) + cross-meeting Overview synthesis.
+summaries = ["dep:zord-summarize", "zord-summarize/llama", "dep:zord-overview", "zord-overview/llama"]
 # Enable per-speaker diarization (sherpa-onnx).
 diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 
@@ -34,5 +34,6 @@ tracing-appender = "0.2"
 dioxus = { version = "0.7", features = ["desktop"] }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 zord-summarize = { workspace = true, optional = true }
+zord-overview = { workspace = true, optional = true }
 zord-diarize = { workspace = true, optional = true }
 arboard = "3"

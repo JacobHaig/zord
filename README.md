@@ -28,7 +28,13 @@ storage happen on your machine.
   token-minimal dense prose (projects + state, action items, decisions, open
   questions) with one click. Stored per session and copyable; the context window
   is configurable (16K fits ~an hour) so an entire meeting compresses without
-  truncation. It's the building block for upcoming cross-meeting Overviews.
+  truncation.
+- 📊 **Cross-meeting Overview** *(optional)* — a holistic, project-grouped rollup
+  across your recent meetings: per-project state / pending / done / owners / open
+  questions, plus a pinned **"My open action items"**, oriented around you. Built
+  by compressing each meeting then synthesizing them in one pass (with a
+  hierarchical fallback at scale) — all local. Generate/refresh from the 📊
+  Overview view; in the CLI, `zord overview`.
 - 🗣 **Per-speaker diarization** *(optional)* — split the "Others" channel into
   **Speaker 1/2/3** (sherpa-onnx), rename them, and see them colored in the
   transcript + exports. Runs offline after recording (and on demand); an optional

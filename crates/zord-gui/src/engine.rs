@@ -76,8 +76,22 @@ pub enum Event {
     /// A session's dense-prose compression (loaded or freshly generated)
     /// (Phase 23). `None` = none yet.
     Compressed(Option<String>),
+    /// The cross-meeting Overview rollup (loaded or freshly synthesized)
+    /// (Phase 23). `None` = none generated yet.
+    Overview(Option<OverviewData>),
     /// Custom names for diarized speakers in the viewed session (index → name).
     Speakers(std::collections::HashMap<i32, String>),
+}
+
+/// The cross-meeting Overview rollup for the GUI (feature-independent mirror of
+/// `zord_overview::Overview`, so the event type compiles without `summaries`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverviewData {
+    pub text: String,
+    /// When it was generated (epoch ms).
+    pub generated_at: u64,
+    /// How many meetings it covered.
+    pub meetings: usize,
 }
 
 /// A model in the catalog plus whether it's downloaded locally. `kind` is
@@ -204,6 +218,8 @@ pub enum DbCmd {
         speaker: i32,
         name: String,
     },
+    /// Load the most recently stored cross-meeting Overview (Phase 23).
+    LoadOverview,
 }
 
 /// Model-management commands (download/delete can take minutes, so they run on
@@ -222,6 +238,8 @@ pub enum SummCmd {
     Summarize(String),
     /// Generate the dense-prose compression (Phase 23).
     Compress(String),
+    /// Synthesize the cross-meeting Overview (Phase 23).
+    Overview,
 }
 
 /// Handle the GUI keeps to drive the engine. Cheaply clonable.
@@ -282,6 +300,7 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
         match cmd {
             SummCmd::Summarize(id) => summarize_one(&id, &ev, &db_path),
             SummCmd::Compress(id) => compress_one(&id, &ev, &db_path),
+            SummCmd::Overview => overview_one(&ev, &db_path),
         }
         #[cfg(not(feature = "summaries"))]
         {
@@ -364,6 +383,28 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
         }
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("compress failed: {e}")));
+        }
+    }
+}
+
+/// Synthesize the cross-meeting Overview (Phase 23). Long-running; progress is
+/// relayed as notices, the result emitted as `Event::Overview`.
+#[cfg(feature = "summaries")]
+fn overview_one(ev: &UnboundedSender<Event>, db_path: &PathBuf) {
+    let settings = zord_config::Settings::load();
+    let mut progress = |note: &str| {
+        let _ = ev.send(Event::Notice(note.to_string()));
+    };
+    match zord_overview::synthesize(db_path, &settings, &mut progress) {
+        Ok(o) => {
+            let _ = ev.send(Event::Overview(Some(OverviewData {
+                text: o.text,
+                generated_at: o.generated_at_ms,
+                meetings: o.meetings,
+            })));
+        }
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("overview failed: {e}")));
         }
     }
 }
@@ -523,6 +564,19 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
+/// Read the stored cross-meeting Overview from `app_meta` (feature-independent —
+/// the keys mirror `zord_overview`). `None` if none has been generated.
+fn load_overview(store: &Store) -> Option<OverviewData> {
+    let (text, generated_at) = store.get_meta("overview").ok().flatten()?;
+    let meetings = store
+        .get_meta("overview_meetings")
+        .ok()
+        .flatten()
+        .and_then(|(v, _)| v.parse().ok())
+        .unwrap_or(0);
+    Some(OverviewData { text, generated_at, meetings })
+}
+
 // ---------------------------------------------------------------------------
 // DB query thread
 // ---------------------------------------------------------------------------
@@ -584,6 +638,10 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             DbCmd::RenameSpeaker { id, speaker, name } => {
                 let _ = store.set_speaker_name(&id, speaker, &name);
                 let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
+            }
+            DbCmd::LoadOverview => {
+                let data = load_overview(&store);
+                let _ = ev.send(Event::Overview(data));
             }
             DbCmd::Diarize(id) => {
                 // Heavy (loads ONNX + clusters); run off the db thread so queries

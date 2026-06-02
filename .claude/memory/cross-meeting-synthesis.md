@@ -60,6 +60,16 @@ rollup under key `overview` (+ `overview_meetings`); `zord_overview::load(store)
 reads it without the LLM. `zord_summarize::count_tokens()` + `GenOpts::overview()`;
 `generate()` now takes the user msg verbatim (Transcript: framing moved into
 summarize/compress). CLI: `zord overview [--max N]`.
-**Next: 23c** — GUI Overview view: engine `SummCmd::Overview` + `DbCmd::LoadOverview`
-+ `Event::Overview`, a 📊 Overview top-level mode, generate/refresh + "last updated".
+**23c is DONE** (GUI Overview view). Engine: `SummCmd::Overview` (runs
+`zord_overview::synthesize` on the summarize worker, progress→notices),
+`DbCmd::LoadOverview` (reads stored meta via `load_overview` — feature-independent,
+keys "overview"/"overview_meetings"), `Event::Overview(Option<OverviewData>)`
+(`OverviewData{text,generated_at,meetings}` — engine-local mirror so the event
+compiles without summaries). GUI: 📊 Overview button above the session list →
+`View::Overview`; `OverviewView` component (Generate/Refresh + "N meetings ·
+updated …" + Copy; renders the rollup as collapsible `## `-headed sections via
+`split_sections`, first open). Summary/compressed panels regated to
+Session|Live (were `!= Search`) so they don't bleed into Overview.
+**Phase 23 core (23a/b/c) shipped.** Remaining: **23d** — refresh/recency cadence,
+mark-done/edit of overview items, cross-meeting + per-meeting chat (Q&A).
 Full plan: docs/PLAN.md Phase 23. Related: [[diarization-design]], [[feature-flags]].
