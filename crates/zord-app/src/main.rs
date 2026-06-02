@@ -107,6 +107,22 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Compress a session into token-minimal dense prose for cross-meeting
+    /// synthesis (requires `--features summaries`).
+    Compress {
+        session_id: String,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
+    /// Synthesize a cross-meeting Overview across recent sessions (lazily
+    /// compressing any that aren't yet). Requires `--features summaries`.
+    Overview {
+        /// How many recent meetings to include (default: config setting).
+        #[arg(long)]
+        max: Option<u32>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
     /// Label individual speakers in a session's "Others" channel (requires
     /// `--features diarization` and retained audio for that session).
     Diarize {
@@ -155,6 +171,8 @@ fn main() -> Result<()> {
         Cmd::Encrypt { db, remember } => cmd_encrypt(db, remember),
         Cmd::Decrypt { db } => cmd_decrypt(db),
         Cmd::Summarize { session_id, db } => cmd_summarize(&session_id, db),
+        Cmd::Compress { session_id, db } => cmd_compress(&session_id, db),
+        Cmd::Overview { max, db } => cmd_overview(max, db),
         Cmd::Diarize { session_id, db } => cmd_diarize(&session_id, db),
     }
 }
@@ -233,6 +251,75 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
 
 #[cfg(not(feature = "summaries"))]
 fn cmd_summarize(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
+    anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
+}
+
+#[cfg(feature = "summaries")]
+fn cmd_compress(session_id: &str, db: Option<PathBuf>) -> Result<()> {
+    let db_path = resolve_db(db)?;
+    let store = Store::open(&db_path)?;
+    let segs = store.segments(session_id)?;
+    if segs.is_empty() {
+        anyhow::bail!("session '{session_id}' has no transcript to compress");
+    }
+    let names = store.speaker_names(session_id).unwrap_or_default();
+    let transcript = transcript_text(&segs, &names);
+
+    let settings = zord_config::Settings::load();
+    let model_path = if let Some(model) =
+        zord_summarize::SummaryModel::parse(&settings.summary_model)
+    {
+        eprintln!("Preparing summary model '{}'…", model.name());
+        zord_summarize::ensure_summary_model(model, &mut |done, total| {
+            if let Some(total) = total {
+                eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
+            }
+        })?
+    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
+        eprintln!("Using custom model '{}'…", settings.summary_model);
+        p
+    } else {
+        anyhow::bail!(
+            "summary model '{}' not found — set one in the GUI, or drop its .gguf in the models folder",
+            settings.summary_model
+        );
+    };
+    eprintln!("\r  model ready. Compressing (ctx {} tokens)…       ", settings.compress_ctx);
+
+    let summarizer = zord_summarize::Summarizer::load(&model_path)?;
+    let compressed =
+        summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+    store.set_compressed(session_id, &compressed)?;
+    println!("{compressed}");
+    Ok(())
+}
+
+#[cfg(not(feature = "summaries"))]
+fn cmd_compress(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
+    anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
+}
+
+#[cfg(feature = "summaries")]
+fn cmd_overview(max: Option<u32>, db: Option<PathBuf>) -> Result<()> {
+    let db_path = resolve_db(db)?;
+    let mut settings = zord_config::Settings::load();
+    if let Some(m) = max {
+        settings.overview_max_meetings = m;
+    }
+    eprintln!(
+        "Synthesizing overview across up to {} recent meeting(s) (ctx {} tokens)…",
+        settings.overview_max_meetings, settings.overview_ctx
+    );
+    let result = zord_overview::synthesize(&db_path, &settings, &mut |note| {
+        eprintln!("  {note}");
+    })?;
+    println!("{}", result.text);
+    eprintln!("\nOverview covers {} meeting(s); stored in the database.", result.meetings);
+    Ok(())
+}
+
+#[cfg(not(feature = "summaries"))]
+fn cmd_overview(_max: Option<u32>, _db: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
 }
 

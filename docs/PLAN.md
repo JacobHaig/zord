@@ -711,11 +711,38 @@ compute over the backlog (background, incremental, progress). Recency weighting 
 drop closed items.
 
 **Sub-steps:**
-- **23a** — per-meeting **compress** (free-form dense prose) + storage + the
-  Compress / Copy-compressed buttons; lazy generation.
-- **23b** — **Overview synthesis** worker: gather compressions (generate missing),
-  one-pass synthesis at ~32K ctx (hierarchical fallback), store the rollup.
-- **23c** — the **Overview view** UI (project rollups + "My action items" + source links).
+- **23a** — ✅ **done.** Per-meeting **compress** (free-form dense prose) +
+  storage + the Compress / Copy-compressed buttons; on-demand generation.
+  - `zord-summarize`: `GenOpts` (n_ctx / max_new_tokens / char budget) +
+    `generate()`; `summarize()` is now a thin wrapper (8K ctx) and `compress(n_ctx)`
+    runs the dense-prose pass at a **configurable** context (clamped 8K–128K).
+  - `zord-config`: `compress_prompt()` (faithful, machine-oriented, no formatting)
+    + `compress_ctx` setting (default 16K, editable in Settings → Summaries).
+  - `zord-store`: `compressed TEXT` column (parallel to `summary`) +
+    `set_compressed` / `get_compressed` (ALTER migration).
+  - GUI: 🗜 **Compress** button in the session toolbar, a collapsible
+    **Compressed (dense)** panel with Show/Hide + Copy; `Event::Compressed` is
+    emitted on session load. CLI: `zord compress <id>`.
+- **23b** — ✅ **done.** Cross-meeting **Overview synthesis** in the new
+  `zord-overview` crate (feature `llama`), shared by CLI + (soon) GUI.
+  - `synthesize(db, settings, progress)`: loads the summary model once; gathers
+    the most recent `overview_max_meetings` sessions newest-first, reusing each
+    stored compression and **lazily generating + persisting** any missing;
+    assembles them (each headed by `YYYY-MM-DD · title`); one-pass synthesis at
+    `overview_ctx` (default 32K). **Hierarchical fallback** when they overflow:
+    greedily pack into groups, compress-the-compressions, then a recency trim
+    (logged, not silent) if still over budget.
+  - `zord-config`: `overview_prompt()` (project-grouped, "My open action items"
+    first, faithful + cites source meetings) + `overview_ctx` (32K) /
+    `overview_max_meetings` (50) settings.
+  - `zord-store`: generic `app_meta(key,value,updated_at)` table +
+    `set_meta`/`get_meta`; the rollup is stored under `overview` (+ meeting count).
+  - `zord-summarize`: `count_tokens()` for budgeting + `GenOpts::overview()`;
+    `generate()` now takes the user message verbatim (framing moved into
+    `summarize`/`compress`). CLI: `zord overview [--max N]`.
+- **23c** — the **Overview view** UI (project rollups + "My action items" + source
+  links): GUI engine `SummCmd::Overview` + `DbCmd::LoadOverview` + `Event::Overview`,
+  a 📊 Overview top-level view, generate/refresh + "last updated".
 - **23d** — refresh/recency, mark-done/edit, optional **cross-meeting chat** and
   per-meeting **chat-with-meeting** (post-recording Q&A).
 

@@ -6763,6 +6763,7 @@ dependencies = [
  "zord-core",
  "zord-diarize",
  "zord-export",
+ "zord-overview",
  "zord-store",
  "zord-summarize",
  "zord-transcribe",
@@ -6867,6 +6868,18 @@ dependencies = [
  "serde_json",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "zord-overview"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "tracing",
+ "zord-config",
+ "zord-core",
+ "zord-store",
+ "zord-summarize",
 ]
 
 [[package]]

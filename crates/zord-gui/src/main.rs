@@ -7,7 +7,7 @@ mod osutil;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
-use engine::{DbCmd, Engine, Event, ModelCmd, ModelInfo, RecorderCmd, Status};
+use engine::{DbCmd, Engine, Event, ModelCmd, ModelInfo, RecorderCmd, Status, SummCmd};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zord_config::Settings;
@@ -237,6 +237,10 @@ fn MainApp() -> Element {
     let mut last_export = use_signal(|| Option::<String>::None);
     // Current session's AI summary, if any.
     let mut summary = use_signal(|| Option::<String>::None);
+    // Current session's dense-prose compression, if any (Phase 23), and whether
+    // its (machine-oriented) body is expanded for the user to read.
+    let mut compressed = use_signal(|| Option::<String>::None);
+    let mut show_compressed = use_signal(|| false);
     // Custom names for diarized speakers in the viewed session (index → name).
     let mut speaker_names = use_signal(std::collections::HashMap::<i32, String>::new);
     // Session id currently being renamed (+ its edit buffer); pending delete.
@@ -298,6 +302,7 @@ fn MainApp() -> Element {
                         download_help.set(Some(name));
                     }
                     Event::Summary(v) => summary.set(v),
+                    Event::Compressed(v) => compressed.set(v),
                     Event::Speakers(v) => speaker_names.set(v),
                 }
             }
@@ -365,6 +370,8 @@ fn MainApp() -> Element {
                 segments.write().clear();
                 notice.set(None);
                 summary.set(None);
+                compressed.set(None);
+                show_compressed.set(false);
                 speaker_names.write().clear();
                 mic_muted.set(false);
                 view.set(View::Live);
@@ -488,6 +495,8 @@ fn MainApp() -> Element {
                                                 view.set(View::Session(id_open.clone()));
                                                 last_export.set(None);
                                                 summary.set(None);
+                                                compressed.set(None);
+                                                show_compressed.set(false);
                                                 let _ = eng_open.db_tx.send(DbCmd::Load(id_open.clone()));
                                             },
                                             div { class: "session-title", "{title}" }
@@ -580,6 +589,8 @@ fn MainApp() -> Element {
                         let engine = engine.clone();
                         let sid = id.clone();
                         let eng_sum = engine.clone();
+                        let eng_comp = engine.clone();
+                        let sid_comp = id.clone();
                         let eng_diar = engine.clone();
                         let sid_diar = id.clone();
                         let mk = move |fmt: Format| {
@@ -600,9 +611,18 @@ fn MainApp() -> Element {
                                     class: "export-btn",
                                     onclick: move |_| {
                                         notice.set(Some("Summarizing… (first run downloads the model)".to_string()));
-                                        let _ = eng_sum.summ_tx.send(sid.clone());
+                                        let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
                                     },
                                     "✨ Summarize"
+                                }
+                                button {
+                                    class: "export-btn",
+                                    title: "Condense this meeting into token-minimal dense prose for cross-meeting synthesis",
+                                    onclick: move |_| {
+                                        notice.set(Some("Compressing… (first run downloads the model)".to_string()));
+                                        let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
+                                    },
+                                    "🗜 Compress"
                                 }
                                 button {
                                     class: "export-btn",
@@ -668,6 +688,45 @@ fn MainApp() -> Element {
                                         }
                                     }
                                     div { class: "summary-body", "{text}" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Dense-prose compression (Phase 23). Machine-oriented, so the
+                // body is collapsed by default; the user can expand or copy it.
+                if *view.read() != View::Search {
+                    if let Some(text) = compressed.read().clone() {
+                        {
+                            let text_copy = text.clone();
+                            let expanded = *show_compressed.read();
+                            rsx! {
+                                div { class: "summary compressed",
+                                    div { class: "summary-head",
+                                        span { "Compressed (dense)" }
+                                        div {
+                                            button {
+                                                class: "row-btn",
+                                                onclick: move |_| {
+                                                    let v = *show_compressed.peek();
+                                                    show_compressed.set(!v);
+                                                },
+                                                if expanded { "Hide" } else { "Show" }
+                                            }
+                                            button {
+                                                class: "row-btn",
+                                                onclick: move |_| {
+                                                    osutil::copy_to_clipboard(&text_copy);
+                                                    notice.set(Some("Compressed text copied to clipboard".to_string()));
+                                                },
+                                                "Copy"
+                                            }
+                                        }
+                                    }
+                                    if expanded {
+                                        div { class: "summary-body", "{text}" }
+                                    }
                                 }
                             }
                         }
@@ -749,6 +808,7 @@ fn MainApp() -> Element {
                                             view.set(View::Live);
                                             segments.write().clear();
                                             summary.set(None);
+                                            compressed.set(None);
                                         }
                                         confirm_delete.set(None);
                                     },
@@ -1032,6 +1092,22 @@ fn MainApp() -> Element {
                                                     }
                                                 }
                                                 p { class: "field-note", "Names each recording from its summary (never overwrites a title you set yourself), so sessions are easy to find later." }
+                                                div { class: "field",
+                                                    label { "Compression context window (tokens)" }
+                                                    input {
+                                                        r#type: "number", min: "8192", max: "131072", step: "8192", class: "days",
+                                                        value: "{settings.read().compress_ctx}",
+                                                        oninput: move |e: FormEvent| {
+                                                            if let Ok(v) = e.value().trim().parse::<u32>() {
+                                                                let mut s = settings.peek().clone();
+                                                                s.compress_ctx = v.clamp(8192, 131072);
+                                                                let _ = s.save();
+                                                                settings.set(s);
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                                p { class: "field-note", "Used by Compress to ingest a whole meeting without truncation. 16K fits ~an hour; larger needs more RAM + CPU time. On a 16 GB laptop a 3B model handles 64K comfortably; 7B is tight beyond 32K." }
                                                 SummaryPromptSettings { settings }
                                             }
                                         }

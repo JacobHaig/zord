@@ -13,10 +13,56 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
 use llama_cpp_2::sampling::LlamaSampler;
 
-const N_CTX: u32 = 8192;
-const MAX_NEW_TOKENS: usize = 640;
-/// Leave headroom for the system prompt + generated tokens.
-const MAX_TRANSCRIPT_CHARS: usize = 16_000;
+/// Tunables for one generation pass. Summarizing and compressing differ mainly
+/// in how much input they ingest (context size) and how much they emit.
+#[derive(Debug, Clone, Copy)]
+pub struct GenOpts {
+    /// Model context window (tokens) to allocate for this pass.
+    pub n_ctx: u32,
+    /// Max tokens to generate.
+    pub max_new_tokens: usize,
+    /// Hard cap on transcript characters fed in (a coarse pre-truncation guard;
+    /// the token-count check below is the real ceiling).
+    pub max_transcript_chars: usize,
+}
+
+impl GenOpts {
+    /// Notes summary: small context, short output (legacy defaults).
+    pub fn summary() -> Self {
+        Self { n_ctx: 8192, max_new_tokens: 640, max_transcript_chars: 16_000 }
+    }
+
+    /// Dense-prose compression (Phase 23): a large, configurable context so a
+    /// full meeting fits without truncation; modest output (it's condensing).
+    /// `n_ctx` is clamped to a sane [8K, 128K] range; the char budget is derived
+    /// from it (≈3.5 chars/token) leaving headroom for the prompt + output.
+    pub fn compress(n_ctx: u32) -> Self {
+        let n_ctx = n_ctx.clamp(8192, 131_072);
+        const OUT: usize = 1024;
+        let reserve = OUT + 320; // generated tokens + prompt/template overhead
+        let input_tokens = (n_ctx as usize).saturating_sub(reserve);
+        Self {
+            n_ctx,
+            max_new_tokens: OUT,
+            max_transcript_chars: input_tokens * 7 / 2,
+        }
+    }
+
+    /// Cross-meeting Overview synthesis (Phase 23): configurable context ingesting
+    /// many per-meeting compressions, with a larger output budget (the rollup is
+    /// longer than a single compression).
+    pub fn overview(n_ctx: u32) -> Self {
+        let n_ctx = n_ctx.clamp(8192, 131_072);
+        const OUT: usize = 2048;
+        let reserve = OUT + 512;
+        let input_tokens = (n_ctx as usize).saturating_sub(reserve);
+        Self {
+            n_ctx,
+            max_new_tokens: OUT,
+            max_transcript_chars: input_tokens * 7 / 2,
+        }
+    }
+}
 
 /// Selectable summary LLM (Qwen2.5 Instruct GGUF, Q4_K_M).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,10 +292,32 @@ impl Summarizer {
         Ok(Self { model })
     }
 
-    /// Summarize a transcript using the given system prompt; returns Markdown.
+    /// Summarize a transcript into Markdown notes (small context, short output).
     pub fn summarize(&self, transcript: &str, system_prompt: &str) -> Result<String> {
+        let user = format!("Transcript:\n\n{transcript}");
+        self.generate(&user, system_prompt, GenOpts::summary())
+    }
+
+    /// Compress a transcript into token-minimal dense prose (Phase 23). `n_ctx`
+    /// sizes the context window so a full meeting fits without truncation.
+    pub fn compress(&self, transcript: &str, system_prompt: &str, n_ctx: u32) -> Result<String> {
+        let user = format!("Transcript:\n\n{transcript}");
+        self.generate(&user, system_prompt, GenOpts::compress(n_ctx))
+    }
+
+    /// Count how many tokens `text` is for this model (used to budget the
+    /// Overview synthesis input against the context window).
+    pub fn count_tokens(&self, text: &str) -> Result<usize> {
+        Ok(self.model.str_to_token(text, AddBos::Never)?.len())
+    }
+
+    /// Run one chat completion over `user_content` with `system_prompt`, sized by
+    /// `opts`. The user message is sent verbatim (callers add any framing such as
+    /// a "Transcript:" prefix). Shared by [`summarize`], [`compress`], and the
+    /// Overview synthesis.
+    pub fn generate(&self, user_content: &str, system_prompt: &str, opts: GenOpts) -> Result<String> {
         let backend = backend()?;
-        let user = format!("Transcript:\n\n{}", truncate_chars(transcript, MAX_TRANSCRIPT_CHARS));
+        let user = truncate_chars(user_content, opts.max_transcript_chars);
 
         let messages = vec![
             LlamaChatMessage::new("system".to_string(), system_prompt.to_string())?,
@@ -262,15 +330,16 @@ impl Summarizer {
         let prompt = self.model.apply_chat_template(&tmpl, &messages, true)?;
 
         let tokens = self.model.str_to_token(&prompt, AddBos::Always)?;
-        if tokens.len() as u32 >= N_CTX {
+        if tokens.len() as u32 >= opts.n_ctx {
             return Err(anyhow!("transcript too long for the model context"));
         }
 
+        let n_ctx = opts.n_ctx;
         let mut ctx = self
             .model
-            .new_context(backend, LlamaContextParams::default().with_n_ctx(NonZeroU32::new(N_CTX)))?;
+            .new_context(backend, LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx)))?;
 
-        let mut batch = LlamaBatch::new(N_CTX as usize, 1);
+        let mut batch = LlamaBatch::new(n_ctx as usize, 1);
         let last = tokens.len() - 1;
         for (i, tok) in tokens.iter().enumerate() {
             batch.add(*tok, i as i32, &[0], i == last)?;
@@ -281,7 +350,7 @@ impl Summarizer {
         let mut out = String::new();
         let mut n_cur = tokens.len() as i32;
 
-        for _ in 0..MAX_NEW_TOKENS {
+        for _ in 0..opts.max_new_tokens {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(token);
             if self.model.is_eog_token(token) {

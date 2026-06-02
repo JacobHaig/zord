@@ -24,6 +24,11 @@ storage happen on your machine.
 - ✨ **Local AI summaries** *(optional)* — a local LLM (llama.cpp) turns a
   session into Markdown notes, fully offline. Pick the model (Qwen2.5 1.5B/3B/7B),
   a style preset, or write your own prompt — all in settings.
+- 🗜 **Dense compression** *(optional)* — condense a whole meeting into
+  token-minimal dense prose (projects + state, action items, decisions, open
+  questions) with one click. Stored per session and copyable; the context window
+  is configurable (16K fits ~an hour) so an entire meeting compresses without
+  truncation. It's the building block for upcoming cross-meeting Overviews.
 - 🗣 **Per-speaker diarization** *(optional)* — split the "Others" channel into
   **Speaker 1/2/3** (sherpa-onnx), rename them, and see them colored in the
   transcript + exports. Runs offline after recording (and on demand); an optional
@@ -100,12 +105,15 @@ Generate meeting notes from a session with a local LLM (no cloud), build with
 the `summaries` feature:
 
 ```bash
-cargo run -p zord-gui --features summaries     # GUI: ✨ Summarize on a saved session
-cargo build -p zord-app --features summaries   # CLI: `zord summarize <session-id>`
+cargo run -p zord-gui --features summaries     # GUI: ✨ Summarize / 🗜 Compress on a saved session
+cargo build -p zord-app --features summaries   # CLI: `zord summarize` / `zord compress <session-id>`
 ```
 
 This compiles llama.cpp (Metal on Apple Silicon) and, on first use, downloads a
-~2 GB instruct model (Qwen2.5-3B-Instruct, Q4_K_M) to the models folder.
+~2 GB instruct model (Qwen2.5-3B-Instruct, Q4_K_M) to the models folder. The same
+model also powers 🗜 **Compress**, which condenses a meeting into token-minimal
+dense prose; its context window is set in Settings → Summaries (default 16K, up to
+128K — a 3B model handles 64K comfortably on a 16 GB machine).
 
 ### Optional: per-speaker diarization
 
@@ -222,6 +230,14 @@ zord retranscribe <session-id> --model large-v3-turbo
 # Label individual speakers in the "Others" channel (needs --features diarization
 # + retained audio for that session)
 zord diarize <session-id>
+
+# Summarize / compress a session (needs --features summaries)
+zord summarize <session-id>                            # Markdown notes
+zord compress  <session-id>                            # token-minimal dense prose
+
+# Synthesize a cross-meeting Overview across recent sessions (compresses any
+# meetings that aren't yet, then rolls them up by project). Needs --features summaries
+zord overview --max 50
 ```
 
 **Models** (`--model`): `large-v3-turbo-q5_0` (default — best size/speed),
@@ -284,7 +300,8 @@ A Cargo workspace of focused crates:
 | `zord-store` | SQLite storage + FTS5 search |
 | `zord-config` | persisted settings + paths + retention |
 | `zord-export` | Markdown / SRT / JSON renderers |
-| `zord-summarize` | local-LLM summaries (llama.cpp) under `summaries`; summary-model catalog |
+| `zord-summarize` | local-LLM summaries + compression (llama.cpp) under `summaries`; summary-model catalog |
+| `zord-overview` | cross-meeting Overview synthesis (compress → group → rollup) under `summaries` |
 | `zord-diarize` | per-speaker diarization (sherpa-onnx) under `diarization`; speaker-model catalog |
 | `zord-web` | axum `localhost` review dashboard |
 | `zord-app` | the `zord` CLI |

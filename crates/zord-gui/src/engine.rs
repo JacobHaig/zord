@@ -73,6 +73,9 @@ pub enum Event {
     DownloadFailed { name: String },
     /// A session's summary (loaded or freshly generated). `None` = none yet.
     Summary(Option<String>),
+    /// A session's dense-prose compression (loaded or freshly generated)
+    /// (Phase 23). `None` = none yet.
+    Compressed(Option<String>),
     /// Custom names for diarized speakers in the viewed session (index → name).
     Speakers(std::collections::HashMap<i32, String>),
 }
@@ -211,14 +214,24 @@ pub enum ModelCmd {
     Delete(String),
 }
 
+/// LLM jobs for the summarize worker (heavy; load a model + generate). Both take
+/// a session id. (Fields go unread in non-`summaries` builds.)
+#[allow(dead_code)]
+pub enum SummCmd {
+    /// Generate the human-readable Markdown summary.
+    Summarize(String),
+    /// Generate the dense-prose compression (Phase 23).
+    Compress(String),
+}
+
 /// Handle the GUI keeps to drive the engine. Cheaply clonable.
 #[derive(Clone)]
 pub struct Engine {
     pub rec_tx: mpsc::Sender<RecorderCmd>,
     pub db_tx: mpsc::Sender<DbCmd>,
     pub model_tx: mpsc::Sender<ModelCmd>,
-    /// Send a session id to summarize it (heavy; runs on its own thread).
-    pub summ_tx: mpsc::Sender<String>,
+    /// Summarize / compress a session (heavy; runs on its own thread).
+    pub summ_tx: mpsc::Sender<SummCmd>,
 }
 
 impl Engine {
@@ -229,7 +242,7 @@ impl Engine {
         let (rec_tx, rec_rx) = mpsc::channel::<RecorderCmd>();
         let (db_tx, db_rx) = mpsc::channel::<DbCmd>();
         let (model_tx, model_rx) = mpsc::channel::<ModelCmd>();
-        let (summ_tx, summ_rx) = mpsc::channel::<String>();
+        let (summ_tx, summ_rx) = mpsc::channel::<SummCmd>();
 
         {
             let ev = ev_tx.clone();
@@ -263,17 +276,94 @@ impl Engine {
 
 /// Worker that generates session summaries (local LLM, heavy). Real impl only
 /// in `summaries` builds; otherwise it reports a friendly notice.
-fn summarize_loop(rx: mpsc::Receiver<String>, ev: UnboundedSender<Event>, db_path: PathBuf) {
-    while let Ok(session_id) = rx.recv() {
+fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_path: PathBuf) {
+    while let Ok(cmd) = rx.recv() {
         #[cfg(feature = "summaries")]
-        summarize_one(&session_id, &ev, &db_path);
+        match cmd {
+            SummCmd::Summarize(id) => summarize_one(&id, &ev, &db_path),
+            SummCmd::Compress(id) => compress_one(&id, &ev, &db_path),
+        }
         #[cfg(not(feature = "summaries"))]
         {
-            let _ = &session_id;
+            let _ = &cmd;
             let _ = &db_path;
             let _ = ev.send(Event::Notice(
                 "Summaries aren't built in — rebuild with `--features summaries`.".to_string(),
             ));
+        }
+    }
+}
+
+/// Resolve the configured summary model to a local GGUF path: a built-in catalog
+/// model (downloading if needed) or a user-supplied custom GGUF. Sends a notice
+/// and returns `None` on failure. Shared by summarize + compress.
+#[cfg(feature = "summaries")]
+fn resolve_summary_model_path(
+    settings: &zord_config::Settings,
+    ev: &UnboundedSender<Event>,
+) -> Option<PathBuf> {
+    if let Some(model) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
+        match zord_summarize::ensure_summary_model(model, &mut |_d, _t| {}) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("summary model: {e}")));
+                None
+            }
+        }
+    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
+        Some(p)
+    } else {
+        let _ = ev.send(Event::Notice(format!(
+            "Summary model '{}' not found — pick one in Settings or drop its .gguf in the models folder.",
+            settings.summary_model
+        )));
+        None
+    }
+}
+
+/// Compress a session's transcript into dense prose and store it (Phase 23).
+#[cfg(feature = "summaries")]
+fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf) {
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
+            return;
+        }
+    };
+    let segs = store.segments(session_id).unwrap_or_default();
+    if segs.is_empty() {
+        let _ = ev.send(Event::Notice("Nothing to compress in this session.".to_string()));
+        return;
+    }
+    let names = store.speaker_names(session_id).unwrap_or_default();
+    let transcript = segs
+        .iter()
+        .map(|s| format!("{}: {}", s.speaker_label(&names), s.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let settings = zord_config::Settings::load();
+    let _ = ev.send(Event::Notice("Preparing model for compression…".to_string()));
+    let Some(model_path) = resolve_summary_model_path(&settings, ev) else {
+        return;
+    };
+    let _ = ev.send(Event::Notice("Compressing… (runs in the background)".to_string()));
+    let summarizer = match zord_summarize::Summarizer::load(&model_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("compress: {e}")));
+            return;
+        }
+    };
+    match summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
+        Ok(text) => {
+            let _ = store.set_compressed(session_id, &text);
+            let _ = ev.send(Event::Compressed(Some(text)));
+            let _ = ev.send(Event::Notice("Compressed.".to_string()));
+        }
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("compress failed: {e}")));
         }
     }
 }
@@ -303,23 +393,7 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
 
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing summary model…".to_string()));
-    // Resolve the selected id: a built-in catalog model (download if needed), or
-    // a user-supplied custom GGUF already in the models folder.
-    let model_path = if let Some(model) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
-        match zord_summarize::ensure_summary_model(model, &mut |_d, _t| {}) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = ev.send(Event::Notice(format!("summary model: {e}")));
-                return;
-            }
-        }
-    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
-        p
-    } else {
-        let _ = ev.send(Event::Notice(format!(
-            "Summary model '{}' not found — pick one in Settings or drop its .gguf in the models folder.",
-            settings.summary_model
-        )));
+    let Some(model_path) = resolve_summary_model_path(&settings, ev) else {
         return;
     };
     let _ = ev.send(Event::Notice("Summarizing…".to_string()));
@@ -482,6 +556,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 }
                 let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
                 let _ = ev.send(Event::Summary(store.get_summary(&id).ok().flatten()));
+                let _ = ev.send(Event::Compressed(store.get_compressed(&id).ok().flatten()));
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
                 Ok(path) => {

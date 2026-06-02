@@ -196,6 +196,9 @@ body {
 .summary { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--me); border-radius: 12px; padding: 12px 16px; }
 .summary-head { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 6px; }
 .summary-body { white-space: pre-wrap; font-size: 13px; line-height: 1.5; max-height: 220px; overflow-y: auto; }
+/* Dense-prose compression panel: distinct accent + room for inline head buttons. */
+.summary.compressed { border-left-color: var(--others); margin-top: 10px; }
+.summary.compressed .summary-head > div { display: flex; gap: 6px; }
 
 /* Transcript */
 .transcript { flex: 1; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }

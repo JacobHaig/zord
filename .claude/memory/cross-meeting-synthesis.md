@@ -32,8 +32,34 @@ user's "CPU, churn in background" instinct works.
 **Overview view** (3rd top-level mode, button above the session list); **LLM
 auto-detects + names projects** (+ normalization). Items cite source meeting
 (anti-hallucination). Owner attribution leans on diarization + names; "Me" always
-known. **Gap:** summarizer caps `N_CTX=8192` — overview needs ~32K (configurable;
-Qwen2.5 supports it). Sub-steps 23a (compress + buttons + schema) → 23b (overview
-synthesis worker) → 23c (Overview UI) → 23d (refresh/edit + cross-meeting chat).
-Reuses llama.cpp; no new heavy deps.
+known. Sub-steps 23a (compress + buttons) → 23b (overview synthesis worker) →
+23c (Overview UI) → 23d (refresh/edit + cross-meeting chat). Reuses llama.cpp; no
+new heavy deps.
+
+**23a is DONE** (compress shipped). The old `N_CTX=8192` cap is gone: context is
+now per-call. `zord_summarize::compress(transcript, prompt, n_ctx)` + `GenOpts`
+(`summarize()` is a thin wrapper at 8K; `generate()` is the shared core).
+`zord_config::compress_prompt()` (dense free-form prose, machine-oriented, no
+formatting) + `compress_ctx` setting (default 16K, clamped 8K–128K, editable in
+Settings → Summaries). Store: `compressed` column + `set_compressed`/
+`get_compressed`. Engine: `SummCmd::{Summarize,Compress}` over the summarize
+worker; `Event::Compressed` emitted on session load + after compress. GUI: 🗜
+Compress button + collapsible "Compressed (dense)" panel (Show/Hide + Copy). CLI:
+`zord compress <id>`.
+
+**23b is DONE** (synthesis worker). New crate **`zord-overview`** (feature `llama`,
+shared by CLI + GUI): `synthesize(db, settings, progress)` loads the summary model
+once, gathers the newest `overview_max_meetings` sessions, reuses each stored
+compression / lazily generates+persists missing ones, assembles them (headed by
+`YYYY-MM-DD · title`), one-pass synthesis at `overview_ctx`. **Hierarchical
+fallback** when over budget: pack into groups → compress-the-compressions →
+recency-trim (logged). `zord_config::overview_prompt()` (project-grouped, "My open
+action items" first, cites sources) + `overview_ctx` (32K) / `overview_max_meetings`
+(50). Store: generic `app_meta(key,value,updated_at)` + `set_meta`/`get_meta`;
+rollup under key `overview` (+ `overview_meetings`); `zord_overview::load(store)`
+reads it without the LLM. `zord_summarize::count_tokens()` + `GenOpts::overview()`;
+`generate()` now takes the user msg verbatim (Transcript: framing moved into
+summarize/compress). CLI: `zord overview [--max N]`.
+**Next: 23c** — GUI Overview view: engine `SummCmd::Overview` + `DbCmd::LoadOverview`
++ `Event::Overview`, a 📊 Overview top-level mode, generate/refresh + "last updated".
 Full plan: docs/PLAN.md Phase 23. Related: [[diarization-design]], [[feature-flags]].

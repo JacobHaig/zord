@@ -1,0 +1,19 @@
+[package]
+name = "zord-overview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Real synthesis needs the local LLM (llama.cpp via zord-summarize). Without it,
+# the crate still compiles but `synthesize` reports that summaries are disabled.
+llama = ["dep:zord-summarize", "zord-summarize/llama"]
+
+[dependencies]
+zord-core = { workspace = true }
+zord-store = { workspace = true }
+zord-config = { workspace = true }
+zord-summarize = { workspace = true, optional = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

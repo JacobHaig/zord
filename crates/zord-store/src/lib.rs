@@ -90,6 +90,14 @@ impl Store {
                 PRIMARY KEY (session_id, speaker)
             );
 
+            -- Phase 23: small app-wide key/value store (e.g. the cross-meeting
+            -- Overview rollup + when it was generated). Not session-scoped.
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_at  INTEGER NOT NULL
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
                 text,
                 content='segments',
@@ -113,6 +121,11 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE sessions ADD COLUMN summary TEXT", []);
+        // Added in Phase 23 — dense-prose compression of the meeting, kept beside
+        // the human summary for cross-meeting synthesis.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE sessions ADD COLUMN compressed TEXT", []);
         // Added in Phase 16 — tolerate older DBs that predate the speaker column.
         let _ = self
             .conn
@@ -134,6 +147,50 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare("SELECT summary FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?.flatten())
+    }
+
+    /// Upsert an app-wide key/value pair (Phase 23), stamping `updated_at` with
+    /// the current time in epoch ms.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO app_meta (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, now],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch an app-wide key/value pair as `(value, updated_at_ms)`, if present.
+    pub fn get_meta(&self, key: &str) -> Result<Option<(String, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value, updated_at FROM app_meta WHERE key = ?1")?;
+        let mut rows = stmt.query_map(params![key], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Store (or replace) the dense-prose compression for a session (Phase 23).
+    pub fn set_compressed(&self, session_id: &str, compressed: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET compressed = ?2 WHERE id = ?1",
+            params![session_id, compressed],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a session's stored compression, if any.
+    pub fn get_compressed(&self, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT compressed FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, Option<String>>(0))?;
         Ok(rows.next().transpose()?.flatten())
     }

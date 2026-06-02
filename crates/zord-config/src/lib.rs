@@ -75,10 +75,76 @@ pub struct Settings {
     /// auto. Lower = split into more speakers; higher = merge into fewer.
     #[serde(default = "default_diarize_threshold")]
     pub diarize_threshold: f32,
+    /// Context window (tokens) used when *compressing* a meeting into dense prose
+    /// (Phase 23). Larger ingests a longer meeting without truncation but costs
+    /// more KV-cache RAM + CPU prefill time. 16K fits ~an hour; a 3B model is the
+    /// sweet spot on 16 GB. Clamped to [8K, 128K] by the summarizer.
+    #[serde(default = "default_compress_ctx")]
+    pub compress_ctx: u32,
+    /// Context window (tokens) for the cross-meeting **Overview** synthesis pass
+    /// (Phase 23). Default 32K; raise toward 64–128K for more meetings at once
+    /// (3B model recommended beyond 32K on a 16 GB machine). Clamped to [8K, 128K].
+    #[serde(default = "default_overview_ctx")]
+    pub overview_ctx: u32,
+    /// How many of the most recent meetings to feed into the Overview synthesis.
+    #[serde(default = "default_overview_max_meetings")]
+    pub overview_max_meetings: u32,
 }
 
 fn default_diarize_threshold() -> f32 {
     0.5
+}
+
+fn default_compress_ctx() -> u32 {
+    16_384
+}
+
+fn default_overview_ctx() -> u32 {
+    32_768
+}
+
+fn default_overview_max_meetings() -> u32 {
+    50
+}
+
+/// System prompt for the cross-meeting **Overview** synthesis (Phase 23). Input
+/// is the per-meeting dense compressions (each headed by date + title), newest
+/// first; output is one holistic, project-grouped Markdown rollup oriented around
+/// the user ("Me").
+pub fn overview_prompt() -> &'static str {
+    "You are given dense, machine-written summaries of the user's recent meetings, \
+     each headed by its date and title and ordered newest first. The user is \
+     \"Me\". Synthesize ONE holistic, current picture across all of them — not a \
+     per-meeting recap. Group everything by project/topic: infer the projects \
+     yourself and merge duplicate or near-duplicate names into one consistent \
+     label. Output Markdown. Start with \"## My open action items\": a checklist \
+     of what *Me* still owns or is waiting on, most urgent first, each citing the \
+     meeting it came from. Then one \"## <Project>\" section per project, each \
+     with: a one-line **State** (where it stands now); **Pending** (in-progress / \
+     upcoming work as owner → task → status); **Done** (recently completed + who); \
+     **Owners**; and **Open questions** (unknowns / blockers). When meetings \
+     conflict, prefer the most recent; drop items that were resolved or closed. \
+     Attribute to names where known and cite source meetings by title in \
+     parentheses. Be faithful and specific — do not invent facts, owners, or \
+     statuses; if something is unknown, say so."
+}
+
+/// System prompt for **compressing** a meeting transcript into token-minimal
+/// dense prose (Phase 23). The output is working memory for the cross-meeting
+/// Overview synthesis — written for a machine to re-read, not for a human — so it
+/// drops all formatting and pleasantries while keeping every concrete fact.
+pub fn compress_prompt() -> &'static str {
+    "You compress a meeting transcript into the most information-dense form \
+     possible, to be re-read later by another model — not by a human. Preserve \
+     every concrete fact while removing all redundancy, filler, hedging, and \
+     pleasantries. Write FREE-FORM DENSE PROSE: compact declarative sentences, \
+     no headings, no bullet lists, no markdown. Capture which projects/topics \
+     were discussed and their current state; action items as owner → task → \
+     status; what was completed and by whom; decisions made; and open questions \
+     or blockers. Attribute facts to the speaker labels in the transcript (\"Me\" \
+     is the local user; others appear by name or as \"Speaker N\"). Prefer names \
+     and specifics over vague references. Omit nothing factual; invent nothing. \
+     Be as short as the facts allow."
 }
 
 /// System prompt for auto-titling a recorded session from its summary/transcript.
@@ -166,6 +232,9 @@ impl Default for Settings {
             diarize_num_speakers: 0,
             auto_title: true,
             diarize_threshold: default_diarize_threshold(),
+            compress_ctx: default_compress_ctx(),
+            overview_ctx: default_overview_ctx(),
+            overview_max_meetings: default_overview_max_meetings(),
         }
     }
 }
