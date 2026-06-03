@@ -181,7 +181,15 @@ body {
 .search:focus { border-color: var(--me); }
 
 /* Export bar */
-.export-bar { display: flex; align-items: center; gap: 8px; }
+.export-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* Pushes the Export dropdown (and Reveal/Open) to the right of the actions. */
+.export-spacer { flex: 1; }
+/* Export format dropdown */
+.export-dd { position: relative; }
+.dd-backdrop { position: fixed; inset: 0; z-index: 40; }
+.export-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 41; min-width: 180px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 4px; display: flex; flex-direction: column; }
+.export-menu-item { text-align: left; background: none; border: none; color: var(--text); padding: 8px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.export-menu-item:hover { background: var(--panel-2); }
 .export-label { color: var(--muted); font-size: 12px; }
 .export-btn {
   border: 1px solid var(--line); background: var(--panel); color: var(--text);

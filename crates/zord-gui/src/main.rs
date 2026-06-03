@@ -321,6 +321,8 @@ fn MainApp() -> Element {
     // the elapsed timers to re-render each second; `diarize_est_secs` is a rough
     // ETA for diarization scaled to the meeting length (captured at click time).
     let mut show_jobs = use_signal(|| false);
+    // Whether the Export format dropdown is open.
+    let mut show_export_menu = use_signal(|| false);
     let mut job_starts = use_signal(std::collections::HashMap::<String, u64>::new);
     let mut job_tick = use_signal(|| 0u64);
     let mut diarize_est_secs = use_signal(|| Option::<u64>::None);
@@ -862,15 +864,12 @@ fn MainApp() -> Element {
                             let engine = engine.clone();
                             move |_| {
                                 let _ = engine.db_tx.send(DbCmd::Export { id: id.clone(), format: fmt });
+                                show_export_menu.set(false);
                             }
                         };
                         rsx! {
                             div { class: "export-bar",
-                                span { class: "export-label", "Export:" }
-                                button { class: "export-btn", onclick: mk(Format::Markdown), "Markdown" }
-                                button { class: "export-btn", onclick: mk(Format::Srt), "SRT" }
-                                button { class: "export-btn", onclick: mk(Format::Json), "JSON" }
-                                span { class: "export-sep", "·" }
+                                // --- Actions (left) ---
                                 button {
                                     class: "export-btn",
                                     disabled: summarizing(),
@@ -915,6 +914,7 @@ fn MainApp() -> Element {
                                 }
                                 button {
                                     class: "export-btn",
+                                    title: "Copy the transcript to the clipboard",
                                     onclick: move |_| {
                                         let names = speaker_names.peek().clone();
                                         let text = segments
@@ -926,10 +926,28 @@ fn MainApp() -> Element {
                                         osutil::copy_to_clipboard(&text);
                                         notice.set(Some("Transcript copied to clipboard".to_string()));
                                     },
-                                    "Copy"
+                                    "📋 Copy"
+                                }
+
+                                // --- Export (right) ---
+                                div { class: "export-spacer" }
+                                div { class: "export-dd",
+                                    button {
+                                        class: "export-btn",
+                                        title: "Export this transcript to a file",
+                                        onclick: move |_| { let v = *show_export_menu.peek(); show_export_menu.set(!v); },
+                                        "⤓ Export ▾"
+                                    }
+                                    if *show_export_menu.read() {
+                                        div { class: "dd-backdrop", onclick: move |_| show_export_menu.set(false) }
+                                        div { class: "export-menu",
+                                            button { class: "export-menu-item", onclick: mk(Format::Markdown), "Markdown (.md)" }
+                                            button { class: "export-menu-item", onclick: mk(Format::Srt), "Subtitles (.srt)" }
+                                            button { class: "export-menu-item", onclick: mk(Format::Json), "JSON (.json)" }
+                                        }
+                                    }
                                 }
                                 if let Some(path) = last_export.read().clone() {
-                                    span { class: "export-sep", "·" }
                                     button {
                                         class: "export-btn ghost",
                                         onclick: {
