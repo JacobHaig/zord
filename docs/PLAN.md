@@ -597,7 +597,11 @@ For users who can't reach HuggingFace (Whisper ggml + Qwen GGUFs live there) but
 Note: GGUF LLMs are HF-centric, so there's no good *catalog* of GitHub-hosted
 summary models — the custom-GGUF drop-in is the intended path there.
 
-### Phase 20 — Auto meeting title (pending) ⭐ next
+### Phase 20 — Auto meeting title ✅ DONE
+Implemented: `auto_title` setting (default on), `title_prompt()` + `clean_title()`,
+auto-titling in the GUI summarize worker and `zord summarize` (never overwrites a
+manual title; falls back to the timestamp id without `summaries`).
+
 After a recording is summarized (or at stop), make one small LLM call to generate
 a concise title from the transcript/summary and set it as the session title —
 today sessions default to `sess-<timestamp>` until manually renamed, like how
