@@ -6749,7 +6749,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "zord-app"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -6772,7 +6772,7 @@ dependencies = [
 
 [[package]]
 name = "zord-audio"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "hound",
@@ -6783,7 +6783,7 @@ dependencies = [
 
 [[package]]
 name = "zord-capture"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "cpal",
@@ -6795,7 +6795,7 @@ dependencies = [
 
 [[package]]
 name = "zord-config"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "directories",
@@ -6807,7 +6807,7 @@ dependencies = [
 
 [[package]]
 name = "zord-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -6816,7 +6816,7 @@ dependencies = [
 
 [[package]]
 name = "zord-diarize"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "bzip2",
@@ -6830,7 +6830,7 @@ dependencies = [
 
 [[package]]
 name = "zord-export"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -6839,7 +6839,7 @@ dependencies = [
 
 [[package]]
 name = "zord-gui"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6862,7 +6862,7 @@ dependencies = [
 
 [[package]]
 name = "zord-net"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "native-tls",
@@ -6873,7 +6873,7 @@ dependencies = [
 
 [[package]]
 name = "zord-overview"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "tracing",
@@ -6885,7 +6885,7 @@ dependencies = [
 
 [[package]]
 name = "zord-store"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -6896,7 +6896,7 @@ dependencies = [
 
 [[package]]
 name = "zord-summarize"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "directories",
@@ -6907,7 +6907,7 @@ dependencies = [
 
 [[package]]
 name = "zord-transcribe"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "bzip2",
@@ -6922,7 +6922,7 @@ dependencies = [
 
 [[package]]
 name = "zord-web"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "axum",
