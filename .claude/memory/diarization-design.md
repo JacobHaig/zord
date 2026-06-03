@@ -46,13 +46,29 @@ stop**. User asked for both triggers + a live toggle.
   (e.g. swapping to a bigger model) only works if that WAV was retained.** The
   `diarize_keep_audio` setting (Phase 19) keeps just the Others track even when
   Keep-audio is off, precisely so users can re-run with a different model later;
-  otherwise the temp Others WAV is deleted after the first pass. apply_diarization
+  otherwise the temp Others WAV is deleted after the first pass. **It now defaults
+  ON** (the kept Others WAV lives in the audio dir and is pruned by
+  `auto_delete_days`) — before this, the default-off made manual "Identify
+  speakers" fail on past recordings (audio already deleted), the #1 cause of the
+  "works right after recording, not later" intermittency. apply_diarization
   reads the current `diarize_embedding_model` from settings each run, so a model
   swap takes effect on the next "Identify speakers".
 - Storage: nullable `segments.speaker` + per-session `speaker_names` table
   (rename Speaker 1 → Alex). `Segment::speaker_label(&names)` renders Me /
   Speaker N / custom; flows into transcript (per-speaker colors), search, and
   MD/SRT/JSON exports (`render` now takes a `names` map).
+
+**Reliability (fixed):** the on-demand worker is `catch_unwind`-wrapped and ALWAYS
+emits a terminal `Event::Speakers` so the GUI "Identifying…" busy flag clears on
+any outcome (was: failures emitted only a 5s toast → button stuck). A no-result
+run is **non-destructive**: assignments are computed first and `clear_speakers`
+(which also drops custom names) runs only when speakers were actually matched —
+empty diarizer output / empty mapping leaves existing labels intact with an
+actionable notice. `segmentation_present` now requires a non-empty file so a
+truncated model.onnx re-downloads. Diarizer can return `Ok` with **zero/collapsed
+spans** (short/quiet/single-speaker audio; auto-cluster `num_clusters=-1` +
+`threshold` 0.5; sherpa `min_duration_on=0.3/off=0.5`) — surfaced as a clear notice
+suggesting a lower threshold or a pinned speaker count, not a silent no-op.
 
 **Runtime caveat:** model-download URLs + ONNX/GPU inference are NOT verified
 headlessly — first-run download + accuracy need an on-device check. See

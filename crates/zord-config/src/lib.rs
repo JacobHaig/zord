@@ -60,7 +60,9 @@ pub struct Settings {
     pub diarize_embedding_model: String,
     /// Keep the "Others" track after recording so speakers can be re-identified
     /// later (e.g. with a different/bigger model), even when `keep_audio` is off.
-    #[serde(default)]
+    /// On by default so "Identify speakers" works on past recordings; the kept
+    /// track lives in the audio dir and is pruned by `auto_delete_days`.
+    #[serde(default = "default_true")]
     pub diarize_keep_audio: bool,
     /// Force a fixed number of speakers for diarization (0 = auto-detect).
     /// Set this to a known headcount when auto-clustering over-splits (e.g. a
@@ -240,7 +242,7 @@ impl Default for Settings {
             diarize_auto: true,
             diarize_live: false,
             diarize_embedding_model: default_embedding_model(),
-            diarize_keep_audio: false,
+            diarize_keep_audio: true,
             diarize_num_speakers: 0,
             auto_title: true,
             diarize_threshold: default_diarize_threshold(),
