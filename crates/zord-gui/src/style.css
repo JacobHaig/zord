@@ -235,7 +235,7 @@ body {
 
 /* Chat (per-meeting + cross-meeting Q&A) */
 .chat { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
-.chat-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.chat-title-row { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
 .chat-log { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow-y: auto; }
 .chat-hint { color: var(--muted); font-size: 13px; font-style: italic; }
 .chat-msg { display: flex; max-width: 85%; }

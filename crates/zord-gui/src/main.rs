@@ -267,6 +267,8 @@ fn MainApp() -> Element {
     let chat_input = use_signal(String::new);
     let mut chat_busy = use_signal(|| false);
     let chat_scope = use_signal(|| Option::<ChatScope>::None);
+    // Collapse state for the chat panel (sticky, like the Summary/Compressed ones).
+    let show_chat = use_signal(|| true);
     // Custom names for diarized speakers in the viewed session (index → name).
     let mut speaker_names = use_signal(std::collections::HashMap::<i32, String>::new);
     // Session id currently being renamed (+ its edit buffer); pending delete.
@@ -977,7 +979,7 @@ fn MainApp() -> Element {
                             ChatPanel {
                                 title: "💬 Ask this meeting".to_string(),
                                 placeholder: "Ask about this meeting — decisions, action items, who said what…".to_string(),
-                                chat, input: chat_input, busy: chat_busy,
+                                chat, input: chat_input, busy: chat_busy, show: show_chat,
                                 on_send: move |_| submit_chat(&engine, ChatScope::Meeting(id.clone()), chat, chat_input, chat_scope, chat_busy),
                             }
                         }
@@ -990,7 +992,7 @@ fn MainApp() -> Element {
                             ChatPanel {
                                 title: "💬 Ask across your meetings".to_string(),
                                 placeholder: "Ask across recent meetings — where's project X, what do I owe, open questions…".to_string(),
-                                chat, input: chat_input, busy: chat_busy,
+                                chat, input: chat_input, busy: chat_busy, show: show_chat,
                                 on_send: move |_| submit_chat(&engine, ChatScope::CrossMeeting, chat, chat_input, chat_scope, chat_busy),
                             }
                         }
@@ -1924,45 +1926,56 @@ fn ChatPanel(
     chat: Signal<Vec<(bool, String)>>,
     input: Signal<String>,
     busy: Signal<bool>,
+    show: Signal<bool>,
     on_send: EventHandler<()>,
 ) -> Element {
     let is_busy = busy();
+    let open = show();
     rsx! {
         div { class: "chat",
-            div { class: "chat-title", "{title}" }
-            div { class: "chat-log",
-                if chat.read().is_empty() && !is_busy {
-                    div { class: "chat-hint", "{placeholder}" }
-                }
-                for (i, (is_user, text)) in chat.read().iter().enumerate() {
-                    div {
-                        key: "{i}",
-                        class: if *is_user { "chat-msg user" } else { "chat-msg bot" },
-                        span { class: "chat-text", "{text}" }
-                    }
-                }
-                if is_busy {
-                    div { class: "chat-msg bot", span { class: "chat-text dim", "Thinking…" } }
+            div { class: "chat-title-row",
+                button {
+                    class: "panel-toggle",
+                    onclick: move |_| { let v = *show.peek(); show.set(!v); },
+                    span { class: "chev", if open { "▾" } else { "▸" } }
+                    span { "{title}" }
                 }
             }
-            div { class: "chat-input-row",
-                input {
-                    class: "chat-input",
-                    placeholder: "Ask a question…",
-                    value: "{input}",
-                    disabled: is_busy,
-                    oninput: move |e| input.set(e.value()),
-                    onkeydown: move |e| {
-                        if e.key() == Key::Enter {
-                            on_send.call(());
+            if open {
+                div { class: "chat-log",
+                    if chat.read().is_empty() && !is_busy {
+                        div { class: "chat-hint", "{placeholder}" }
+                    }
+                    for (i, (is_user, text)) in chat.read().iter().enumerate() {
+                        div {
+                            key: "{i}",
+                            class: if *is_user { "chat-msg user" } else { "chat-msg bot" },
+                            span { class: "chat-text", "{text}" }
                         }
-                    },
+                    }
+                    if is_busy {
+                        div { class: "chat-msg bot", span { class: "chat-text dim", "Thinking…" } }
+                    }
                 }
-                button {
-                    class: "mbtn",
-                    disabled: is_busy,
-                    onclick: move |_| on_send.call(()),
-                    "Ask"
+                div { class: "chat-input-row",
+                    input {
+                        class: "chat-input",
+                        placeholder: "Ask a question…",
+                        value: "{input}",
+                        disabled: is_busy,
+                        oninput: move |e| input.set(e.value()),
+                        onkeydown: move |e| {
+                            if e.key() == Key::Enter {
+                                on_send.call(());
+                            }
+                        },
+                    }
+                    button {
+                        class: "mbtn",
+                        disabled: is_busy,
+                        onclick: move |_| on_send.call(()),
+                        "Ask"
+                    }
                 }
             }
         }
