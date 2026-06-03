@@ -315,6 +315,15 @@ fn MainApp() -> Element {
     let mut model_progress = use_signal(|| Option::<(String, u8)>::None);
     // Name of a model whose download failed → show the manual-fetch fallback.
     let mut download_help = use_signal(|| Option::<String>::None);
+    // Background-jobs indicator (Phase 24-ish polish): a live board of running
+    // work. `job_starts` maps an active job key → start time (ms); reconciled from
+    // the existing busy signals so no engine changes are needed. `job_tick` forces
+    // the elapsed timers to re-render each second; `diarize_est_secs` is a rough
+    // ETA for diarization scaled to the meeting length (captured at click time).
+    let mut show_jobs = use_signal(|| false);
+    let mut job_starts = use_signal(std::collections::HashMap::<String, u64>::new);
+    let mut job_tick = use_signal(|| 0u64);
+    let mut diarize_est_secs = use_signal(|| Option::<u64>::None);
 
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
@@ -379,6 +388,7 @@ fn MainApp() -> Element {
                 Event::Speakers(v) => {
                     speaker_names.set(v);
                     diarizing.set(false);
+                    diarize_est_secs.set(None);
                 }
             };
 
@@ -454,6 +464,52 @@ fn MainApp() -> Element {
         let _ = document::eval(
             "const c=document.querySelector('.chat-log'); if(c){c.scrollTop=c.scrollHeight;}",
         );
+    });
+
+    // Reconcile the background-jobs board from the live busy signals: insert a
+    // start time when a job appears, drop it when it finishes.
+    use_effect(move || {
+        let mut active: Vec<&str> = Vec::new();
+        if matches!(*status.read(), Status::Recording) {
+            active.push("record");
+        }
+        if model_progress.read().is_some() {
+            active.push("download");
+        }
+        if summarizing() {
+            active.push("summarize");
+        }
+        if compressing() {
+            active.push("compress");
+        }
+        if diarizing() {
+            active.push("diarize");
+        }
+        if overview_busy() {
+            active.push("overview");
+        }
+        if chat_busy() {
+            active.push("chat");
+        }
+        let now = now_ms();
+        let mut starts = job_starts.write();
+        for k in &active {
+            starts.entry((*k).to_string()).or_insert(now);
+        }
+        starts.retain(|k, _| active.iter().any(|a| *a == k));
+    });
+
+    // Tick once a second while any job is running so elapsed timers update.
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if !job_starts.peek().is_empty() {
+                let v = *job_tick.peek();
+                job_tick.set(v.wrapping_add(1));
+            } else if *show_jobs.peek() {
+                show_jobs.set(false); // auto-close the panel when nothing's running
+            }
+        }
     });
 
     let st = status.read().clone();
@@ -730,6 +786,22 @@ fn MainApp() -> Element {
                         }
                     }
                     div { class: "topbar-actions",
+                        {
+                            let n = job_starts.read().len();
+                            if n > 0 {
+                                rsx! {
+                                    button {
+                                        class: "jobs-btn",
+                                        title: "Background jobs",
+                                        onclick: move |_| { let v = *show_jobs.peek(); show_jobs.set(!v); },
+                                        span { class: "jobs-spin" }
+                                        span { "{n} running" }
+                                    }
+                                }
+                            } else {
+                                rsx! {}
+                            }
+                        }
                         button {
                             class: "gear",
                             title: "Settings",
@@ -829,6 +901,13 @@ fn MainApp() -> Element {
                                     onclick: move |_| {
                                         if *diarizing.peek() { return; }
                                         diarizing.set(true);
+                                        // Rough ETA: diarization runs at very roughly ~6x faster than
+                                        // real time on CPU, so scale to this meeting's length.
+                                        let est = sessions.peek().iter()
+                                            .find(|s| s.id == sid_diar)
+                                            .and_then(|s| s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000))
+                                            .map(|secs| (secs / 6).max(15));
+                                        diarize_est_secs.set(est);
                                         notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
                                         let _ = eng_diar.db_tx.send(DbCmd::Diarize(sid_diar.clone()));
                                     },
@@ -1023,6 +1102,73 @@ fn MainApp() -> Element {
                                 chat, input: chat_input, busy: chat_busy, show: show_chat,
                                 on_send: move |_| submit_chat(&engine, ChatScope::CrossMeeting, chat, chat_input, chat_scope, chat_busy),
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Background jobs panel ----
+        if *show_jobs.read() && !job_starts.read().is_empty() {
+            {
+                let _ = job_tick.read(); // re-render each second for elapsed timers
+                let now = now_ms();
+                let mp = model_progress.read().clone();
+                let est = *diarize_est_secs.read();
+                let mut rows: Vec<(String, u64)> =
+                    job_starts.read().iter().map(|(k, v)| (k.clone(), *v)).collect();
+                rows.sort_by_key(|(k, _)| job_order(k));
+                rsx! {
+                    div { class: "jobs-overlay", onclick: move |_| show_jobs.set(false),
+                        div {
+                            class: "jobs-card",
+                            onclick: move |e| e.stop_propagation(),
+                            div { class: "jobs-head",
+                                span { "Background jobs" }
+                                button { class: "close-btn", onclick: move |_| show_jobs.set(false), "✕" }
+                            }
+                            for (key, start) in rows {
+                                {
+                                    let elapsed = now.saturating_sub(start) / 1000;
+                                    let (icon, title) = job_label(&key);
+                                    // Per-job detail, optional progress %, and ETA.
+                                    let (detail, pct): (String, Option<u8>) = match key.as_str() {
+                                        "download" => {
+                                            let (name, p) = mp.clone().unwrap_or_default();
+                                            let eta = if p > 0 && p < 100 {
+                                                format!(" · ETA {}", fmt_dur(elapsed * (100 - p as u64) / p as u64))
+                                            } else {
+                                                String::new()
+                                            };
+                                            (format!("{name} · {p}%{eta}"), Some(p))
+                                        }
+                                        "diarize" => {
+                                            let d = match est {
+                                                Some(e) => format!("~{} left (estimate)", fmt_dur(e.saturating_sub(elapsed))),
+                                                None => "processing audio…".to_string(),
+                                            };
+                                            (d, None)
+                                        }
+                                        "record" => ("capturing audio".to_string(), None),
+                                        "overview" => ("compressing + synthesizing".to_string(), None),
+                                        _ => ("running…".to_string(), None),
+                                    };
+                                    rsx! {
+                                        div { key: "{key}", class: "job-row",
+                                            span { class: "job-icon", "{icon}" }
+                                            div { class: "job-main",
+                                                div { class: "job-title", "{title}" }
+                                                div { class: "job-detail", "{detail}" }
+                                                if let Some(p) = pct {
+                                                    div { class: "job-bar", div { class: "job-bar-fill", style: "width: {p}%" } }
+                                                }
+                                            }
+                                            span { class: "job-time", "{fmt_dur(elapsed)}" }
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "jobs-foot", "Local processing — times are estimates and vary with your hardware." }
                         }
                     }
                 }
@@ -2042,6 +2188,34 @@ fn reset_chat(
     input.set(String::new());
     busy.set(false);
     scope.set(None);
+}
+
+/// Icon + label for a background-job key.
+fn job_label(key: &str) -> (&'static str, &'static str) {
+    match key {
+        "record" => ("🔴", "Recording"),
+        "download" => ("⬇", "Downloading model"),
+        "summarize" => ("✨", "Summarizing"),
+        "compress" => ("🗜", "Compressing"),
+        "overview" => ("📊", "Building overview"),
+        "chat" => ("💬", "Answering chat"),
+        "diarize" => ("🗣", "Identifying speakers"),
+        _ => ("•", "Working"),
+    }
+}
+
+/// Stable display order for the jobs panel.
+fn job_order(key: &str) -> u8 {
+    match key {
+        "record" => 0,
+        "download" => 1,
+        "summarize" => 2,
+        "compress" => 3,
+        "overview" => 4,
+        "diarize" => 5,
+        "chat" => 6,
+        _ => 9,
+    }
 }
 
 fn source_class(s: Source) -> &'static str {
