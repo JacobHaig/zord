@@ -32,5 +32,14 @@ in spawn_proc). Keep this decoupling for any future meter work — never emit a 
 event per capture buffer. If lag ever returns in a **debug** build, the next
 suspect is the heavy sinc resampler (SincFixedIn sinc_len 256 / oversampling 256 in
 crates/zord-audio/src/resample.rs) starving the per-source worker — not the meter.
-Optional hardening (not done): a latest-wins `watch` channel for levels.
+**Same root cause also broke the Stop button on macOS:** the GUI drains ALL engine
+events from one unbounded channel, so `Status::Idle` (which flips the Stop button
+back to Record) got stuck behind the Level-event backlog — recording looked like it
+never stopped. Hardened in addition to the throttle: the GUI drain now processes
+events in bursts (recv one, then `try_recv` the rest) and coalesces `Level` to the
+newest value per source, applying all other events in order — so a meter flood can
+never starve control events (crates/zord-gui/src/main.rs event loop). Lesson: never
+put a high-rate per-buffer event on the same ordered channel as control/status
+events without coalescing. Optional further hardening (not done): a latest-wins
+`watch` channel for levels.
 Related: [[capture-design]].
