@@ -420,9 +420,11 @@ fn MainApp() -> Element {
         let engine = engine.clone();
         move |_| {
             if recording {
+                tracing::info!("record button: Stop clicked");
                 let _ = engine.rec_tx.send(RecorderCmd::Stop);
                 let _ = engine.db_tx.send(DbCmd::ListSessions);
             } else {
+                tracing::info!("record button: Record clicked");
                 segments.write().clear();
                 notice.set(None);
                 summary.set(None);

@@ -1138,13 +1138,18 @@ fn run_session(
     let mut procs = Vec::new();
     // Toggled live by RecorderCmd::SetMicMuted; read by the mic proc thread.
     let mic_muted = Arc::new(AtomicBool::new(false));
+    // Set on Stop/Shutdown so the worker threads bail out *promptly* instead of
+    // draining a whole queued backlog (which made Stop feel unresponsive when the
+    // pipeline was behind real time). Any not-yet-transcribed tail is dropped; if
+    // audio was kept it can be re-transcribed.
+    let stopping = Arc::new(AtomicBool::new(false));
 
     // Microphone ("Me") — only if the capture mode includes it.
     let mic = if record_mic {
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
         match Microphone::start_with(mic_tx, input_device.as_deref()) {
             Ok(m) => {
-                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone())));
+                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone()), stopping.clone()));
                 Some(m)
             }
             Err(e) => {
@@ -1161,7 +1166,7 @@ fn run_session(
         let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
         match SystemAudio::start(sys_tx) {
             Ok(s) => {
-                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), None));
+                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), None, stopping.clone()));
                 Some(s)
             }
             Err(e) => {
@@ -1182,6 +1187,7 @@ fn run_session(
         let session = session_id.clone();
         let model_path = model_path.clone();
         let db_path = db_path.clone();
+        let stopping = stopping.clone();
         thread::spawn(move || {
             let transcriber = match Transcriber::load(model, &model_path) {
                 Ok(t) => t,
@@ -1212,6 +1218,11 @@ fn run_session(
                 }
             };
             while let Ok(job) = job_rx.recv() {
+                // Stop requested: drop the remaining backlog instead of running
+                // whisper over all of it, so teardown is prompt.
+                if stopping.load(Ordering::Relaxed) {
+                    break;
+                }
                 // Provisional speaker for this whole VAD chunk (Others only).
                 #[allow(unused_mut)]
                 let mut live_speaker: Option<i32> = None;
@@ -1243,7 +1254,11 @@ fn run_session(
     let mut shutdown = false;
     loop {
         match rx.recv() {
-            Ok(RecorderCmd::Stop) | Err(_) => break,
+            Ok(RecorderCmd::Stop) => {
+                tracing::info!("control: Stop received — tearing down recording");
+                break;
+            }
+            Err(_) => break,
             Ok(RecorderCmd::Shutdown) => {
                 shutdown = true;
                 break;
@@ -1253,6 +1268,8 @@ fn run_session(
         }
     }
 
+    // Tell the worker threads to bail out of any queued backlog promptly.
+    stopping.store(true, Ordering::Relaxed);
     drop(mic);
     drop(system);
     for p in procs {
@@ -1260,6 +1277,7 @@ fn run_session(
     }
     let _ = transcribe.join();
     let _ = store.end_session(&session_id, now_ms());
+    tracing::info!("control: recording torn down");
 
     // Offline speaker diarization (accurate, source of truth) over the "Others"
     // track, then drop the temp WAV unless we're retaining it (kept audio, or
@@ -1277,6 +1295,7 @@ fn run_session(
     }
 
     let _ = ev.send(Event::Status(Status::Idle));
+    tracing::info!("control: session idle");
     shutdown
 }
 
@@ -1290,6 +1309,7 @@ fn spawn_proc(
     ev: UnboundedSender<Event>,
     wav_path: Option<PathBuf>,
     muted: Option<Arc<AtomicBool>>,
+    stopping: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut resampler = match MonoResampler::new(sample_rate, 1) {
@@ -1321,6 +1341,10 @@ fn spawn_proc(
         let mut dbg_last = session_start.elapsed();
 
         while let Ok(frame) = rx.recv() {
+            // Stop requested: abandon any queued backlog so teardown is prompt.
+            if stopping.load(Ordering::Relaxed) {
+                break;
+            }
             // Muted mic: replace this buffer with silence so timing stays aligned
             // (segmenter/WAV keep advancing) but nothing is transcribed and the
             // meter naturally falls to zero.
