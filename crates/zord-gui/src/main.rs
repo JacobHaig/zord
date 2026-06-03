@@ -268,6 +268,11 @@ fn MainApp() -> Element {
         use_signal(std::collections::HashMap::<String, (bool, bool, bool)>::new);
     let mut session_filter = use_signal(String::new);
     let mut search_results = use_signal(Vec::<(String, Segment)>::new);
+    // Dedicated search view: the live query text, plus a pending "scroll to this
+    // segment after the session loads" + which line to briefly highlight.
+    let mut search_query = use_signal(String::new);
+    let mut scroll_to_seg = use_signal(|| Option::<i64>::None);
+    let mut highlight_seg = use_signal(|| Option::<i64>::None);
     let mut view = use_signal(|| View::Live);
     // Path of the most recently exported file (drives the Reveal/Open buttons).
     let mut last_export = use_signal(|| Option::<String>::None);
@@ -468,6 +473,26 @@ fn MainApp() -> Element {
         );
     });
 
+    // After a search result opens a session, scroll its transcript to the picked
+    // line and briefly highlight it.
+    use_effect(move || {
+        let _ = segments.read().len(); // re-run when a transcript loads
+        let target = *scroll_to_seg.peek();
+        if let Some(id) = target {
+            let _ = document::eval(&format!(
+                "requestAnimationFrame(()=>{{const e=document.getElementById('seg-{id}');if(e){{e.scrollIntoView({{block:'center',behavior:'smooth'}});}}}})"
+            ));
+            highlight_seg.set(Some(id));
+            scroll_to_seg.set(None);
+            spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if *highlight_seg.peek() == Some(id) {
+                    highlight_seg.set(None);
+                }
+            });
+        }
+    });
+
     // Reconcile the background-jobs board from the live busy signals: insert a
     // start time when a job appears, drop it when it finishes.
     use_effect(move || {
@@ -614,16 +639,36 @@ fn MainApp() -> Element {
         }
     };
 
-    let on_search = {
+    // Open the dedicated search view (does not clear the prior query/results).
+    let on_open_search = move |_| view.set(View::Search);
+
+    // Run a query from the search view's input.
+    let on_query = {
         let engine = engine.clone();
-        move |e: FormEvent| {
-            let q = e.value();
+        move |q: String| {
+            search_query.set(q.clone());
             if q.trim().is_empty() {
-                view.set(View::Live);
+                search_results.set(Vec::new());
             } else {
-                view.set(View::Search);
                 let _ = engine.db_tx.send(DbCmd::Search(q));
             }
+        }
+    };
+
+    // Open a session from a search result, optionally scrolling to a line.
+    let on_open_result = {
+        let engine = engine.clone();
+        move |(sid, seg_id): (String, Option<i64>)| {
+            view.set(View::Session(sid.clone()));
+            last_export.set(None);
+            summary.set(None);
+            compressed.set(None);
+            summarizing.set(false);
+            compressing.set(false);
+            diarizing.set(false);
+            reset_chat(chat, chat_input, chat_busy, chat_scope);
+            scroll_to_seg.set(seg_id);
+            let _ = engine.db_tx.send(DbCmd::Load(sid));
         }
     };
 
@@ -649,6 +694,12 @@ fn MainApp() -> Element {
                     title: "A holistic, project-grouped rollup across your recent meetings",
                     onclick: on_open_overview,
                     "📊 Overview"
+                }
+                button {
+                    class: if matches!(&*view.read(), View::Search) { "overview-btn active" } else { "overview-btn" },
+                    title: "Search across every meeting's transcript",
+                    onclick: on_open_search,
+                    "🔎 Search"
                 }
                 div { class: "side-label", "Sessions" }
                 if sessions.read().len() > 6 {
@@ -838,14 +889,6 @@ fn MainApp() -> Element {
                         span { "{n}" }
                         button { class: "notice-x", onclick: move |_| notice.set(None), "✕" }
                     }
-                }
-
-                // Search
-                input {
-                    class: "search",
-                    r#type: "text",
-                    placeholder: "Search all transcripts…",
-                    oninput: on_search,
                 }
 
                 // Export bar (only when viewing a saved session)
@@ -1083,13 +1126,21 @@ fn MainApp() -> Element {
 
                 // Transcript / results. Pass signals so the list subscribes and
                 // re-renders itself; App is not re-rendered on each new segment.
-                div { class: "transcript",
-                    if *view.read() == View::Overview {
-                        OverviewView { overview, busy: overview_busy, notice, on_generate: on_generate_overview }
-                    } else if *view.read() == View::Search {
-                        SearchResultsView { results: search_results, sessions }
-                    } else {
-                        TranscriptView { segments, speaker_names, on_edit: on_edit_segment }
+                if *view.read() == View::Search {
+                    SearchView {
+                        results: search_results,
+                        sessions,
+                        query: search_query,
+                        on_query,
+                        on_open: on_open_result,
+                    }
+                } else {
+                    div { class: "transcript",
+                        if *view.read() == View::Overview {
+                            OverviewView { overview, busy: overview_busy, notice, on_generate: on_generate_overview }
+                        } else {
+                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment }
+                        }
                     }
                 }
 
@@ -1903,12 +1954,14 @@ fn Meter(label: String, level: Signal<f32>, kind: String) -> Element {
 fn TranscriptView(
     segments: Signal<Vec<Segment>>,
     speaker_names: Signal<std::collections::HashMap<i32, String>>,
+    highlight: Signal<Option<i64>>,
     on_edit: EventHandler<(i64, String)>,
 ) -> Element {
     let mut editing = use_signal(|| Option::<i64>::None);
     let mut buf = use_signal(String::new);
     let segs = segments.read();
     let names = speaker_names.read();
+    let hl = *highlight.read();
     if segs.is_empty() {
         return rsx! { div { class: "empty", "Press Record, or pick a session." } };
     }
@@ -1920,10 +1973,14 @@ fn TranscriptView(
                 let text = seg.text.clone();
                 let text_for_edit = text.clone();
                 let who = seg.speaker_label(&names);
+                // DOM anchor + flash highlight so a search result can jump here.
+                let dom_id = sid.map(|i| format!("seg-{i}")).unwrap_or_default();
+                let hit = if sid.is_some() && sid == hl { " hit" } else { "" };
                 rsx! {
                     div {
                         key: "{seg.source.as_str()}-{seg.t_start_ms}",
-                        class: "line {line_class(seg)}",
+                        id: "{dom_id}",
+                        class: "line {line_class(seg)}{hit}",
                         span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
                         span { class: "who", "{who}" }
                         if is_editing {
@@ -1963,33 +2020,93 @@ fn TranscriptView(
     }
 }
 
+/// Dedicated full search view: a query box on top, and matches grouped under the
+/// meeting they came from — meetings newest-first, lines within each in
+/// chronological order. Clicking a meeting opens it; clicking a line opens it and
+/// jumps to that line.
 #[component]
-fn SearchResultsView(
+fn SearchView(
     results: Signal<Vec<(String, Segment)>>,
     sessions: Signal<Vec<Session>>,
+    query: Signal<String>,
+    on_query: EventHandler<String>,
+    on_open: EventHandler<(String, Option<i64>)>,
 ) -> Element {
-    let hits = results.read();
-    if hits.is_empty() {
-        return rsx! { div { class: "empty", "No matches." } };
+    use std::collections::HashMap;
+    let sess = sessions.read();
+    let started: HashMap<String, u64> = sess.iter().map(|s| (s.id.clone(), s.started_at)).collect();
+    let titles: HashMap<String, String> = sess.iter().map(|s| (s.id.clone(), session_title(s))).collect();
+
+    // Group hits by session, sort lines chronologically, sessions newest-first.
+    let mut groups: HashMap<String, Vec<Segment>> = HashMap::new();
+    for (sid, seg) in results.read().iter() {
+        groups.entry(sid.clone()).or_default().push(seg.clone());
     }
-    // Map session id → display title so results name their meeting.
-    let titles: std::collections::HashMap<String, String> = sessions
-        .read()
-        .iter()
-        .map(|s| (s.id.clone(), session_title(s)))
-        .collect();
+    let mut ordered: Vec<(String, Vec<Segment>)> = groups.into_iter().collect();
+    for (_, segs) in ordered.iter_mut() {
+        segs.sort_by_key(|s| s.t_start_ms);
+    }
+    ordered.sort_by_key(|(sid, _)| std::cmp::Reverse(started.get(sid).copied().unwrap_or(0)));
+
+    let q_empty = query.read().trim().is_empty();
+    let total: usize = ordered.iter().map(|(_, s)| s.len()).sum();
+
     rsx! {
-        for (sid, seg) in hits.iter() {
-            {
-                let label = titles.get(sid).cloned().unwrap_or_else(|| short_id(sid));
-                rsx! {
-                    div {
-                        key: "{sid}-{seg.t_start_ms}",
-                        class: "line {line_class(seg)}",
-                        span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
-                        span { class: "who", "{quick_speaker_label(seg)}" }
-                        span { class: "text", "{seg.text}" }
-                        span { class: "src", title: "{label}", "{label}" }
+        div { class: "search-view",
+            input {
+                class: "search-input-big",
+                r#type: "text",
+                placeholder: "Search all transcripts…",
+                autofocus: true,
+                value: "{query}",
+                oninput: move |e| on_query.call(e.value()),
+            }
+            if !q_empty {
+                div { class: "search-count",
+                    "{total} match(es) across {ordered.len()} meeting(s)"
+                }
+            }
+            div { class: "search-results",
+                if q_empty {
+                    div { class: "empty", "Type to search across every meeting's transcript." }
+                } else if ordered.is_empty() {
+                    div { class: "empty", "No matches." }
+                } else {
+                    for (sid, segs) in ordered {
+                        {
+                            let title = titles.get(&sid).cloned().unwrap_or_else(|| short_id(&sid));
+                            let when = started.get(&sid).copied().map(relative_time).unwrap_or_default();
+                            let count = segs.len();
+                            let sid_head = sid.clone();
+                            rsx! {
+                                div { class: "search-group",
+                                    div {
+                                        class: "search-group-head",
+                                        title: "Open this meeting",
+                                        onclick: move |_| on_open.call((sid_head.clone(), None)),
+                                        span { class: "sg-title", "{title}" }
+                                        span { class: "sg-meta", "{count} match · {when}" }
+                                    }
+                                    for seg in segs {
+                                        {
+                                            let sid_line = sid.clone();
+                                            let seg_id = seg.id;
+                                            rsx! {
+                                                div {
+                                                    key: "{seg.t_start_ms}",
+                                                    class: "search-hit {line_class(&seg)}",
+                                                    title: "Jump to this line",
+                                                    onclick: move |_| on_open.call((sid_line.clone(), seg_id)),
+                                                    span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
+                                                    span { class: "who", "{quick_speaker_label(&seg)}" }
+                                                    span { class: "text", "{seg.text}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

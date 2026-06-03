@@ -257,6 +257,23 @@ body {
 .chat-input { flex: 1; padding: 9px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); font-size: 13px; }
 .chat-input:focus { outline: none; border-color: var(--me); }
 
+/* Dedicated search view */
+.search-view { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.search-input-big { padding: 11px 14px; font-size: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); }
+.search-input-big:focus { outline: none; border-color: var(--me); }
+.search-count { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.search-results { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.search-group { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.search-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 10px 14px; cursor: pointer; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.search-group-head:hover .sg-title { color: var(--me); }
+.sg-title { font-size: 14px; font-weight: 600; }
+.sg-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.search-hit { display: flex; gap: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px; line-height: 1.45; border-left: 3px solid transparent; }
+.search-hit:hover { background: var(--panel-2); border-left-color: var(--me); }
+
+/* Flash-highlight a transcript line jumped to from search. */
+.line.hit { background: rgba(94,166,255,0.18); border-radius: 6px; transition: background 0.4s ease; }
+
 /* Background-jobs indicator + panel */
 .jobs-btn { display: inline-flex; align-items: center; gap: 7px; padding: 6px 11px; background: var(--panel); border: 1px solid var(--me); border-radius: 8px; color: var(--me); cursor: pointer; font-size: 12px; }
 .jobs-btn:hover { background: var(--panel-2); }
