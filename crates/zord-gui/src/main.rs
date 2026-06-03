@@ -235,6 +235,10 @@ fn MainApp() -> Element {
     let mut me_level = use_signal(|| 0.0f32);
     let mut others_level = use_signal(|| 0.0f32);
     let mut sessions = use_signal(Vec::<Session>::new);
+    // Per-session badge flags (summary/compressed/speakers) + a title filter box.
+    let mut session_badges =
+        use_signal(std::collections::HashMap::<String, (bool, bool, bool)>::new);
+    let mut session_filter = use_signal(String::new);
     let mut search_results = use_signal(Vec::<(String, Segment)>::new);
     let mut view = use_signal(|| View::Live);
     // Path of the most recently exported file (drives the Reveal/Open buttons).
@@ -305,6 +309,7 @@ fn MainApp() -> Element {
                 }
                 Event::Level { .. } => {} // handled via coalescing
                 Event::Sessions(v) => sessions.set(v),
+                Event::SessionBadges(b) => session_badges.set(b),
                 Event::SearchResults(v) => search_results.set(v),
                 Event::Transcript(v) => segments.set(v),
                 Event::Exported(p) => {
@@ -558,25 +563,61 @@ fn MainApp() -> Element {
                     "📊 Overview"
                 }
                 div { class: "side-label", "Sessions" }
-                div { class: "session-list",
-                    if sessions.read().is_empty() {
-                        div { class: "empty", "No recordings yet." }
+                if sessions.read().len() > 6 {
+                    input {
+                        class: "session-filter",
+                        placeholder: "Filter by title…",
+                        value: "{session_filter}",
+                        oninput: move |e| session_filter.set(e.value()),
                     }
-                    for s in sessions.read().iter().cloned() {
+                }
+                div { class: "session-list",
+                    {
+                        // Filter by title, then tag the first row of each date group.
+                        let q = session_filter.read().to_lowercase();
+                        let now = now_ms();
+                        let mut last_group: Option<&'static str> = None;
+                        let items: Vec<(Option<&'static str>, Session)> = sessions
+                            .read()
+                            .iter()
+                            .filter(|s| q.is_empty() || session_title(s).to_lowercase().contains(q.as_str()))
+                            .cloned()
+                            .map(|s| {
+                                let g = date_group(s.started_at, now);
+                                let hdr = if last_group != Some(g) { last_group = Some(g); Some(g) } else { None };
+                                (hdr, s)
+                            })
+                            .collect();
+                        let empty_msg = if sessions.read().is_empty() {
+                            "No recordings yet."
+                        } else {
+                            "No matching sessions."
+                        };
+                        rsx! {
+                            if items.is_empty() {
+                                div { class: "empty", "{empty_msg}" }
+                            }
+                            for (group_hdr, s) in items {
                         {
                             let id = s.id.clone();
                             let active = matches!(&*view.read(), View::Session(v) if *v == id);
                             let is_editing = editing.read().as_deref() == Some(id.as_str());
                             let title = session_title(&s);
                             let meta = session_meta(&s);
+                            let (b_sum, b_comp, b_spk) =
+                                session_badges.read().get(&id).copied().unwrap_or((false, false, false));
+                            let b_audio = s.audio_path.is_some();
                             let eng_open = engine.clone();
                             let eng_save = engine.clone();
                             let (id_open, id_edit, id_save, id_del) =
                                 (id.clone(), id.clone(), id.clone(), id.clone());
                             let title_edit = title.clone();
                             rsx! {
+                                div { key: "{s.id}", class: "session-wrap",
+                                if let Some(h) = group_hdr {
+                                    div { class: "date-group", "{h}" }
+                                }
                                 div {
-                                    key: "{s.id}",
                                     class: if active { "session active" } else { "session" },
                                     if is_editing {
                                         input {
@@ -610,7 +651,15 @@ fn MainApp() -> Element {
                                                 let _ = eng_open.db_tx.send(DbCmd::Load(id_open.clone()));
                                             },
                                             div { class: "session-title", "{title}" }
-                                            div { class: "session-meta", "{meta}" }
+                                            div { class: "session-meta",
+                                                span { "{meta}" }
+                                                span { class: "badges",
+                                                    if b_sum { span { class: "badge", title: "Has summary", "✨" } }
+                                                    if b_comp { span { class: "badge", title: "Compressed", "🗜" } }
+                                                    if b_spk { span { class: "badge", title: "Speakers identified", "🗣" } }
+                                                    if b_audio { span { class: "badge", title: "Audio kept", "🎧" } }
+                                                }
+                                            }
                                         }
                                         div { class: "session-actions",
                                             button {
@@ -631,7 +680,10 @@ fn MainApp() -> Element {
                                         }
                                     }
                                 }
+                                }
                             }
+                        }
+                    }
                         }
                     }
                 }
@@ -908,7 +960,7 @@ fn MainApp() -> Element {
                     if *view.read() == View::Overview {
                         OverviewView { overview, busy: overview_busy, notice, on_generate: on_generate_overview }
                     } else if *view.read() == View::Search {
-                        SearchResultsView { results: search_results }
+                        SearchResultsView { results: search_results, sessions }
                     } else {
                         TranscriptView { segments, speaker_names, on_edit: on_edit_segment }
                     }
@@ -1718,20 +1770,34 @@ fn TranscriptView(
 }
 
 #[component]
-fn SearchResultsView(results: Signal<Vec<(String, Segment)>>) -> Element {
+fn SearchResultsView(
+    results: Signal<Vec<(String, Segment)>>,
+    sessions: Signal<Vec<Session>>,
+) -> Element {
     let hits = results.read();
     if hits.is_empty() {
         return rsx! { div { class: "empty", "No matches." } };
     }
+    // Map session id → display title so results name their meeting.
+    let titles: std::collections::HashMap<String, String> = sessions
+        .read()
+        .iter()
+        .map(|s| (s.id.clone(), session_title(s)))
+        .collect();
     rsx! {
         for (sid, seg) in hits.iter() {
-            div {
-                key: "{sid}-{seg.t_start_ms}",
-                class: "line {line_class(seg)}",
-                span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
-                span { class: "who", "{quick_speaker_label(seg)}" }
-                span { class: "text", "{seg.text}" }
-                span { class: "src", "{short_id(sid)}" }
+            {
+                let label = titles.get(sid).cloned().unwrap_or_else(|| short_id(sid));
+                rsx! {
+                    div {
+                        key: "{sid}-{seg.t_start_ms}",
+                        class: "line {line_class(seg)}",
+                        span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
+                        span { class: "who", "{quick_speaker_label(seg)}" }
+                        span { class: "text", "{seg.text}" }
+                        span { class: "src", title: "{label}", "{label}" }
+                    }
+                }
             }
         }
     }
@@ -1975,6 +2041,19 @@ fn session_title(s: &Session) -> String {
     match s.title.as_ref().filter(|t| !t.trim().is_empty()) {
         Some(t) => t.clone(),
         None => format!("Recording · {}", relative_time(s.started_at)),
+    }
+}
+
+/// Sidebar date bucket for grouping sessions (UTC-day based).
+fn date_group(started_at: u64, now: u64) -> &'static str {
+    let day = (started_at / 86_400_000) as i64;
+    let today = (now / 86_400_000) as i64;
+    match today - day {
+        d if d <= 0 => "Today",
+        1 => "Yesterday",
+        d if d < 7 => "This week",
+        d if d < 30 => "This month",
+        _ => "Older",
     }
 }
 

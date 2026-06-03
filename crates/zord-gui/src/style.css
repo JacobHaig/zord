@@ -206,6 +206,15 @@ body {
 .panel-toggle .chev { font-size: 10px; width: 10px; display: inline-block; color: var(--muted); }
 .panel-toggle:hover { color: var(--fg); }
 
+/* Session list: filter box, date-group headers, per-session badges. */
+.session-wrap { display: contents; }
+.session-filter { width: 100%; padding: 6px 10px; margin-bottom: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; color: var(--fg); font-size: 12px; }
+.session-filter:focus { outline: none; border-color: var(--me); }
+.date-group { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); padding: 8px 4px 2px; }
+.session-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.badges { display: inline-flex; gap: 3px; flex-shrink: 0; }
+.badge { font-size: 10px; opacity: 0.85; }
+
 /* Sidebar Overview entry (third top-level mode). */
 .overview-btn { width: 100%; text-align: left; padding: 8px 12px; margin-bottom: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); cursor: pointer; font-size: 13px; }
 .overview-btn:hover { border-color: var(--me); }

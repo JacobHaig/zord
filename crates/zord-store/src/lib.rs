@@ -390,6 +390,26 @@ impl Store {
         Ok(())
     }
 
+    /// Per-session presence flags for sidebar badges, in one query:
+    /// `id -> (has_summary, has_compressed, has_speakers)`. `has_speakers` is true
+    /// when any segment carries a diarized speaker index.
+    pub fn session_badges(&self) -> Result<HashMap<String, (bool, bool, bool)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,
+                    (summary IS NOT NULL AND TRIM(summary) <> ''),
+                    (compressed IS NOT NULL AND TRIM(compressed) <> ''),
+                    EXISTS(SELECT 1 FROM segments sg WHERE sg.session_id = sessions.id AND sg.speaker IS NOT NULL)
+             FROM sessions",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, bool>(1)?, r.get::<_, bool>(2)?, r.get::<_, bool>(3)?),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
     /// Custom speaker names for a session, as a `speaker_index -> name` map.
     pub fn speaker_names(&self, session_id: &str) -> Result<HashMap<i32, String>> {
         let mut stmt = self

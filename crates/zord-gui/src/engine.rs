@@ -58,6 +58,8 @@ pub enum Event {
     Level { source: Source, level: f32 },
     /// Result of [`DbCmd::ListSessions`].
     Sessions(Vec<Session>),
+    /// Sidebar badges per session id: (has_summary, has_compressed, has_speakers).
+    SessionBadges(std::collections::HashMap<String, (bool, bool, bool)>),
     /// Result of [`DbCmd::Search`].
     SearchResults(Vec<(String, Segment)>),
     /// Result of [`DbCmd::Load`] — a session's full transcript.
@@ -624,9 +626,7 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
                         let title = zord_config::clean_title(&raw);
                         if !title.is_empty() {
                             let _ = store.set_session_title(session_id, &title);
-                            if let Ok(v) = store.list_sessions() {
-                                let _ = ev.send(Event::Sessions(v));
-                            }
+                            emit_sessions(&store, ev);
                         }
                     }
                 }
@@ -724,6 +724,17 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
+/// Emit the session list plus its per-session badge flags together, so the
+/// sidebar list + badges stay in sync whenever the list changes.
+fn emit_sessions(store: &Store, ev: &UnboundedSender<Event>) {
+    if let Ok(v) = store.list_sessions() {
+        let _ = ev.send(Event::Sessions(v));
+    }
+    if let Ok(b) = store.session_badges() {
+        let _ = ev.send(Event::SessionBadges(b));
+    }
+}
+
 /// Read the stored cross-meeting Overview from `app_meta` (feature-independent —
 /// the keys mirror `zord_overview`). `None` if none has been generated.
 fn load_overview(store: &Store) -> Option<OverviewData> {
@@ -752,9 +763,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
     while let Ok(cmd) = rx.recv() {
         match cmd {
             DbCmd::ListSessions => {
-                if let Ok(v) = store.list_sessions() {
-                    let _ = ev.send(Event::Sessions(v));
-                }
+                emit_sessions(&store, &ev);
             }
             DbCmd::Search(q) => {
                 let q = sanitize_fts(&q);
@@ -782,15 +791,11 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             },
             DbCmd::Rename { id, title } => {
                 let _ = store.set_session_title(&id, &title);
-                if let Ok(v) = store.list_sessions() {
-                    let _ = ev.send(Event::Sessions(v));
-                }
+                emit_sessions(&store, &ev);
             }
             DbCmd::DeleteSession(id) => {
                 let _ = store.delete_session(&id);
-                if let Ok(v) = store.list_sessions() {
-                    let _ = ev.send(Event::Sessions(v));
-                }
+                emit_sessions(&store, &ev);
             }
             DbCmd::EditSegment { segment_id, text } => {
                 let _ = store.update_segment_text(segment_id, &text);
