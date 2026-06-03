@@ -283,51 +283,74 @@ fn MainApp() -> Element {
         let db = initial.db_path().unwrap_or_else(|_| PathBuf::from("zord.db"));
         let (engine, mut ev_rx) = Engine::spawn(db);
         spawn(async move {
-            while let Some(ev) = ev_rx.recv().await {
-                match ev {
-                    Event::Status(s) => status.set(s),
-                    Event::Notice(n) => notice.set(Some(n)),
-                    Event::Segment(seg) => {
-                        if *view.peek() == View::Live {
-                            segments.write().push(seg);
-                        }
+            // Per-event application. `Level` is handled separately (coalesced
+            // below) so a burst of meter updates can never starve control events
+            // like `Status::Idle` (which is what flips the Stop button back).
+            let mut apply = move |ev: Event| match ev {
+                Event::Status(s) => status.set(s),
+                Event::Notice(n) => notice.set(Some(n)),
+                Event::Segment(seg) => {
+                    if *view.peek() == View::Live {
+                        segments.write().push(seg);
                     }
-                    Event::Level { source, level } => match source {
-                        Source::Me => me_level.set(level),
-                        Source::Others => others_level.set(level),
-                    },
-                    Event::Sessions(v) => sessions.set(v),
-                    Event::SearchResults(v) => search_results.set(v),
-                    Event::Transcript(v) => segments.set(v),
-                    Event::Exported(p) => {
-                        notice.set(Some(format!("Exported to {p}")));
-                        last_export.set(Some(p));
+                }
+                Event::Level { .. } => {} // handled via coalescing
+                Event::Sessions(v) => sessions.set(v),
+                Event::SearchResults(v) => search_results.set(v),
+                Event::Transcript(v) => segments.set(v),
+                Event::Exported(p) => {
+                    notice.set(Some(format!("Exported to {p}")));
+                    last_export.set(Some(p));
+                }
+                Event::Models(v) => {
+                    models.set(v);
+                    model_progress.set(None);
+                }
+                Event::ModelProgress { name, pct } => {
+                    model_progress.set(Some((name, pct)));
+                }
+                Event::DownloadFailed { name } => {
+                    model_progress.set(None);
+                    download_help.set(Some(name));
+                }
+                Event::Summary(v) => summary.set(v),
+                Event::Compressed(v) => compressed.set(v),
+                Event::Overview(v) => {
+                    overview.set(v);
+                    overview_busy.set(false);
+                }
+                Event::ChatReply { scope, reply } => {
+                    // Only land the reply if it belongs to the open conversation.
+                    if chat_scope.peek().as_ref() == Some(&scope) {
+                        chat.write().push((false, reply));
                     }
-                    Event::Models(v) => {
-                        models.set(v);
-                        model_progress.set(None);
+                    chat_busy.set(false);
+                }
+                Event::Speakers(v) => speaker_names.set(v),
+            };
+
+            while let Some(first) = ev_rx.recv().await {
+                // Drain everything already queued into one burst, applying
+                // non-Level events in order and keeping only the newest Level per
+                // source. This guarantees a meter flood can't delay Status/etc.
+                let (mut last_me, mut last_others) = (None, None);
+                let mut ev = first;
+                loop {
+                    match ev {
+                        Event::Level { source: Source::Me, level } => last_me = Some(level),
+                        Event::Level { source: Source::Others, level } => last_others = Some(level),
+                        other => apply(other),
                     }
-                    Event::ModelProgress { name, pct } => {
-                        model_progress.set(Some((name, pct)));
+                    match ev_rx.try_recv() {
+                        Ok(next) => ev = next,
+                        Err(_) => break,
                     }
-                    Event::DownloadFailed { name } => {
-                        model_progress.set(None);
-                        download_help.set(Some(name));
-                    }
-                    Event::Summary(v) => summary.set(v),
-                    Event::Compressed(v) => compressed.set(v),
-                    Event::Overview(v) => {
-                        overview.set(v);
-                        overview_busy.set(false);
-                    }
-                    Event::ChatReply { scope, reply } => {
-                        // Only land the reply if it belongs to the open conversation.
-                        if chat_scope.peek().as_ref() == Some(&scope) {
-                            chat.write().push((false, reply));
-                        }
-                        chat_busy.set(false);
-                    }
-                    Event::Speakers(v) => speaker_names.set(v),
+                }
+                if let Some(l) = last_me {
+                    me_level.set(l);
+                }
+                if let Some(l) = last_others {
+                    others_level.set(l);
                 }
             }
         });
