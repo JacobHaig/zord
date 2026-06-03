@@ -749,8 +749,22 @@ drop closed items.
     rendered as collapsible `## `-headed sections (My open action items open first).
     Summary/compressed panels are now gated to Session/Live views so they don't
     bleed into Overview.
-- **23d** — refresh/recency, mark-done/edit, optional **cross-meeting chat** and
-  per-meeting **chat-with-meeting** (post-recording Q&A).
+- **23d** — **chat** ✅ (done): grounded Q&A, both **per-meeting** (in a session)
+  and **cross-meeting** (in the Overview).
+  - `zord-summarize`: `chat(system, turns, n_ctx)` + `ChatRole`; `generate`/`chat`
+    share a `complete(messages, opts)` core; `GenOpts::chat`.
+  - `zord-config`: `chat_system_prompt()` (answer ONLY from the provided context;
+    say when unknown; cite meetings).
+  - `zord-overview`: `cross_meeting_context()` reuses the gather + budget-fit
+    (collect_digests / fit_to_budget refactor) to build grounding context.
+  - engine: `SummCmd::Chat { scope, turns }`, `ChatScope`, `Event::ChatReply`,
+    `chat_one` with a **resident model** kept across turns (freed before one-shot
+    jobs to bound RAM); per-meeting context = transcript (or its compression when
+    too long, generated on the fly).
+  - GUI: a `ChatPanel` (scrolling Q&A + input) under a session and under the
+    Overview; one conversation signal reset when the scope changes.
+  - Remaining (optional polish): recency cadence / staleness nudge, mark-done &
+    edit of overview items.
 
 Reuses the existing llama.cpp summary model (with a larger configurable context
 for compress/synthesis); no new heavy deps. Optional much later: a **live rolling

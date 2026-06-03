@@ -3,6 +3,7 @@
 - [Architecture](architecture.md) — workspace crates, `TranscribeBackend` trait, GUI engine threading model
 - [Feature flags](feature-flags.md) — parakeet/encryption/summaries are opt-in Cargo features; default build is lean
 - [Capture design](capture-design.md) — dual-channel Me/Others; per-OS loopback; ML diarization layered within Others
+- [Meter event throttle](meter-event-throttle.md) — macOS-only meter lag was per-buffer Level events flooding an unbounded channel; emit ~30Hz
 - [Diarization design](diarization-design.md) — Phase 16 per-speaker diarization: offline-first, optional live, sherpa-onnx
 - [Teams audio options](teams-audio-options.md) — getting Teams audio/speaker names without a bot (Graph callTranscript); per-participant needs a bot
 - [Cross-meeting synthesis](cross-meeting-synthesis.md) — Phase 23 Overview: map-reduce over structured extracts (not big context) for per-project rollups

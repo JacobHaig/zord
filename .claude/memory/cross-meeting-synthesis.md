@@ -70,6 +70,16 @@ compiles without summaries). GUI: 📊 Overview button above the session list �
 updated …" + Copy; renders the rollup as collapsible `## `-headed sections via
 `split_sections`, first open). Summary/compressed panels regated to
 Session|Live (were `!= Search`) so they don't bleed into Overview.
-**Phase 23 core (23a/b/c) shipped.** Remaining: **23d** — refresh/recency cadence,
-mark-done/edit of overview items, cross-meeting + per-meeting chat (Q&A).
+**Phase 23 core (23a/b/c) shipped.** **23d chat shipped:** grounded Q&A,
+per-meeting (in a session) + cross-meeting (in the Overview).
+`zord_summarize::chat(system, turns, n_ctx)` + `ChatRole`; `generate`/`chat` share
+a private `complete(messages, opts)`; `GenOpts::chat`. `zord_config::chat_system_prompt()`
+(answer ONLY from context; say when unknown). `zord_overview::cross_meeting_context()`
+(refactored gather → `collect_digests`/`fit_to_budget`, reused by synthesize).
+Engine: `SummCmd::Chat{scope,turns}`, `ChatScope::{Meeting(id),CrossMeeting}`,
+`Event::ChatReply{scope,reply}`, `chat_one` with a **resident model** across turns
+(freed before one-shot jobs); per-meeting context = transcript or its compression
+(generated if too long). GUI: `ChatPanel` under a session + the Overview; one
+conversation signal reset on scope change. Remaining (optional): recency/staleness
+nudge, mark-done/edit of overview items.
 Full plan: docs/PLAN.md Phase 23. Related: [[diarization-design]], [[feature-flags]].

@@ -35,6 +35,10 @@ storage happen on your machine.
   by compressing each meeting then synthesizing them in one pass (with a
   hierarchical fallback at scale) — all local. Generate/refresh from the 📊
   Overview view; in the CLI, `zord overview`.
+- 💬 **Chat with your meetings** *(optional)* — ask questions grounded in your
+  data: per-meeting Q&A (in a session) and cross-meeting Q&A (in the Overview).
+  Answers come only from the local transcripts/compressions — it says when
+  something wasn't discussed rather than inventing it.
 - 🗣 **Per-speaker diarization** *(optional)* — split the "Others" channel into
   **Speaker 1/2/3** (sherpa-onnx), rename them, and see them colored in the
   transcript + exports. Runs offline after recording (and on demand); an optional

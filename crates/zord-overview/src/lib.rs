@@ -64,67 +64,14 @@ pub fn synthesize(
     let model_path: PathBuf = resolve_model_path(settings)?;
     let summarizer = Summarizer::load(&model_path)?;
 
-    // Gather the most recent meetings that have a transcript, newest first,
-    // reusing stored compressions and generating (+ persisting) any missing.
-    let max = settings.overview_max_meetings.max(1) as usize;
-    let mut digests: Vec<(String, String)> = Vec::new(); // (header, compressed)
-    let mut generated = 0usize;
-    for s in store.list_sessions()? {
-        if digests.len() >= max {
-            break;
-        }
-        let compressed = match store.get_compressed(&s.id)? {
-            Some(c) if !c.trim().is_empty() => c,
-            _ => {
-                let segs = store.segments(&s.id)?;
-                if segs.is_empty() {
-                    continue; // nothing recorded — skip
-                }
-                generated += 1;
-                progress(&format!(
-                    "Compressing meeting {} ({})…",
-                    generated,
-                    meeting_title(&s)
-                ));
-                let names = store.speaker_names(&s.id).unwrap_or_default();
-                let transcript = segs
-                    .iter()
-                    .map(|seg| format!("{}: {}", seg.speaker_label(&names), seg.text))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let c = summarizer.compress(
-                    &transcript,
-                    zord_config::compress_prompt(),
-                    settings.compress_ctx,
-                )?;
-                store.set_compressed(&s.id, &c)?;
-                c
-            }
-        };
-        digests.push((meeting_header(&s), compressed));
-    }
-
+    // Gather the most recent meetings (lazily compressing any missing), then fit
+    // them to the synthesis context (condensing in groups if they overflow).
+    let digests = collect_digests(&store, &summarizer, settings, progress)?;
     if digests.is_empty() {
         anyhow::bail!("no meetings with transcripts to synthesize yet");
     }
-
-    // Fit the assembled compressions to the synthesis context, condensing in
-    // groups (hierarchical) if they overflow.
     let n_ctx = settings.overview_ctx.clamp(8192, 131_072);
-    let budget = input_budget(n_ctx, 2048);
-    let assembled = assemble(&digests);
-    let tokens = summarizer.count_tokens(&assembled)?;
-    let input = if tokens <= budget {
-        assembled
-    } else {
-        progress(&format!(
-            "{} meetings (~{} tokens) exceed the {}-token context — condensing in groups…",
-            digests.len(),
-            tokens,
-            n_ctx
-        ));
-        hierarchical_reduce(&summarizer, &digests, budget, settings, progress)?
-    };
+    let input = fit_to_budget(&summarizer, &digests, n_ctx, 2048, settings, progress)?;
 
     progress("Synthesizing the cross-meeting overview…");
     let text = summarizer.generate(&input, zord_config::overview_prompt(), GenOpts::overview(n_ctx))?;
@@ -146,6 +93,94 @@ pub fn synthesize(
     _progress: &mut dyn FnMut(&str),
 ) -> Result<Overview> {
     anyhow::bail!("overview synthesis needs the summaries feature (build with `--features summaries`)")
+}
+
+/// Build the grounding context for **cross-meeting chat** (Phase 23d): gather the
+/// recent meetings' compressions (lazily generating any missing, with the given
+/// loaded model) and fit them to `n_ctx`. Returns `(context, meetings_covered)`.
+#[cfg(feature = "llama")]
+pub fn cross_meeting_context(
+    store: &Store,
+    summarizer: &zord_summarize::Summarizer,
+    settings: &Settings,
+    n_ctx: u32,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(String, usize)> {
+    let digests = collect_digests(store, summarizer, settings, progress)?;
+    if digests.is_empty() {
+        anyhow::bail!("no meetings with transcripts yet");
+    }
+    let meetings = digests.len();
+    let context = fit_to_budget(summarizer, &digests, n_ctx.clamp(8192, 131_072), 768, settings, progress)?;
+    Ok((context, meetings))
+}
+
+/// Gather up to `overview_max_meetings` recent meetings as `(header, compressed)`
+/// pairs (newest first), reusing each stored compression and lazily generating +
+/// persisting any that are missing.
+#[cfg(feature = "llama")]
+fn collect_digests(
+    store: &Store,
+    summarizer: &zord_summarize::Summarizer,
+    settings: &Settings,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Vec<(String, String)>> {
+    let max = settings.overview_max_meetings.max(1) as usize;
+    let mut digests: Vec<(String, String)> = Vec::new();
+    let mut generated = 0usize;
+    for s in store.list_sessions()? {
+        if digests.len() >= max {
+            break;
+        }
+        let compressed = match store.get_compressed(&s.id)? {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => {
+                let segs = store.segments(&s.id)?;
+                if segs.is_empty() {
+                    continue; // nothing recorded — skip
+                }
+                generated += 1;
+                progress(&format!("Compressing meeting {} ({})…", generated, meeting_title(&s)));
+                let names = store.speaker_names(&s.id).unwrap_or_default();
+                let transcript = segs
+                    .iter()
+                    .map(|seg| format!("{}: {}", seg.speaker_label(&names), seg.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let c = summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+                store.set_compressed(&s.id, &c)?;
+                c
+            }
+        };
+        digests.push((meeting_header(&s), compressed));
+    }
+    Ok(digests)
+}
+
+/// Assemble `digests` and, if over the `n_ctx` input budget (after reserving
+/// `reserve_out` for generation), condense them hierarchically until they fit.
+#[cfg(feature = "llama")]
+fn fit_to_budget(
+    summarizer: &zord_summarize::Summarizer,
+    digests: &[(String, String)],
+    n_ctx: u32,
+    reserve_out: usize,
+    settings: &Settings,
+    progress: &mut dyn FnMut(&str),
+) -> Result<String> {
+    let budget = input_budget(n_ctx, reserve_out);
+    let assembled = assemble(digests);
+    let tokens = summarizer.count_tokens(&assembled)?;
+    if tokens <= budget {
+        return Ok(assembled);
+    }
+    progress(&format!(
+        "{} meetings (~{} tokens) exceed the {}-token context — condensing in groups…",
+        digests.len(),
+        tokens,
+        n_ctx
+    ));
+    hierarchical_reduce(summarizer, digests, budget, settings, progress)
 }
 
 #[cfg(feature = "llama")]

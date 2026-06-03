@@ -62,6 +62,36 @@ impl GenOpts {
             max_transcript_chars: input_tokens * 7 / 2,
         }
     }
+
+    /// Grounded chat (Phase 23d): configurable context for the grounding material
+    /// + conversation, with a short-ish answer budget.
+    pub fn chat(n_ctx: u32) -> Self {
+        let n_ctx = n_ctx.clamp(8192, 131_072);
+        const OUT: usize = 768;
+        let reserve = OUT + 512;
+        let input_tokens = (n_ctx as usize).saturating_sub(reserve);
+        Self {
+            n_ctx,
+            max_new_tokens: OUT,
+            max_transcript_chars: input_tokens * 7 / 2,
+        }
+    }
+}
+
+/// A turn's author in a [`Summarizer::chat`] conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+impl ChatRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            ChatRole::User => "user",
+            ChatRole::Assistant => "assistant",
+        }
+    }
 }
 
 /// Selectable summary LLM (Qwen2.5 Instruct GGUF, Q4_K_M).
@@ -316,13 +346,29 @@ impl Summarizer {
     /// a "Transcript:" prefix). Shared by [`summarize`], [`compress`], and the
     /// Overview synthesis.
     pub fn generate(&self, user_content: &str, system_prompt: &str, opts: GenOpts) -> Result<String> {
-        let backend = backend()?;
         let user = truncate_chars(user_content, opts.max_transcript_chars);
-
         let messages = vec![
             LlamaChatMessage::new("system".to_string(), system_prompt.to_string())?,
             LlamaChatMessage::new("user".to_string(), user)?,
         ];
+        self.complete(messages, opts)
+    }
+
+    /// Multi-turn chat grounded in `system_prompt` (which carries the context to
+    /// answer from) over `turns` of alternating user/assistant messages. Returns
+    /// the assistant's next reply.
+    pub fn chat(&self, system_prompt: &str, turns: &[(ChatRole, String)], n_ctx: u32) -> Result<String> {
+        let mut messages = vec![LlamaChatMessage::new("system".to_string(), system_prompt.to_string())?];
+        for (role, content) in turns {
+            messages.push(LlamaChatMessage::new(role.as_str().to_string(), content.clone())?);
+        }
+        self.complete(messages, GenOpts::chat(n_ctx))
+    }
+
+    /// Apply the model's chat template to `messages`, prefill, and greedily decode
+    /// up to `opts.max_new_tokens`. The shared core under [`generate`]/[`chat`].
+    fn complete(&self, messages: Vec<LlamaChatMessage>, opts: GenOpts) -> Result<String> {
+        let backend = backend()?;
         let tmpl = self
             .model
             .chat_template(None)
@@ -331,7 +377,7 @@ impl Summarizer {
 
         let tokens = self.model.str_to_token(&prompt, AddBos::Always)?;
         if tokens.len() as u32 >= opts.n_ctx {
-            return Err(anyhow!("transcript too long for the model context"));
+            return Err(anyhow!("input too long for the model context window"));
         }
 
         let n_ctx = opts.n_ctx;

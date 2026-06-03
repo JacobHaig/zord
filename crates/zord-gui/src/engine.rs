@@ -79,8 +79,20 @@ pub enum Event {
     /// The cross-meeting Overview rollup (loaded or freshly synthesized)
     /// (Phase 23). `None` = none generated yet.
     Overview(Option<OverviewData>),
+    /// An assistant reply to a chat question (Phase 23d). `scope` says which
+    /// conversation it belongs to. (Only produced in `summaries` builds.)
+    #[allow(dead_code)]
+    ChatReply { scope: ChatScope, reply: String },
     /// Custom names for diarized speakers in the viewed session (index → name).
     Speakers(std::collections::HashMap<i32, String>),
+}
+
+/// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
+/// across all recent meetings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatScope {
+    Meeting(String),
+    CrossMeeting,
 }
 
 /// The cross-meeting Overview rollup for the GUI (feature-independent mirror of
@@ -240,6 +252,10 @@ pub enum SummCmd {
     Compress(String),
     /// Synthesize the cross-meeting Overview (Phase 23).
     Overview,
+    /// Answer a chat question grounded in a meeting / all meetings (Phase 23d).
+    /// `turns` is the full conversation so far (incl. the new question last);
+    /// each turn is `(is_user, text)`.
+    Chat { scope: ChatScope, turns: Vec<(bool, String)> },
 }
 
 /// Handle the GUI keeps to drive the engine. Cheaply clonable.
@@ -295,12 +311,29 @@ impl Engine {
 /// Worker that generates session summaries (local LLM, heavy). Real impl only
 /// in `summaries` builds; otherwise it reports a friendly notice.
 fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_path: PathBuf) {
+    // A chat keeps its model resident across turns so follow-ups don't reload it.
+    // One-shot jobs (summarize/compress/overview) load + drop their own model, so
+    // we free the resident one first to keep peak RAM at a single model.
+    #[cfg(feature = "summaries")]
+    let mut chat_model: Option<(PathBuf, zord_summarize::Summarizer)> = None;
     while let Ok(cmd) = rx.recv() {
         #[cfg(feature = "summaries")]
         match cmd {
-            SummCmd::Summarize(id) => summarize_one(&id, &ev, &db_path),
-            SummCmd::Compress(id) => compress_one(&id, &ev, &db_path),
-            SummCmd::Overview => overview_one(&ev, &db_path),
+            SummCmd::Summarize(id) => {
+                chat_model = None;
+                summarize_one(&id, &ev, &db_path);
+            }
+            SummCmd::Compress(id) => {
+                chat_model = None;
+                compress_one(&id, &ev, &db_path);
+            }
+            SummCmd::Overview => {
+                chat_model = None;
+                overview_one(&ev, &db_path);
+            }
+            SummCmd::Chat { scope, turns } => {
+                chat_one(&mut chat_model, scope, turns, &ev, &db_path);
+            }
         }
         #[cfg(not(feature = "summaries"))]
         {
@@ -405,6 +438,133 @@ fn overview_one(ev: &UnboundedSender<Event>, db_path: &PathBuf) {
         }
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("overview failed: {e}")));
+        }
+    }
+}
+
+/// Answer a chat question grounded in a meeting (its transcript, or compression
+/// when the transcript is too big) or across all meetings (Phase 23d). Keeps the
+/// model resident in `cache` across turns.
+#[cfg(feature = "summaries")]
+fn chat_one(
+    cache: &mut Option<(PathBuf, zord_summarize::Summarizer)>,
+    scope: ChatScope,
+    turns: Vec<(bool, String)>,
+    ev: &UnboundedSender<Event>,
+    db_path: &PathBuf,
+) {
+    use zord_summarize::ChatRole;
+    let settings = zord_config::Settings::load();
+    let Some(model_path) = resolve_summary_model_path(&settings, ev) else {
+        return;
+    };
+    // (Re)load the model only on a cache miss (different model selected).
+    if cache.as_ref().map(|(p, _)| p != &model_path).unwrap_or(true) {
+        match zord_summarize::Summarizer::load(&model_path) {
+            Ok(s) => *cache = Some((model_path.clone(), s)),
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("chat model: {e}")));
+                return;
+            }
+        }
+    }
+    let summarizer = &cache.as_ref().expect("model just loaded").1;
+
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
+            return;
+        }
+    };
+
+    // Build the grounding context + pick the context window by scope.
+    let (context, n_ctx) = match &scope {
+        ChatScope::Meeting(id) => match meeting_chat_context(&store, summarizer, &settings, id, ev) {
+            Some(c) => (c, settings.compress_ctx),
+            None => return,
+        },
+        ChatScope::CrossMeeting => {
+            let mut progress = |note: &str| {
+                let _ = ev.send(Event::Notice(note.to_string()));
+            };
+            match zord_overview::cross_meeting_context(
+                &store,
+                summarizer,
+                &settings,
+                settings.overview_ctx,
+                &mut progress,
+            ) {
+                Ok((c, _)) => (c, settings.overview_ctx),
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!("chat: {e}")));
+                    return;
+                }
+            }
+        }
+    };
+
+    let system = format!("{}\n\n=== Context ===\n{}", zord_config::chat_system_prompt(), context);
+    let mapped: Vec<(ChatRole, String)> = turns
+        .into_iter()
+        .map(|(is_user, t)| (if is_user { ChatRole::User } else { ChatRole::Assistant }, t))
+        .collect();
+    let _ = ev.send(Event::Notice("Thinking…".to_string()));
+    match summarizer.chat(&system, &mapped, n_ctx) {
+        Ok(reply) => {
+            let _ = ev.send(Event::ChatReply { scope, reply });
+        }
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("chat failed: {e}")));
+        }
+    }
+}
+
+/// Grounding context for a single meeting: the full transcript when it fits the
+/// chat context, otherwise its compression (generated + cached if missing).
+#[cfg(feature = "summaries")]
+fn meeting_chat_context(
+    store: &Store,
+    summarizer: &zord_summarize::Summarizer,
+    settings: &zord_config::Settings,
+    session_id: &str,
+    ev: &UnboundedSender<Event>,
+) -> Option<String> {
+    let segs = store.segments(session_id).unwrap_or_default();
+    if segs.is_empty() {
+        let _ = ev.send(Event::Notice("This session has no transcript to chat about.".to_string()));
+        return None;
+    }
+    let names = store.speaker_names(session_id).unwrap_or_default();
+    let transcript = segs
+        .iter()
+        .map(|s| format!("{}: {}", s.speaker_label(&names), s.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Reserve headroom (chat output + conversation + prompt) within the window.
+    let budget = (settings.compress_ctx as usize).saturating_sub(1400);
+    let fits = summarizer.count_tokens(&transcript).map(|t| t < budget).unwrap_or(false);
+    if fits {
+        return Some(format!("Meeting transcript:\n{transcript}"));
+    }
+
+    // Too long: fall back to the (cached) compression, generating it if needed.
+    if let Ok(Some(c)) = store.get_compressed(session_id) {
+        if !c.trim().is_empty() {
+            return Some(format!("Meeting compression (dense):\n{c}"));
+        }
+    }
+    let _ = ev.send(Event::Notice("Long meeting — compressing it first to chat…".to_string()));
+    match summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
+        Ok(c) => {
+            let _ = store.set_compressed(session_id, &c);
+            let _ = ev.send(Event::Compressed(Some(c.clone())));
+            Some(format!("Meeting compression (dense):\n{c}"))
+        }
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("chat context: {e}")));
+            None
         }
     }
 }
@@ -1146,6 +1306,15 @@ fn spawn_proc(
         let mut produced: u64 = 0;
         // Smoothed loudness state for the level meter (see constants above).
         let mut level = 0.0f32;
+        // Throttle level emission to a fixed cadence, *decoupled from the capture
+        // buffer rate*. The smoothing below still updates `level` every buffer (so
+        // it stays accurate), but we only forward it to the GUI ~30×/s. Without
+        // this, macOS CoreAudio's many small mic buffers (hundreds/sec) flood the
+        // unbounded event channel faster than the UI drains it, so the meter lags
+        // tens of seconds behind real audio (Windows' larger WASAPI buffers don't
+        // hit the limit, which is why the bug was macOS-only).
+        let level_send_interval = std::time::Duration::from_millis(33);
+        let mut last_level_send = std::time::Duration::ZERO;
         // Opt-in meter diagnostics (set ZORD_METER_DEBUG=1).
         let debug = std::env::var("ZORD_METER_DEBUG").is_ok();
         let (mut dbg_bufs, mut dbg_samps) = (0u64, 0u64);
@@ -1171,7 +1340,14 @@ fn spawn_proc(
             let tau = if target > level { LEVEL_ATTACK_S } else { LEVEL_RELEASE_S };
             let alpha = 1.0 - (-dt / tau).exp();
             level += (target - level) * alpha;
-            let _ = ev.send(Event::Level { source, level });
+            // Emit at most ~30×/s (see `level_send_interval` above). The meter
+            // tracks moment-to-moment because `level` is integrated every buffer;
+            // we just don't enqueue an event per buffer.
+            let elapsed = session_start.elapsed();
+            if elapsed.saturating_sub(last_level_send) >= level_send_interval {
+                let _ = ev.send(Event::Level { source, level });
+                last_level_send = elapsed;
+            }
 
             if debug {
                 dbg_bufs += 1;

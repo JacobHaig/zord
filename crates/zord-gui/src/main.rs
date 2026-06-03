@@ -8,7 +8,8 @@ mod osutil;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{
-    DbCmd, Engine, Event, ModelCmd, ModelInfo, OverviewData, RecorderCmd, Status, SummCmd,
+    ChatScope, DbCmd, Engine, Event, ModelCmd, ModelInfo, OverviewData, RecorderCmd, Status,
+    SummCmd,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -247,6 +248,12 @@ fn MainApp() -> Element {
     // Cross-meeting Overview rollup (Phase 23c) + whether a synthesis is running.
     let mut overview = use_signal(|| Option::<OverviewData>::None);
     let mut overview_busy = use_signal(|| false);
+    // Chat (Phase 23d): the active conversation (per-meeting or cross-meeting),
+    // its input buffer, busy flag, and which scope the history belongs to.
+    let mut chat = use_signal(Vec::<(bool, String)>::new);
+    let chat_input = use_signal(String::new);
+    let mut chat_busy = use_signal(|| false);
+    let chat_scope = use_signal(|| Option::<ChatScope>::None);
     // Custom names for diarized speakers in the viewed session (index → name).
     let mut speaker_names = use_signal(std::collections::HashMap::<i32, String>::new);
     // Session id currently being renamed (+ its edit buffer); pending delete.
@@ -313,6 +320,13 @@ fn MainApp() -> Element {
                         overview.set(v);
                         overview_busy.set(false);
                     }
+                    Event::ChatReply { scope, reply } => {
+                        // Only land the reply if it belongs to the open conversation.
+                        if chat_scope.peek().as_ref() == Some(&scope) {
+                            chat.write().push((false, reply));
+                        }
+                        chat_busy.set(false);
+                    }
                     Event::Speakers(v) => speaker_names.set(v),
                 }
             }
@@ -357,6 +371,15 @@ fn MainApp() -> Element {
         }
     });
 
+    // Keep the chat log pinned to the newest message.
+    use_effect(move || {
+        let _ = chat.read().len();
+        let _ = chat_busy.read();
+        let _ = document::eval(
+            "const c=document.querySelector('.chat-log'); if(c){c.scrollTop=c.scrollHeight;}",
+        );
+    });
+
     let st = status.read().clone();
     let recording = matches!(
         st,
@@ -382,6 +405,7 @@ fn MainApp() -> Element {
                 summary.set(None);
                 compressed.set(None);
                 show_compressed.set(false);
+                reset_chat(chat, chat_input, chat_busy, chat_scope);
                 speaker_names.write().clear();
                 mic_muted.set(false);
                 view.set(View::Live);
@@ -435,6 +459,7 @@ fn MainApp() -> Element {
         let engine = engine.clone();
         move |_| {
             view.set(View::Overview);
+            reset_chat(chat, chat_input, chat_busy, chat_scope);
             let _ = engine.db_tx.send(DbCmd::LoadOverview);
         }
     };
@@ -534,6 +559,7 @@ fn MainApp() -> Element {
                                                 summary.set(None);
                                                 compressed.set(None);
                                                 show_compressed.set(false);
+                                                reset_chat(chat, chat_input, chat_busy, chat_scope);
                                                 let _ = eng_open.db_tx.send(DbCmd::Load(id_open.clone()));
                                             },
                                             div { class: "session-title", "{title}" }
@@ -823,6 +849,37 @@ fn MainApp() -> Element {
                         SearchResultsView { results: search_results }
                     } else {
                         TranscriptView { segments, speaker_names, on_edit: on_edit_segment }
+                    }
+                }
+
+                // Chat (Phase 23d): per-meeting in a session, cross-meeting in the
+                // Overview. Shares one conversation signal (reset when the scope
+                // changes), so only the visible panel is active.
+                if let View::Session(id) = &*view.read() {
+                    {
+                        let id = id.clone();
+                        let engine = engine.clone();
+                        rsx! {
+                            ChatPanel {
+                                title: "💬 Ask this meeting".to_string(),
+                                placeholder: "Ask about this meeting — decisions, action items, who said what…".to_string(),
+                                chat, input: chat_input, busy: chat_busy,
+                                on_send: move |_| submit_chat(&engine, ChatScope::Meeting(id.clone()), chat, chat_input, chat_scope, chat_busy),
+                            }
+                        }
+                    }
+                }
+                if *view.read() == View::Overview {
+                    {
+                        let engine = engine.clone();
+                        rsx! {
+                            ChatPanel {
+                                title: "💬 Ask across your meetings".to_string(),
+                                placeholder: "Ask across recent meetings — where's project X, what do I owe, open questions…".to_string(),
+                                chat, input: chat_input, busy: chat_busy,
+                                on_send: move |_| submit_chat(&engine, ChatScope::CrossMeeting, chat, chat_input, chat_scope, chat_busy),
+                            }
+                        }
                     }
                 }
             }
@@ -1727,6 +1784,95 @@ fn split_sections(md: &str) -> (String, Vec<(String, String)>) {
         sections.push(s);
     }
     (preamble.trim().to_string(), sections.into_iter().map(|(h, b)| (h, b.trim().to_string())).collect())
+}
+
+/// A grounded chat panel (Phase 23d): a scrolling Q&A log + an input row. The
+/// conversation lives in the parent's signals; `on_send` submits the input with
+/// the right scope.
+#[component]
+fn ChatPanel(
+    title: String,
+    placeholder: String,
+    chat: Signal<Vec<(bool, String)>>,
+    input: Signal<String>,
+    busy: Signal<bool>,
+    on_send: EventHandler<()>,
+) -> Element {
+    let is_busy = busy();
+    rsx! {
+        div { class: "chat",
+            div { class: "chat-title", "{title}" }
+            div { class: "chat-log",
+                if chat.read().is_empty() && !is_busy {
+                    div { class: "chat-hint", "{placeholder}" }
+                }
+                for (i, (is_user, text)) in chat.read().iter().enumerate() {
+                    div {
+                        key: "{i}",
+                        class: if *is_user { "chat-msg user" } else { "chat-msg bot" },
+                        span { class: "chat-text", "{text}" }
+                    }
+                }
+                if is_busy {
+                    div { class: "chat-msg bot", span { class: "chat-text dim", "Thinking…" } }
+                }
+            }
+            div { class: "chat-input-row",
+                input {
+                    class: "chat-input",
+                    placeholder: "Ask a question…",
+                    value: "{input}",
+                    disabled: is_busy,
+                    oninput: move |e| input.set(e.value()),
+                    onkeydown: move |e| {
+                        if e.key() == Key::Enter {
+                            on_send.call(());
+                        }
+                    },
+                }
+                button {
+                    class: "mbtn",
+                    disabled: is_busy,
+                    onclick: move |_| on_send.call(()),
+                    "Ask"
+                }
+            }
+        }
+    }
+}
+
+/// Submit the chat input as a new user turn for `scope` and dispatch it.
+fn submit_chat(
+    engine: &Engine,
+    scope: ChatScope,
+    mut chat: Signal<Vec<(bool, String)>>,
+    mut input: Signal<String>,
+    mut chat_scope: Signal<Option<ChatScope>>,
+    mut busy: Signal<bool>,
+) {
+    let q = input.peek().trim().to_string();
+    if q.is_empty() || *busy.peek() {
+        return;
+    }
+    input.set(String::new());
+    chat.write().push((true, q));
+    chat_scope.set(Some(scope.clone()));
+    busy.set(true);
+    let turns = chat.peek().clone();
+    let _ = engine.summ_tx.send(SummCmd::Chat { scope, turns });
+}
+
+/// Clear the active conversation (called when the chat scope changes).
+fn reset_chat(
+    mut chat: Signal<Vec<(bool, String)>>,
+    mut input: Signal<String>,
+    mut busy: Signal<bool>,
+    mut scope: Signal<Option<ChatScope>>,
+) {
+    chat.write().clear();
+    input.set(String::new());
+    busy.set(false);
+    scope.set(None);
 }
 
 fn source_class(s: Source) -> &'static str {

@@ -107,6 +107,18 @@ fn default_overview_max_meetings() -> u32 {
     50
 }
 
+/// System-prompt instructions for grounded **chat** (Phase 23d) — answering
+/// questions about a meeting or across meetings. The caller appends the context
+/// (a transcript / compression / the assembled compressions) after these.
+pub fn chat_system_prompt() -> &'static str {
+    "You are a helpful assistant answering the user's questions about their \
+     meeting(s). The user is \"Me\". Answer ONLY from the context provided below \
+     — do not use outside knowledge or invent facts, owners, dates, or decisions. \
+     If the answer isn't in the context, say so plainly (e.g. it wasn't discussed). \
+     Be direct and specific; when it helps, attribute to a speaker and cite the \
+     meeting by its date/title. Keep answers concise."
+}
+
 /// System prompt for the cross-meeting **Overview** synthesis (Phase 23). Input
 /// is the per-meeting dense compressions (each headed by date + title), newest
 /// first; output is one holistic, project-grouped Markdown rollup oriented around

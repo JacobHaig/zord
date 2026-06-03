@@ -218,6 +218,22 @@ body {
 .overview-sec-head { cursor: pointer; font-weight: 600; font-size: 14px; padding: 4px 0; outline: none; }
 .overview-sec-body { white-space: pre-wrap; font-size: 13px; line-height: 1.55; margin-top: 6px; }
 
+/* Chat (per-meeting + cross-meeting Q&A) */
+.chat { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.chat-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.chat-log { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow-y: auto; }
+.chat-hint { color: var(--muted); font-size: 13px; font-style: italic; }
+.chat-msg { display: flex; max-width: 85%; }
+.chat-msg.user { align-self: flex-end; }
+.chat-msg.bot { align-self: flex-start; }
+.chat-text { white-space: pre-wrap; font-size: 13px; line-height: 1.5; padding: 8px 12px; border-radius: 12px; }
+.chat-msg.user .chat-text { background: var(--me); color: #07121f; }
+.chat-msg.bot .chat-text { background: var(--panel); border: 1px solid var(--line); }
+.chat-text.dim { color: var(--muted); font-style: italic; }
+.chat-input-row { display: flex; gap: 8px; }
+.chat-input { flex: 1; padding: 9px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); font-size: 13px; }
+.chat-input:focus { outline: none; border-color: var(--me); }
+
 /* Transcript */
 .transcript { flex: 1; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px; }
 .empty { color: var(--muted); padding: 24px; text-align: center; }
