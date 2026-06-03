@@ -317,8 +317,11 @@ impl Summarizer {
         {
             params = params.with_n_gpu_layers(999); // offload all layers to Metal
         }
+        let size_mb = std::fs::metadata(model_path).map(|m| m.len() / 1_048_576).unwrap_or(0);
+        breadcrumb(&format!("load:start {} ({size_mb} MB)", model_path.display()));
         let model = LlamaModel::load_from_file(backend, model_path, &params)
             .with_context(|| format!("loading {model_path:?}"))?;
+        breadcrumb("load:done");
         Ok(Self { model })
     }
 
@@ -381,6 +384,13 @@ impl Summarizer {
         }
 
         let n_ctx = opts.n_ctx;
+        // Breadcrumbs flush to disk so a hard native crash (e.g. CPU-instruction
+        // fault or OOM during CPU inference) still leaves the last phase reached.
+        breadcrumb(&format!(
+            "infer:ctx-alloc n_ctx={n_ctx} prompt_tokens={} max_new={}",
+            tokens.len(),
+            opts.max_new_tokens
+        ));
         let mut ctx = self
             .model
             .new_context(backend, LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx)))?;
@@ -390,7 +400,9 @@ impl Summarizer {
         for (i, tok) in tokens.iter().enumerate() {
             batch.add(*tok, i as i32, &[0], i == last)?;
         }
+        breadcrumb("infer:prefill");
         ctx.decode(&mut batch)?;
+        breadcrumb("infer:prefill-done");
 
         let mut sampler = LlamaSampler::greedy();
         let mut out = String::new();
@@ -408,8 +420,31 @@ impl Summarizer {
             n_cur += 1;
             ctx.decode(&mut batch)?;
         }
+        breadcrumb("infer:done");
 
         Ok(out.trim().to_string())
+    }
+}
+
+/// Append a phase marker to `<app-data>/logs/llm-trace.log`, flushed + synced so
+/// it survives even a hard native crash (the app vanishes with no Rust panic).
+/// The tail of that file tells us exactly how far the last LLM run got.
+fn breadcrumb(line: &str) {
+    tracing::info!(target: "zord::llm", "{line}");
+    let Some(dir) = directories::ProjectDirs::from("", "", "Zord").map(|d| d.data_dir().join("logs"))
+    else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("llm-trace.log"))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+        let _ = f.flush();
+        let _ = f.sync_all();
     }
 }
 

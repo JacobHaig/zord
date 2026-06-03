@@ -44,6 +44,7 @@ fn main() {
 /// flush (hence it lives in `main`).
 fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::prelude::*;
+    install_panic_hook();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "zord=info,whisper_rs=warn".into());
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
@@ -66,6 +67,33 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
             None
         }
     }
+}
+
+/// Capture Rust panics to a flushed `<app-data>/logs/crash.log` (and the tracing
+/// log). On the Windows GUI build there's no console, and the buffered file
+/// appender can lose a panic on exit — so a panic otherwise just closes the
+/// window silently. This makes "the app vanished" diagnosable: if crash.log has a
+/// fresh entry it was a Rust panic; if only `llm-trace.log` advanced with nothing
+/// in crash.log, it was a native crash (e.g. CPU-instruction fault / OOM in
+/// llama.cpp during CPU inference).
+fn install_panic_hook() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("PANIC: {info}");
+        tracing::error!("{msg}");
+        if let Ok(dir) = zord_config::logs_dir() {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{msg}");
+                let _ = f.flush();
+            }
+        }
+        prev(info);
+    }));
 }
 
 #[derive(Clone, PartialEq)]
