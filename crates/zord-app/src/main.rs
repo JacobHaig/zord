@@ -354,9 +354,19 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let diarizer =
         zord_diarize::Diarizer::load(model, num_speakers, settings.diarize_threshold.clamp(0.1, 0.95))?;
     let spans = diarizer.diarize(&samples)?;
+    if spans.is_empty() {
+        eprintln!(
+            "No distinct speakers detected (audio may be too short, mostly silent, or a single \
+             speaker). Existing labels left unchanged. Try a lower --threshold via settings or set \
+             the expected speaker count."
+        );
+        return Ok(());
+    }
 
+    // Compute assignments first; only clear + write if we matched something, so a
+    // no-result run never wipes existing speaker labels.
     let segs = store.segments(session_id)?;
-    store.clear_speakers(session_id)?;
+    let mut assignments: Vec<(i64, i32)> = Vec::new();
     let mut speakers = std::collections::HashSet::new();
     for seg in segs.iter().filter(|s| s.source == zord_core::Source::Others) {
         let Some(id) = seg.id else { continue };
@@ -370,9 +380,17 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
             .filter(|(_, ov)| *ov > 0)
             .max_by_key(|(_, ov)| *ov);
         if let Some((speaker, _)) = best {
-            store.set_segment_speaker(id, Some(speaker))?;
+            assignments.push((id, speaker));
             speakers.insert(speaker);
         }
+    }
+    if assignments.is_empty() {
+        eprintln!("Found speech but couldn't align speakers to transcript lines; left unchanged.");
+        return Ok(());
+    }
+    store.clear_speakers(session_id)?;
+    for (id, speaker) in assignments {
+        store.set_segment_speaker(id, Some(speaker))?;
     }
     println!("Identified {} speaker(s) in session '{session_id}'.", speakers.len());
     Ok(())

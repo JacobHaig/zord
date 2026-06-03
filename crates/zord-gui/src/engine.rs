@@ -831,38 +831,64 @@ fn diarize_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedS
     }
     #[cfg(feature = "diarization")]
     {
-        let store = match Store::open(db_path) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = ev.send(Event::Notice(format!("db: {e}")));
-                return;
-            }
-        };
-        let session = match store.get_session(session_id) {
-            Ok(Some(s)) => s,
-            _ => {
-                let _ = ev.send(Event::Notice("No such session.".to_string()));
-                return;
-            }
-        };
-        let Some(prefix) = session.audio_path else {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        // Run the work catching any Rust panic, then ALWAYS emit a terminal
+        // Event::Speakers so the GUI's "Identifying…" busy state clears no matter
+        // how this exits (success, no-result, error, or panic) — otherwise a
+        // failed run leaves the button stuck and the user sees nothing happen.
+        let ran = catch_unwind(AssertUnwindSafe(|| {
+            diarize_session_inner(db_path, session_id, ev)
+        }));
+        if ran.is_err() {
             let _ = ev.send(Event::Notice(
-                "This session didn't retain audio, so speakers can't be re-identified. Turn on \
-                 Settings → Speakers → \"Keep audio for re-diarization\" (or Keep audio) before \
-                 recording to enable re-running with a different model."
+                "Speaker identification crashed on this recording — try a different speaker \
+                 model (Settings → Speakers) or set the expected speaker count, then retry."
                     .to_string(),
             ));
-            return;
-        };
-        let wav = PathBuf::from(format!("{prefix}.others.wav"));
-        if !wav.exists() {
-            let _ = ev.send(Event::Notice(
-                "The 'Others' audio for this session is missing.".to_string(),
-            ));
+        }
+        if let Ok(store) = Store::open(db_path) {
+            let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
+        }
+    }
+}
+
+/// The actual on-demand diarization work; wrapped by [`diarize_session_ondemand`]
+/// for panic-safety + guaranteed busy-state clearing.
+#[cfg(feature = "diarization")]
+fn diarize_session_inner(db_path: &PathBuf, session_id: &str, ev: &UnboundedSender<Event>) {
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
             return;
         }
-        apply_diarization(&store, session_id, &wav, ev);
+    };
+    let session = match store.get_session(session_id) {
+        Ok(Some(s)) => s,
+        _ => {
+            let _ = ev.send(Event::Notice("No such session.".to_string()));
+            return;
+        }
+    };
+    let Some(prefix) = session.audio_path else {
+        let _ = ev.send(Event::Notice(
+            "This session didn't keep its audio, so speakers can't be identified after the fact. \
+             Turn on Settings → Speakers → \"Keep audio for re-diarization\" before recording \
+             (speakers are still identified automatically right after a recording stops)."
+                .to_string(),
+        ));
+        return;
+    };
+    let wav = PathBuf::from(format!("{prefix}.others.wav"));
+    if !wav.exists() {
+        let _ = ev.send(Event::Notice(
+            "The 'Others' audio for this session is missing from disk, so speakers can't be \
+             re-identified."
+                .to_string(),
+        ));
+        return;
     }
+    apply_diarization(&store, session_id, &wav, ev);
 }
 
 /// Load the "Others" WAV, run the offline diarizer, and write speaker labels
@@ -925,9 +951,24 @@ fn apply_diarization(
         }
     };
 
+    // The diarizer ran but found no distinct speaker segments (short / mostly
+    // silent / single-speaker audio, or clustering collapsed at this threshold).
+    // Bail WITHOUT touching existing labels so a no-result run isn't destructive.
+    if spans.is_empty() {
+        let _ = ev.send(Event::Notice(
+            "No distinct speakers were detected — the recording may be too short, mostly \
+             silence, or a single speaker. Try lowering the clustering threshold or setting the \
+             expected speaker count in Settings → Speakers."
+                .to_string(),
+        ));
+        return;
+    }
+
     // Map speaker spans onto the stored "Others" segments by max time overlap.
+    // Compute all assignments first; only clear + write if we actually matched
+    // something, so a failed mapping never wipes existing speaker labels/names.
     let segs = store.segments(session_id).unwrap_or_default();
-    let _ = store.clear_speakers(session_id);
+    let mut assignments: Vec<(i64, i32)> = Vec::new();
     let mut speakers = std::collections::HashSet::new();
     for seg in segs.iter().filter(|s| s.source == Source::Others) {
         let Some(id) = seg.id else { continue };
@@ -937,9 +978,23 @@ fn apply_diarization(
             .filter(|(_, ov)| *ov > 0)
             .max_by_key(|(_, ov)| *ov);
         if let Some((speaker, _)) = best {
-            let _ = store.set_segment_speaker(id, Some(speaker));
+            assignments.push((id, speaker));
             speakers.insert(speaker);
         }
+    }
+
+    if assignments.is_empty() {
+        let _ = ev.send(Event::Notice(
+            "Found speech but couldn't align speakers to the transcript lines. Existing labels \
+             were left unchanged."
+                .to_string(),
+        ));
+        return;
+    }
+
+    let _ = store.clear_speakers(session_id);
+    for (id, speaker) in assignments {
+        let _ = store.set_segment_speaker(id, Some(speaker));
     }
 
     if let Ok(v) = store.segments(session_id) {

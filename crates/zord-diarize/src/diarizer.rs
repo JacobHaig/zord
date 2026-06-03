@@ -124,7 +124,12 @@ fn segmentation_path() -> Result<PathBuf> {
 }
 
 fn segmentation_present() -> bool {
-    segmentation_path().map(|p| p.exists()).unwrap_or(false)
+    // Require a non-empty file: a truncated/interrupted download leaves a 0-byte
+    // (or partial) model.onnx that "exists" but makes sherpa produce garbage or
+    // no segments. Treat empty as absent so it gets re-fetched.
+    segmentation_path()
+        .map(|p| p.exists() && std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false))
+        .unwrap_or(false)
 }
 
 fn embedding_path(model: EmbeddingModel) -> Result<PathBuf> {
