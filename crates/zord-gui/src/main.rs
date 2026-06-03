@@ -244,7 +244,16 @@ fn MainApp() -> Element {
     // Current session's dense-prose compression, if any (Phase 23), and whether
     // its (machine-oriented) body is expanded for the user to read.
     let mut compressed = use_signal(|| Option::<String>::None);
+    // Collapse state for the AI panels (sticky across navigation so it acts as a
+    // preference — on a small screen these can otherwise bury the transcript).
+    let mut show_summary = use_signal(|| true);
     let mut show_compressed = use_signal(|| false);
+    // Per-action busy flags for the session toolbar (set on click, cleared when
+    // the corresponding result event lands) so buttons show progress + can't be
+    // double-fired.
+    let mut summarizing = use_signal(|| false);
+    let mut compressing = use_signal(|| false);
+    let mut diarizing = use_signal(|| false);
     // Cross-meeting Overview rollup (Phase 23c) + whether a synthesis is running.
     let mut overview = use_signal(|| Option::<OverviewData>::None);
     let mut overview_busy = use_signal(|| false);
@@ -313,8 +322,14 @@ fn MainApp() -> Element {
                     model_progress.set(None);
                     download_help.set(Some(name));
                 }
-                Event::Summary(v) => summary.set(v),
-                Event::Compressed(v) => compressed.set(v),
+                Event::Summary(v) => {
+                    summary.set(v);
+                    summarizing.set(false);
+                }
+                Event::Compressed(v) => {
+                    compressed.set(v);
+                    compressing.set(false);
+                }
                 Event::Overview(v) => {
                     overview.set(v);
                     overview_busy.set(false);
@@ -326,7 +341,10 @@ fn MainApp() -> Element {
                     }
                     chat_busy.set(false);
                 }
-                Event::Speakers(v) => speaker_names.set(v),
+                Event::Speakers(v) => {
+                    speaker_names.set(v);
+                    diarizing.set(false);
+                }
             };
 
             while let Some(first) = ev_rx.recv().await {
@@ -429,7 +447,9 @@ fn MainApp() -> Element {
                 notice.set(None);
                 summary.set(None);
                 compressed.set(None);
-                show_compressed.set(false);
+                summarizing.set(false);
+                compressing.set(false);
+                diarizing.set(false);
                 reset_chat(chat, chat_input, chat_busy, chat_scope);
                 speaker_names.write().clear();
                 mic_muted.set(false);
@@ -583,7 +603,9 @@ fn MainApp() -> Element {
                                                 last_export.set(None);
                                                 summary.set(None);
                                                 compressed.set(None);
-                                                show_compressed.set(false);
+                                                summarizing.set(false);
+                                                compressing.set(false);
+                                                diarizing.set(false);
                                                 reset_chat(chat, chat_input, chat_busy, chat_scope);
                                                 let _ = eng_open.db_tx.send(DbCmd::Load(id_open.clone()));
                                             },
@@ -697,29 +719,38 @@ fn MainApp() -> Element {
                                 span { class: "export-sep", "·" }
                                 button {
                                     class: "export-btn",
+                                    disabled: summarizing(),
                                     onclick: move |_| {
+                                        if *summarizing.peek() { return; }
+                                        summarizing.set(true);
                                         notice.set(Some("Summarizing… (first run downloads the model)".to_string()));
                                         let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
                                     },
-                                    "✨ Summarize"
+                                    if summarizing() { "✨ Summarizing…" } else { "✨ Summarize" }
                                 }
                                 button {
                                     class: "export-btn",
                                     title: "Condense this meeting into token-minimal dense prose for cross-meeting synthesis",
+                                    disabled: compressing(),
                                     onclick: move |_| {
+                                        if *compressing.peek() { return; }
+                                        compressing.set(true);
                                         notice.set(Some("Compressing… (first run downloads the model)".to_string()));
                                         let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
                                     },
-                                    "🗜 Compress"
+                                    if compressing() { "🗜 Compressing…" } else { "🗜 Compress" }
                                 }
                                 button {
                                     class: "export-btn",
                                     title: "Group the 'Others' channel into individual speakers (needs retained audio)",
+                                    disabled: diarizing(),
                                     onclick: move |_| {
+                                        if *diarizing.peek() { return; }
+                                        diarizing.set(true);
                                         notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
                                         let _ = eng_diar.db_tx.send(DbCmd::Diarize(sid_diar.clone()));
                                     },
-                                    "🗣 Identify speakers"
+                                    if diarizing() { "🗣 Identifying…" } else { "🗣 Identify speakers" }
                                 }
                                 button {
                                     class: "export-btn",
@@ -762,10 +793,16 @@ fn MainApp() -> Element {
                     if let Some(text) = summary.read().clone() {
                         {
                             let text_copy = text.clone();
+                            let open = *show_summary.read();
                             rsx! {
                                 div { class: "summary",
                                     div { class: "summary-head",
-                                        span { "Summary" }
+                                        button {
+                                            class: "panel-toggle",
+                                            onclick: move |_| { let v = *show_summary.peek(); show_summary.set(!v); },
+                                            span { class: "chev", if open { "▾" } else { "▸" } }
+                                            span { "Summary" }
+                                        }
                                         button {
                                             class: "row-btn",
                                             onclick: move |_| {
@@ -775,7 +812,9 @@ fn MainApp() -> Element {
                                             "Copy"
                                         }
                                     }
-                                    div { class: "summary-body", "{text}" }
+                                    if open {
+                                        div { class: "summary-body", "{text}" }
+                                    }
                                 }
                             }
                         }
@@ -792,24 +831,22 @@ fn MainApp() -> Element {
                             rsx! {
                                 div { class: "summary compressed",
                                     div { class: "summary-head",
-                                        span { "Compressed (dense)" }
-                                        div {
-                                            button {
-                                                class: "row-btn",
-                                                onclick: move |_| {
-                                                    let v = *show_compressed.peek();
-                                                    show_compressed.set(!v);
-                                                },
-                                                if expanded { "Hide" } else { "Show" }
-                                            }
-                                            button {
-                                                class: "row-btn",
-                                                onclick: move |_| {
-                                                    osutil::copy_to_clipboard(&text_copy);
-                                                    notice.set(Some("Compressed text copied to clipboard".to_string()));
-                                                },
-                                                "Copy"
-                                            }
+                                        button {
+                                            class: "panel-toggle",
+                                            onclick: move |_| {
+                                                let v = *show_compressed.peek();
+                                                show_compressed.set(!v);
+                                            },
+                                            span { class: "chev", if expanded { "▾" } else { "▸" } }
+                                            span { "Compressed (dense)" }
+                                        }
+                                        button {
+                                            class: "row-btn",
+                                            onclick: move |_| {
+                                                osutil::copy_to_clipboard(&text_copy);
+                                                notice.set(Some("Compressed text copied to clipboard".to_string()));
+                                            },
+                                            "Copy"
                                         }
                                     }
                                     if expanded {

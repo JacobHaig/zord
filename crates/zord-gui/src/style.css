@@ -188,6 +188,8 @@ body {
   padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 12px;
 }
 .export-btn:hover { background: var(--panel-2); border-color: var(--me); }
+.export-btn:disabled { opacity: 0.55; cursor: progress; border-color: var(--line); background: transparent; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 0.7; } }
 .export-btn.ghost { color: var(--muted); }
 .export-btn.ghost:hover { color: var(--text); }
 .export-sep { color: var(--line); padding: 0 2px; }
@@ -199,6 +201,10 @@ body {
 /* Dense-prose compression panel: distinct accent + room for inline head buttons. */
 .summary.compressed { border-left-color: var(--others); margin-top: 10px; }
 .summary.compressed .summary-head > div { display: flex; gap: 6px; }
+/* Collapsible-panel header toggle (Summary / Compressed). */
+.panel-toggle { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; padding: 0; }
+.panel-toggle .chev { font-size: 10px; width: 10px; display: inline-block; color: var(--muted); }
+.panel-toggle:hover { color: var(--fg); }
 
 /* Sidebar Overview entry (third top-level mode). */
 .overview-btn { width: 100%; text-align: left; padding: 8px 12px; margin-bottom: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); cursor: pointer; font-size: 13px; }
