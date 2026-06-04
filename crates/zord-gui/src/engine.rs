@@ -361,7 +361,7 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
     // One-shot jobs (summarize/compress/overview) load + drop their own model, so
     // we free the resident one first to keep peak RAM at a single model.
     #[cfg(feature = "summaries")]
-    let mut chat_model: Option<(PathBuf, zord_summarize::Summarizer)> = None;
+    let mut chat_model: Option<(PathBuf, zord_summarize::LlmBackend)> = None;
     while let Ok(cmd) = rx.recv() {
         #[cfg(feature = "summaries")]
         match cmd {
@@ -457,14 +457,14 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
         return;
     };
     let _ = ev.send(Event::Notice("Compressing… (runs in the background)".to_string()));
-    let summarizer = match zord_summarize::Summarizer::load(&model_path) {
+    let llm = match zord_summarize::LlmBackend::load_local(&model_path) {
         Ok(s) => s,
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("compress: {e}")));
             return;
         }
     };
-    match summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
+    match llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
         Ok(text) => {
             let _ = store.set_compressed(session_id, &text);
             let _ = ev.send(Event::Compressed(Some(text)));
@@ -503,7 +503,7 @@ fn overview_one(ev: &UnboundedSender<Event>, db_path: &PathBuf) {
 /// model resident in `cache` across turns.
 #[cfg(feature = "summaries")]
 fn chat_one(
-    cache: &mut Option<(PathBuf, zord_summarize::Summarizer)>,
+    cache: &mut Option<(PathBuf, zord_summarize::LlmBackend)>,
     scope: ChatScope,
     turns: Vec<(bool, String)>,
     ev: &UnboundedSender<Event>,
@@ -516,7 +516,7 @@ fn chat_one(
     };
     // (Re)load the model only on a cache miss (different model selected).
     if cache.as_ref().map(|(p, _)| p != &model_path).unwrap_or(true) {
-        match zord_summarize::Summarizer::load(&model_path) {
+        match zord_summarize::LlmBackend::load_local(&model_path) {
             Ok(s) => *cache = Some((model_path.clone(), s)),
             Err(e) => {
                 let _ = ev.send(Event::Notice(format!("chat model: {e}")));
@@ -524,7 +524,7 @@ fn chat_one(
             }
         }
     }
-    let summarizer = &cache.as_ref().expect("model just loaded").1;
+    let llm = &cache.as_ref().expect("model just loaded").1;
 
     let store = match Store::open(db_path) {
         Ok(s) => s,
@@ -536,7 +536,7 @@ fn chat_one(
 
     // Build the grounding context + pick the context window by scope.
     let (context, n_ctx) = match &scope {
-        ChatScope::Meeting(id) => match meeting_chat_context(&store, summarizer, &settings, id, ev) {
+        ChatScope::Meeting(id) => match meeting_chat_context(&store, llm, &settings, id, ev) {
             Some(c) => (c, settings.compress_ctx),
             None => return,
         },
@@ -546,7 +546,7 @@ fn chat_one(
             };
             match zord_overview::cross_meeting_context(
                 &store,
-                summarizer,
+                llm,
                 &settings,
                 settings.overview_ctx,
                 &mut progress,
@@ -566,7 +566,7 @@ fn chat_one(
         .map(|(is_user, t)| (if is_user { ChatRole::User } else { ChatRole::Assistant }, t))
         .collect();
     let _ = ev.send(Event::Notice("Thinking…".to_string()));
-    match summarizer.chat(&system, &mapped, n_ctx) {
+    match llm.chat(&system, &mapped, n_ctx) {
         Ok(reply) => {
             let _ = ev.send(Event::ChatReply { scope, reply });
         }
@@ -581,7 +581,7 @@ fn chat_one(
 #[cfg(feature = "summaries")]
 fn meeting_chat_context(
     store: &Store,
-    summarizer: &zord_summarize::Summarizer,
+    llm: &zord_summarize::LlmBackend,
     settings: &zord_config::Settings,
     session_id: &str,
     ev: &UnboundedSender<Event>,
@@ -596,7 +596,7 @@ fn meeting_chat_context(
 
     // Reserve headroom (chat output + conversation + prompt) within the window.
     let budget = (settings.compress_ctx as usize).saturating_sub(1400);
-    let fits = summarizer.count_tokens(&transcript).map(|t| t < budget).unwrap_or(false);
+    let fits = llm.count_tokens(&transcript).map(|t| t < budget).unwrap_or(false);
     if fits {
         return Some(format!("Meeting transcript:\n{transcript}"));
     }
@@ -608,7 +608,7 @@ fn meeting_chat_context(
         }
     }
     let _ = ev.send(Event::Notice("Long meeting — compressing it first to chat…".to_string()));
-    match summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
+    match llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
         Ok(c) => {
             let _ = store.set_compressed(session_id, &c);
             let _ = ev.send(Event::Compressed(Some(c.clone())));
@@ -646,14 +646,14 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
         return;
     };
     let _ = ev.send(Event::Notice("Summarizing…".to_string()));
-    let summarizer = match zord_summarize::Summarizer::load(&model_path) {
+    let llm = match zord_summarize::LlmBackend::load_local(&model_path) {
         Ok(s) => s,
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("summary: {e}")));
             return;
         }
     };
-    match summarizer.summarize(&transcript, &settings.effective_summary_prompt()) {
+    match llm.summarize(&transcript, &settings.effective_summary_prompt()) {
         Ok(text) => {
             let _ = store.set_summary(session_id, &text);
             let _ = ev.send(Event::Summary(Some(text.clone())));
@@ -668,7 +668,7 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
                     .map(|s| s.title.as_deref().unwrap_or("").trim().is_empty())
                     .unwrap_or(false);
                 if unnamed {
-                    if let Ok(raw) = summarizer.summarize(&text, zord_config::title_prompt()) {
+                    if let Ok(raw) = llm.summarize(&text, zord_config::title_prompt()) {
                         let title = zord_config::clean_title(&raw);
                         if !title.is_empty() {
                             let _ = store.set_session_title(session_id, &title);

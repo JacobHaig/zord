@@ -796,12 +796,13 @@ settings UI.
   drives all LLM features; no per-feature routing.
 
 Sub-phases:
-- **24a** — **backend seam** (no behavior change). `LlmBackend` in
-  `zord-summarize`: `Local(Summarizer)` | `Remote(RemoteLlm)` exposing the
-  existing `summarize/compress/generate/chat` surface. Port the engine's
-  `summarize_loop`, `zord-overview` (8 `&Summarizer` params), and the CLI onto
-  it. `count_tokens` → chars/4 estimate on the remote path (Overview budgeting
-  only; the server owns its real context).
+- **24a** — ✅ **done** — **backend seam** (no behavior change). `LlmBackend` in
+  `zord-summarize` (`backend.rs`): `Local(Summarizer)` exposing the existing
+  `summarize/compress/generate/chat/count_tokens` surface (`Remote` lands in
+  24b). Engine `summarize_loop`/chat cache, `zord-overview` (7 params + load),
+  and the CLI all ported; nothing outside `zord-summarize` touches `Summarizer`
+  directly anymore. `count_tokens` → chars/4 estimate on the remote path
+  (Overview budgeting only; the server owns its real context).
 - **24b** — **OpenAI-compatible client.** `RemoteLlm` on `zord-net`'s existing
   ureq agent (OS cert store + proxy aware, Phase 18): non-streaming
   `/v1/chat/completions`, `/v1/models`, config {base_url, api_key, model,

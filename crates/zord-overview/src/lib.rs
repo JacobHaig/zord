@@ -54,7 +54,7 @@ pub fn synthesize(
     progress: &mut dyn FnMut(&str),
 ) -> Result<Overview> {
     use std::path::PathBuf;
-    use zord_summarize::{GenOpts, Summarizer};
+    use zord_summarize::{GenOpts, LlmBackend};
 
     let store = Store::open(db_path)?;
 
@@ -62,19 +62,19 @@ pub fn synthesize(
     // and the final synthesis pass, so it's only paged into RAM for this run.
     progress("Preparing the summary model…");
     let model_path: PathBuf = resolve_model_path(settings)?;
-    let summarizer = Summarizer::load(&model_path)?;
+    let llm = LlmBackend::load_local(&model_path)?;
 
     // Gather the most recent meetings (lazily compressing any missing), then fit
     // them to the synthesis context (condensing in groups if they overflow).
-    let digests = collect_digests(&store, &summarizer, settings, progress)?;
+    let digests = collect_digests(&store, &llm, settings, progress)?;
     if digests.is_empty() {
         anyhow::bail!("no meetings with transcripts to synthesize yet");
     }
     let n_ctx = settings.overview_ctx.clamp(8192, 131_072);
-    let input = fit_to_budget(&summarizer, &digests, n_ctx, 2048, settings, progress)?;
+    let input = fit_to_budget(&llm, &digests, n_ctx, 2048, settings, progress)?;
 
     progress("Synthesizing the cross-meeting overview…");
-    let text = summarizer.generate(&input, zord_config::overview_prompt(), GenOpts::overview(n_ctx))?;
+    let text = llm.generate(&input, zord_config::overview_prompt(), GenOpts::overview(n_ctx))?;
 
     store.set_meta(META_OVERVIEW, &text)?;
     store.set_meta(META_OVERVIEW_MEETINGS, &digests.len().to_string())?;
@@ -101,17 +101,17 @@ pub fn synthesize(
 #[cfg(feature = "llama")]
 pub fn cross_meeting_context(
     store: &Store,
-    summarizer: &zord_summarize::Summarizer,
+    llm: &zord_summarize::LlmBackend,
     settings: &Settings,
     n_ctx: u32,
     progress: &mut dyn FnMut(&str),
 ) -> Result<(String, usize)> {
-    let digests = collect_digests(store, summarizer, settings, progress)?;
+    let digests = collect_digests(store, llm, settings, progress)?;
     if digests.is_empty() {
         anyhow::bail!("no meetings with transcripts yet");
     }
     let meetings = digests.len();
-    let context = fit_to_budget(summarizer, &digests, n_ctx.clamp(8192, 131_072), 768, settings, progress)?;
+    let context = fit_to_budget(llm, &digests, n_ctx.clamp(8192, 131_072), 768, settings, progress)?;
     Ok((context, meetings))
 }
 
@@ -121,7 +121,7 @@ pub fn cross_meeting_context(
 #[cfg(feature = "llama")]
 fn collect_digests(
     store: &Store,
-    summarizer: &zord_summarize::Summarizer,
+    llm: &zord_summarize::LlmBackend,
     settings: &Settings,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Vec<(String, String)>> {
@@ -143,7 +143,7 @@ fn collect_digests(
                 progress(&format!("Compressing meeting {} ({})…", generated, meeting_title(&s)));
                 let names = store.speaker_names(&s.id).unwrap_or_default();
                 let transcript = build_transcript(&segs, &names);
-                let c = summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+                let c = llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
                 store.set_compressed(&s.id, &c)?;
                 c
             }
@@ -157,7 +157,7 @@ fn collect_digests(
 /// `reserve_out` for generation), condense them hierarchically until they fit.
 #[cfg(feature = "llama")]
 fn fit_to_budget(
-    summarizer: &zord_summarize::Summarizer,
+    llm: &zord_summarize::LlmBackend,
     digests: &[(String, String)],
     n_ctx: u32,
     reserve_out: usize,
@@ -166,7 +166,7 @@ fn fit_to_budget(
 ) -> Result<String> {
     let budget = input_budget(n_ctx, reserve_out);
     let assembled = assemble(digests);
-    let tokens = summarizer.count_tokens(&assembled)?;
+    let tokens = llm.count_tokens(&assembled)?;
     if tokens <= budget {
         return Ok(assembled);
     }
@@ -176,7 +176,7 @@ fn fit_to_budget(
         tokens,
         n_ctx
     ));
-    hierarchical_reduce(summarizer, digests, budget, settings, progress)
+    hierarchical_reduce(llm, digests, budget, settings, progress)
 }
 
 #[cfg(feature = "llama")]
@@ -198,19 +198,19 @@ fn resolve_model_path(settings: &Settings) -> Result<std::path::PathBuf> {
 /// if the condensed digests are *still* over budget.
 #[cfg(feature = "llama")]
 fn hierarchical_reduce(
-    summarizer: &zord_summarize::Summarizer,
+    llm: &zord_summarize::LlmBackend,
     digests: &[(String, String)],
     budget: usize,
     settings: &Settings,
     progress: &mut dyn FnMut(&str),
 ) -> Result<String> {
     let group_budget = input_budget(settings.compress_ctx.clamp(8192, 131_072), 1024);
-    let groups = pack(summarizer, digests, group_budget)?;
+    let groups = pack(llm, digests, group_budget)?;
     let mut reduced: Vec<(String, String)> = Vec::new();
     for (i, group) in groups.iter().enumerate() {
         progress(&format!("Condensing group {}/{}…", i + 1, groups.len()));
         let assembled = assemble(group);
-        let digest = summarizer.compress(
+        let digest = llm.compress(
             &assembled,
             zord_config::compress_prompt(),
             settings.compress_ctx,
@@ -219,12 +219,12 @@ fn hierarchical_reduce(
     }
 
     let assembled = assemble(&reduced);
-    if summarizer.count_tokens(&assembled)? <= budget {
+    if llm.count_tokens(&assembled)? <= budget {
         return Ok(assembled);
     }
 
     // Still too large: include the most-recent groups that fit and say so.
-    let (kept, text) = take_within_budget(summarizer, &reduced, budget)?;
+    let (kept, text) = take_within_budget(llm, &reduced, budget)?;
     progress(&format!(
         "Still over budget — overview covers the {} most recent groups ({} dropped).",
         kept,
@@ -237,7 +237,7 @@ fn hierarchical_reduce(
 /// stays under `budget`. An oversized single item becomes its own group.
 #[cfg(feature = "llama")]
 fn pack(
-    summarizer: &zord_summarize::Summarizer,
+    llm: &zord_summarize::LlmBackend,
     items: &[(String, String)],
     budget: usize,
 ) -> Result<Vec<Vec<(String, String)>>> {
@@ -245,7 +245,7 @@ fn pack(
     let mut cur: Vec<(String, String)> = Vec::new();
     let mut cur_tokens = 0usize;
     for item in items {
-        let t = summarizer.count_tokens(&assemble(std::slice::from_ref(item)))? + 4;
+        let t = llm.count_tokens(&assemble(std::slice::from_ref(item)))? + 4;
         if !cur.is_empty() && cur_tokens + t > budget {
             groups.push(std::mem::take(&mut cur));
             cur_tokens = 0;
@@ -263,14 +263,14 @@ fn pack(
 /// (count_kept, assembled_text).
 #[cfg(feature = "llama")]
 fn take_within_budget(
-    summarizer: &zord_summarize::Summarizer,
+    llm: &zord_summarize::LlmBackend,
     items: &[(String, String)],
     budget: usize,
 ) -> Result<(usize, String)> {
     let mut kept: Vec<(String, String)> = Vec::new();
     let mut tokens = 0usize;
     for item in items {
-        let t = summarizer.count_tokens(&assemble(std::slice::from_ref(item)))? + 4;
+        let t = llm.count_tokens(&assemble(std::slice::from_ref(item)))? + 4;
         if !kept.is_empty() && tokens + t > budget {
             break;
         }

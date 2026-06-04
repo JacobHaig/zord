@@ -4,8 +4,12 @@
 //! never compiles llama.cpp. Enable it via the consumer's `summaries` feature.
 
 #[cfg(feature = "llama")]
+mod backend;
+#[cfg(feature = "llama")]
 mod summarizer;
 
+#[cfg(feature = "llama")]
+pub use backend::LlmBackend;
 #[cfg(feature = "llama")]
 pub use summarizer::{
     custom_model_path, delete_custom_model, delete_summary_model, ensure_ollama_model,

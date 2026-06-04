@@ -225,8 +225,8 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     };
     eprintln!("\r  model ready. Summarizing…              ");
 
-    let summarizer = zord_summarize::Summarizer::load(&model_path)?;
-    let summary = summarizer.summarize(&transcript, &settings.effective_summary_prompt())?;
+    let llm = zord_summarize::LlmBackend::load_local(&model_path)?;
+    let summary = llm.summarize(&transcript, &settings.effective_summary_prompt())?;
     store.set_summary(session_id, &summary)?;
     println!("{summary}");
 
@@ -237,7 +237,7 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
             .map(|s| s.title.as_deref().unwrap_or("").trim().is_empty())
             .unwrap_or(false);
         if unnamed {
-            if let Ok(raw) = summarizer.summarize(&summary, zord_config::title_prompt()) {
+            if let Ok(raw) = llm.summarize(&summary, zord_config::title_prompt()) {
                 let title = zord_config::clean_title(&raw);
                 if !title.is_empty() {
                     store.set_session_title(session_id, &title)?;
@@ -286,9 +286,9 @@ fn cmd_compress(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     };
     eprintln!("\r  model ready. Compressing (ctx {} tokens)…       ", settings.compress_ctx);
 
-    let summarizer = zord_summarize::Summarizer::load(&model_path)?;
+    let llm = zord_summarize::LlmBackend::load_local(&model_path)?;
     let compressed =
-        summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+        llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
     store.set_compressed(session_id, &compressed)?;
     println!("{compressed}");
     Ok(())
