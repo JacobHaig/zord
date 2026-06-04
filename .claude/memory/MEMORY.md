@@ -16,4 +16,5 @@
 - [Feature build deps](feature-build-deps.md) — perl/OpenSSL, ONNX, llama.cpp toolchain per feature
 - [Commit & workflow](commit-and-workflow.md) — NO co-author trailers; phased commits; verify before claiming
 - [Verification limits](verification-limits.md) — what can't run headlessly (live audio, LLM/ASR, Windows, signing)
+- [ASR/diarization model watchlist](asr-diarization-model-watchlist.md) — Parakeet v3 is the ceiling; Reverb added; Sortformer rejected; revisit triggers
 - [Canonical docs](docs-canonical.md) — docs/PLAN.md is the phase tracker; README + RELEASE roles
