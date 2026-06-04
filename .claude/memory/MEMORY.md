@@ -9,7 +9,8 @@
 - [Cross-meeting synthesis](cross-meeting-synthesis.md) — Phase 23 Overview: map-reduce over structured extracts (not big context) for per-project rollups
 - [macOS build](macos-build.md) — deployment target 13, Swift lib path, build.rs links libclang_rt.osx
 - [CI macOS Xcode 26](ci-macos-xcode26.md) — release macOS job needs macos-15 (Xcode 26 / macOS 26 SDK) for the screencapturekit Swift bridge
-- [CI Windows CRT](ci-windows-crt.md) — Windows release must force static MSVC CRT (sherpa /MT vs llama/whisper /MD link clash)
+- [CI Windows CRT](ci-windows-crt.md) — Windows release must force static MSVC CRT (sherpa /MT vs llama/whisper /MD link clash); also needs LLAMA_STATIC_CRT=1
+- [LLM prefill n_batch](llm-prefill-nbatch.md) — llama.cpp ggml_abort on prompts > n_batch (2048); prefill in ≤512-token chunks; crash-log locations
 - [Data locations](data-locations.md) — app-data dir layout (config/db/models/audio/exports) per OS
 - [dx bundling gotchas](dx-bundling-gotchas.md) — info_plist REPLACES; app is ZordGui.app; build with --package
 - [Feature build deps](feature-build-deps.md) — perl/OpenSSL, ONNX, llama.cpp toolchain per feature
