@@ -257,6 +257,12 @@ body {
 .chat-input { flex: 1; padding: 9px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); font-size: 13px; }
 .chat-input:focus { outline: none; border-color: var(--me); }
 
+/* Pinned "Current recording" sidebar entry (while recording). */
+.session.live-rec { border-color: var(--rec, #ff5a5a); }
+.session.live-rec .session-title { display: flex; align-items: center; gap: 7px; color: var(--rec, #ff5a5a); }
+.rec-pip { width: 9px; height: 9px; border-radius: 50%; background: var(--rec, #ff5a5a); flex-shrink: 0; animation: recpip 1.3s ease-in-out infinite; }
+@keyframes recpip { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
 /* Dedicated search view */
 .search-view { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .search-input-big { padding: 11px 14px; font-size: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); }

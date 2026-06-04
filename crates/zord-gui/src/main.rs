@@ -260,6 +260,10 @@ fn MainApp() -> Element {
     let mut status = use_signal(|| Status::Idle);
     let mut notice = use_signal(|| Option::<String>::None);
     let mut segments = use_signal(Vec::<Segment>::new);
+    // Live recording transcript, buffered separately from `segments` (which holds
+    // the currently-viewed *saved* session) so you can navigate away during a
+    // recording and come back without losing the lines that streamed meanwhile.
+    let mut live_segments = use_signal(Vec::<Segment>::new);
     let mut me_level = use_signal(|| 0.0f32);
     let mut others_level = use_signal(|| 0.0f32);
     let mut sessions = use_signal(Vec::<Session>::new);
@@ -349,9 +353,9 @@ fn MainApp() -> Element {
                 Event::Status(s) => status.set(s),
                 Event::Notice(n) => notice.set(Some(n)),
                 Event::Segment(seg) => {
-                    if *view.peek() == View::Live {
-                        segments.write().push(seg);
-                    }
+                    // Always buffer the live stream so it's intact when you return
+                    // to the Live view, even if you navigated away mid-recording.
+                    live_segments.write().push(seg);
                 }
                 Event::Level { .. } => {} // handled via coalescing
                 Event::Sessions(v) => sessions.set(v),
@@ -456,7 +460,7 @@ fn MainApp() -> Element {
 
     // Auto-scroll the transcript to the latest line while recording.
     use_effect(move || {
-        let _ = segments.read().len(); // subscribe to new segments
+        let _ = live_segments.read().len(); // subscribe to new live segments
         if matches!(*status.peek(), Status::Recording) {
             let _ = document::eval(
                 "const t=document.querySelector('.transcript'); if(t){t.scrollTop=t.scrollHeight;}",
@@ -562,6 +566,7 @@ fn MainApp() -> Element {
             } else {
                 tracing::info!("record button: Record clicked");
                 segments.write().clear();
+                live_segments.write().clear();
                 notice.set(None);
                 summary.set(None);
                 compressed.set(None);
@@ -711,6 +716,30 @@ fn MainApp() -> Element {
                     }
                 }
                 div { class: "session-list",
+                    // While recording, a pinned entry to jump back to the live view
+                    // (the in-progress session isn't in the saved list until it ends).
+                    if recording {
+                        div {
+                            class: if matches!(&*view.read(), View::Live) { "session live-rec active" } else { "session live-rec" },
+                            onclick: move |_| {
+                                // Back to the live view; drop any panels left from a
+                                // saved session viewed mid-recording.
+                                view.set(View::Live);
+                                summary.set(None);
+                                compressed.set(None);
+                                speaker_names.write().clear();
+                            },
+                            div { class: "session-row",
+                                div { class: "session-title",
+                                    span { class: "rec-pip" }
+                                    "Current recording"
+                                }
+                                div { class: "session-meta",
+                                    if matches!(st, Status::Recording) { "{fmt_dur(rec_secs())}" } else { "{status_text}" }
+                                }
+                            }
+                        }
+                    }
                     {
                         // Filter by title, then tag the first row of each date group.
                         let q = session_filter.read().to_lowercase();
@@ -1138,6 +1167,8 @@ fn MainApp() -> Element {
                     div { class: "transcript",
                         if *view.read() == View::Overview {
                             OverviewView { overview, busy: overview_busy, notice, on_generate: on_generate_overview }
+                        } else if *view.read() == View::Live {
+                            TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment }
                         } else {
                             TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment }
                         }
