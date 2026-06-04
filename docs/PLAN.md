@@ -774,6 +774,58 @@ Reuses the existing llama.cpp summary model (with a larger configurable context
 for compress/synthesis); no new heavy deps. Optional much later: a **live rolling
 summary** during recording (same mid-meeting hardware caveat as live diarization).
 
+### Phase 24 — External LLM endpoints (OpenAI-compatible) ⭐ next — direction change
+Let the user point Zord at their **own inference server** — LM Studio, Ollama
+(`ollama serve`), llama-server, vLLM, Jan, KoboldCpp — and use it instead of the
+built-in llama.cpp for every LLM feature (Summarize, Compress, Overview, Chat,
+auto-title). Connection details (base URL, optional API key, model) live in
+Settings. One protocol covers all of those platforms: the OpenAI-compatible
+`POST /v1/chat/completions` (+ `GET /v1/models` for the picker).
+
+**Why it's one seam, not five features:** every LLM call already funnels through
+`Summarizer::generate`/`chat` (chat-style messages → string) — exactly the
+chat-completions shape. The work is one backend abstraction + an HTTP client +
+settings UI.
+
+**DECIDED (June 2026):**
+- **Failure mode:** clear error, **no silent fallback** to the local model
+  ("Couldn't reach http://… — is the server running?").
+- **API key:** optional, **plaintext in config.json** (LAN servers rarely need
+  one); keychain only if hosted-endpoint demand appears.
+- **Scope:** **one global backend switch** — local GGUF or external endpoint —
+  drives all LLM features; no per-feature routing.
+
+Sub-phases:
+- **24a** — **backend seam** (no behavior change). `LlmBackend` in
+  `zord-summarize`: `Local(Summarizer)` | `Remote(RemoteLlm)` exposing the
+  existing `summarize/compress/generate/chat` surface. Port the engine's
+  `summarize_loop`, `zord-overview` (8 `&Summarizer` params), and the CLI onto
+  it. `count_tokens` → chars/4 estimate on the remote path (Overview budgeting
+  only; the server owns its real context).
+- **24b** — **OpenAI-compatible client.** `RemoteLlm` on `zord-net`'s existing
+  ureq agent (OS cert store + proxy aware, Phase 18): non-streaming
+  `/v1/chat/completions`, `/v1/models`, config {base_url, api_key, model,
+  timeout}. Map `GenOpts` → `max_tokens`/`temperature`. Friendly error mapping
+  (refused/timeout/401/404-model).
+- **24c** — **settings + wiring.** `zord-config`: `llm_backend`
+  ("local"|"external", default local), `llm_base_url`, `llm_api_key`,
+  `llm_model`. Settings → Summaries: backend toggle; External swaps the GGUF
+  model list for URL/key fields, a model dropdown fed by `/v1/models`, a
+  **Test connection** button, and a privacy note (transcripts are sent to that
+  server — the "fully local" promise gets a user-controlled asterisk). Engine +
+  CLI route by the setting.
+- **24d** — **polish / later.** Streaming for Chat; relabel the Phase 22
+  "via Ollama" *download* entries so "Ollama" isn't overloaded now that an
+  Ollama *server* is also a thing; optionally un-gate the remote backend from
+  the `summaries` build feature (release binaries ship `summaries` anyway, so
+  low priority — it would only help from-source builds skip the llama.cpp
+  toolchain).
+
+Known gaps: `compress_ctx`/`overview_ctx` become input-budget knobs only for
+remote (server-side context is the server's business — UI wording to match);
+chunked-prefill (the v0.2.9 crash fix) is llama-only and N/A for remote;
+auto-title rides the same backend switch.
+
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
 - ~~Multilingual UX~~ / ~~CUDA release builds~~ — **declined** (not wanted).
