@@ -37,11 +37,7 @@ pub fn run_record(
     record_system: bool,
 ) -> Result<usize> {
     // If neither was requested, record both.
-    let (record_mic, record_system) = if !record_mic && !record_system {
-        (true, true)
-    } else {
-        (record_mic, record_system)
-    };
+    let (record_mic, record_system) = default_both_if_none(record_mic, record_system);
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let mut procs = Vec::new();
@@ -120,6 +116,15 @@ pub fn run_record(
     }
     let count = transcribe.join().expect("transcribe thread panicked")?;
     Ok(count)
+}
+
+/// If neither channel was requested, record both.
+fn default_both_if_none(record_mic: bool, record_system: bool) -> (bool, bool) {
+    if !record_mic && !record_system {
+        (true, true)
+    } else {
+        (record_mic, record_system)
+    }
 }
 
 /// Spawn a per-channel resample + VAD stage. Stamps the first-frame arrival
@@ -224,16 +229,7 @@ fn transcribe_wav(
 ) -> Result<usize> {
     let mut reader = hound::WavReader::open(wav_path)?;
     let spec = reader.spec();
-    let interleaved: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
-        hound::SampleFormat::Int => {
-            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .samples::<i32>()
-                .map(|s| s.map(|v| v as f32 / scale))
-                .collect::<Result<Vec<_>, _>>()?
-        }
-    };
+    let interleaved: Vec<f32> = read_interleaved_samples(&mut reader, spec)?;
     tracing::info!(rate = spec.sample_rate, channels = spec.channels, ?source, "loaded WAV");
 
     let mut resampler = MonoResampler::new(spec.sample_rate, spec.channels)?;
@@ -253,6 +249,24 @@ fn transcribe_wav(
         }
     }
     Ok(count)
+}
+
+/// Read all WAV samples as interleaved f32, normalizing integer formats to [-1, 1].
+fn read_interleaved_samples(
+    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
+    spec: hound::WavSpec,
+) -> Result<Vec<f32>> {
+    let interleaved: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
+        hound::SampleFormat::Int => {
+            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / scale))
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    Ok(interleaved)
 }
 
 /// `foo.wav` + "me" -> `foo.me.wav`

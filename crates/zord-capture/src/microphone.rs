@@ -31,18 +31,7 @@ impl Microphone {
     /// Start a specific input device by name, falling back to the default if
     /// `name` is `None` or no match is found.
     pub fn start_with(sink: FrameSink, name: Option<&str>) -> Result<Self> {
-        let host = cpal::default_host();
-        let device = match name {
-            Some(want) => host
-                .input_devices()
-                .ok()
-                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == want).unwrap_or(false)))
-                .or_else(|| host.default_input_device())
-                .context("no input (microphone) device")?,
-            None => host
-                .default_input_device()
-                .context("no default input (microphone) device")?,
-        };
+        let device = resolve_input_device(name)?;
         let supported = device
             .default_input_config()
             .context("querying default input config")?;
@@ -68,6 +57,23 @@ impl AudioSource for Microphone {
     fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
+}
+
+/// Select the requested input device, falling back to the default.
+fn resolve_input_device(name: Option<&str>) -> Result<cpal::Device> {
+    let host = cpal::default_host();
+    let device = match name {
+        Some(want) => host
+            .input_devices()
+            .ok()
+            .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == want).unwrap_or(false)))
+            .or_else(|| host.default_input_device())
+            .context("no input (microphone) device")?,
+        None => host
+            .default_input_device()
+            .context("no default input (microphone) device")?,
+    };
+    Ok(device)
 }
 
 fn build<T>(

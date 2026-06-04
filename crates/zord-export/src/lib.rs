@@ -50,10 +50,7 @@ pub fn render(
 /// Readable transcript: a heading plus one labelled, timestamped line each.
 pub fn to_markdown(session: &Session, segments: &[Segment], names: &HashMap<i32, String>) -> String {
     let mut out = String::new();
-    let title = session.title.clone().unwrap_or_else(|| session.id.clone());
-    out.push_str(&format!("# {title}\n\n"));
-    out.push_str(&format!("- Model: `{}`\n", session.model));
-    out.push_str(&format!("- Started: {} (unix ms)\n\n", session.started_at));
+    push_markdown_header(&mut out, session);
     for seg in segments {
         out.push_str(&format!(
             "**[{}] {}:** {}\n\n",
@@ -90,6 +87,14 @@ struct JsonExport<'a> {
 pub fn to_json(session: &Session, segments: &[Segment]) -> String {
     let export = JsonExport { session, segments };
     serde_json::to_string_pretty(&export).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Write the markdown title and metadata header for `session` to `out`.
+fn push_markdown_header(out: &mut String, session: &Session) {
+    let title = session.title.clone().unwrap_or_else(|| session.id.clone());
+    out.push_str(&format!("# {title}\n\n"));
+    out.push_str(&format!("- Model: `{}`\n", session.model));
+    out.push_str(&format!("- Started: {} (unix ms)\n\n", session.started_at));
 }
 
 /// `mm:ss` for human-facing markdown.

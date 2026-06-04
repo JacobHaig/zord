@@ -348,6 +348,20 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
     }
 }
 
+/// Render diarized segments into a speaker-labeled transcript (one line per
+/// segment), used as LLM grounding input.
+#[cfg(feature = "summaries")]
+fn render_labeled_transcript(
+    segs: &[Segment],
+    names: &std::collections::HashMap<i32, String>,
+) -> String {
+    segs
+        .iter()
+        .map(|s| format!("{}: {}", s.speaker_label(names), s.text))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Resolve the configured summary model to a local GGUF path: a built-in catalog
 /// model (downloading if needed) or a user-supplied custom GGUF. Sends a notice
 /// and returns `None` on failure. Shared by summarize + compress.
@@ -391,11 +405,7 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
         return;
     }
     let names = store.speaker_names(session_id).unwrap_or_default();
-    let transcript = segs
-        .iter()
-        .map(|s| format!("{}: {}", s.speaker_label(&names), s.text))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let transcript = render_labeled_transcript(&segs, &names);
 
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing model for compression…".to_string()));
@@ -538,11 +548,7 @@ fn meeting_chat_context(
         return None;
     }
     let names = store.speaker_names(session_id).unwrap_or_default();
-    let transcript = segs
-        .iter()
-        .map(|s| format!("{}: {}", s.speaker_label(&names), s.text))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let transcript = render_labeled_transcript(&segs, &names);
 
     // Reserve headroom (chat output + conversation + prompt) within the window.
     let budget = (settings.compress_ctx as usize).saturating_sub(1400);
@@ -588,11 +594,7 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
     // Label each line by its diarized speaker (and custom name, if assigned) so
     // the LLM can attribute statements/actions to the right person.
     let names = store.speaker_names(session_id).unwrap_or_default();
-    let transcript = segs
-        .iter()
-        .map(|s| format!("{}: {}", s.speaker_label(&names), s.text))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let transcript = render_labeled_transcript(&segs, &names);
 
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing summary model…".to_string()));
@@ -1359,6 +1361,27 @@ fn run_session(
     shutdown
 }
 
+/// Prepend silence to `mono` so the channel's produced-sample count catches up
+/// to real elapsed time (sub-30ms jitter ignored; capped at 5 min per buffer).
+fn pad_to_wallclock(session_start: Instant, produced: u64, mono: Vec<f32>) -> Vec<f32> {
+    const SR: u64 = zord_core::WHISPER_SAMPLE_RATE as u64;
+    let elapsed_ms = session_start.elapsed().as_millis() as u64;
+    let target = elapsed_ms * SR / 1000;
+    let mut pad = target.saturating_sub(produced + mono.len() as u64) as usize;
+    if pad <= (SR * 30 / 1000) as usize {
+        pad = 0; // ignore sub-30ms jitter
+    }
+    pad = pad.min((SR * 300) as usize); // never inject more than 5 min at once
+
+    if pad > 0 {
+        let mut b = vec![0.0f32; pad];
+        b.extend_from_slice(&mono);
+        b
+    } else {
+        mono
+    }
+}
+
 /// Per-channel resample + VAD stage that also emits live level meters.
 fn spawn_proc(
     rx: mpsc::Receiver<Vec<f32>>,
@@ -1463,22 +1486,7 @@ fn spawn_proc(
             // shared wall clock. This is what keeps the two channels in sync: a
             // capture source that goes quiet (WASAPI loopback emits nothing during
             // silence) no longer falls behind real time.
-            const SR: u64 = zord_core::WHISPER_SAMPLE_RATE as u64;
-            let elapsed_ms = session_start.elapsed().as_millis() as u64;
-            let target = elapsed_ms * SR / 1000;
-            let mut pad = target.saturating_sub(produced + mono.len() as u64) as usize;
-            if pad <= (SR * 30 / 1000) as usize {
-                pad = 0; // ignore sub-30ms jitter
-            }
-            pad = pad.min((SR * 300) as usize); // never inject more than 5 min at once
-
-            let out: Vec<f32> = if pad > 0 {
-                let mut b = vec![0.0f32; pad];
-                b.extend_from_slice(&mono);
-                b
-            } else {
-                mono
-            };
+            let out: Vec<f32> = pad_to_wallclock(session_start, produced, mono);
             produced += out.len() as u64;
             if let Some(w) = wav.as_mut() {
                 let _ = w.write(&out);

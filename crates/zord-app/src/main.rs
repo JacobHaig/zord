@@ -323,6 +323,34 @@ fn cmd_overview(_max: Option<u32>, _db: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
 }
 
+/// Align "Others" transcript segments to diarized speaker spans by max overlap,
+/// returning the (segment id, speaker) assignments and the distinct speaker set.
+#[cfg(feature = "diarization")]
+fn compute_speaker_assignments(
+    segs: &[zord_core::Segment],
+    spans: &[zord_diarize::DiarSegment],
+) -> (Vec<(i64, i32)>, std::collections::HashSet<i32>) {
+    let mut assignments: Vec<(i64, i32)> = Vec::new();
+    let mut speakers = std::collections::HashSet::new();
+    for seg in segs.iter().filter(|s| s.source == zord_core::Source::Others) {
+        let Some(id) = seg.id else { continue };
+        let best = spans
+            .iter()
+            .map(|sp| {
+                let lo = seg.t_start_ms.max(sp.start_ms);
+                let hi = seg.t_end_ms.min(sp.end_ms);
+                (sp.speaker, hi.saturating_sub(lo))
+            })
+            .filter(|(_, ov)| *ov > 0)
+            .max_by_key(|(_, ov)| *ov);
+        if let Some((speaker, _)) = best {
+            assignments.push((id, speaker));
+            speakers.insert(speaker);
+        }
+    }
+    (assignments, speakers)
+}
+
 #[cfg(feature = "diarization")]
 fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let db_path = resolve_db(db)?;
@@ -366,24 +394,7 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     // Compute assignments first; only clear + write if we matched something, so a
     // no-result run never wipes existing speaker labels.
     let segs = store.segments(session_id)?;
-    let mut assignments: Vec<(i64, i32)> = Vec::new();
-    let mut speakers = std::collections::HashSet::new();
-    for seg in segs.iter().filter(|s| s.source == zord_core::Source::Others) {
-        let Some(id) = seg.id else { continue };
-        let best = spans
-            .iter()
-            .map(|sp| {
-                let lo = seg.t_start_ms.max(sp.start_ms);
-                let hi = seg.t_end_ms.min(sp.end_ms);
-                (sp.speaker, hi.saturating_sub(lo))
-            })
-            .filter(|(_, ov)| *ov > 0)
-            .max_by_key(|(_, ov)| *ov);
-        if let Some((speaker, _)) = best {
-            assignments.push((id, speaker));
-            speakers.insert(speaker);
-        }
-    }
+    let (assignments, speakers) = compute_speaker_assignments(&segs, &spans);
     if assignments.is_empty() {
         eprintln!("Found speech but couldn't align speakers to transcript lines; left unchanged.");
         return Ok(());

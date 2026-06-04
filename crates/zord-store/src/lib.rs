@@ -59,64 +59,7 @@ impl Store {
     }
 
     fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS sessions (
-                id          TEXT PRIMARY KEY,
-                started_at  INTEGER NOT NULL,
-                ended_at    INTEGER,
-                title       TEXT,
-                audio_path  TEXT,
-                model       TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS segments (
-                id          INTEGER PRIMARY KEY,
-                session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                source      TEXT NOT NULL,
-                t_start_ms  INTEGER NOT NULL,
-                t_end_ms    INTEGER NOT NULL,
-                text        TEXT NOT NULL,
-                words_json  TEXT,
-                speaker     INTEGER
-            );
-            CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id, t_start_ms);
-
-            -- Phase 16: custom names for diarized speakers, per session.
-            CREATE TABLE IF NOT EXISTS speaker_names (
-                session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                speaker     INTEGER NOT NULL,
-                name        TEXT NOT NULL,
-                PRIMARY KEY (session_id, speaker)
-            );
-
-            -- Phase 23: small app-wide key/value store (e.g. the cross-meeting
-            -- Overview rollup + when it was generated). Not session-scoped.
-            CREATE TABLE IF NOT EXISTS app_meta (
-                key         TEXT PRIMARY KEY,
-                value       TEXT NOT NULL,
-                updated_at  INTEGER NOT NULL
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
-                text,
-                content='segments',
-                content_rowid='id'
-            );
-
-            -- Keep the FTS index in sync with the segments table.
-            CREATE TRIGGER IF NOT EXISTS segments_ai AFTER INSERT ON segments BEGIN
-                INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
-            END;
-            CREATE TRIGGER IF NOT EXISTS segments_ad AFTER DELETE ON segments BEGIN
-                INSERT INTO segments_fts(segments_fts, rowid, text) VALUES ('delete', old.id, old.text);
-            END;
-            CREATE TRIGGER IF NOT EXISTS segments_au AFTER UPDATE ON segments BEGIN
-                INSERT INTO segments_fts(segments_fts, rowid, text) VALUES ('delete', old.id, old.text);
-                INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
-            END;
-            "#,
-        )?;
+        create_schema(&self.conn)?;
         // Added in Phase 13 — tolerate older DBs that predate the column.
         let _ = self
             .conn
@@ -420,6 +363,70 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
+}
+
+/// Create the base tables, indexes, FTS virtual table, and sync triggers
+/// (all `IF NOT EXISTS`, so safe to run on every open).
+fn create_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                id          TEXT PRIMARY KEY,
+                started_at  INTEGER NOT NULL,
+                ended_at    INTEGER,
+                title       TEXT,
+                audio_path  TEXT,
+                model       TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS segments (
+                id          INTEGER PRIMARY KEY,
+                session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                source      TEXT NOT NULL,
+                t_start_ms  INTEGER NOT NULL,
+                t_end_ms    INTEGER NOT NULL,
+                text        TEXT NOT NULL,
+                words_json  TEXT,
+                speaker     INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_segments_session ON segments(session_id, t_start_ms);
+
+            -- Phase 16: custom names for diarized speakers, per session.
+            CREATE TABLE IF NOT EXISTS speaker_names (
+                session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                speaker     INTEGER NOT NULL,
+                name        TEXT NOT NULL,
+                PRIMARY KEY (session_id, speaker)
+            );
+
+            -- Phase 23: small app-wide key/value store (e.g. the cross-meeting
+            -- Overview rollup + when it was generated). Not session-scoped.
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_at  INTEGER NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
+                text,
+                content='segments',
+                content_rowid='id'
+            );
+
+            -- Keep the FTS index in sync with the segments table.
+            CREATE TRIGGER IF NOT EXISTS segments_ai AFTER INSERT ON segments BEGIN
+                INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS segments_ad AFTER DELETE ON segments BEGIN
+                INSERT INTO segments_fts(segments_fts, rowid, text) VALUES ('delete', old.id, old.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS segments_au AFTER UPDATE ON segments BEGIN
+                INSERT INTO segments_fts(segments_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            "#,
+    )?;
+    Ok(())
 }
 
 fn row_to_segment(r: &rusqlite::Row) -> rusqlite::Result<Segment> {

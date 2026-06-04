@@ -23,15 +23,7 @@ impl ParakeetBackend {
             bail!("tokens.txt not found in {model_dir:?}");
         }
 
-        let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
-        config.model_config.transducer.encoder = Some(encoder.to_string_lossy().into_owned());
-        config.model_config.transducer.decoder = Some(decoder.to_string_lossy().into_owned());
-        config.model_config.transducer.joiner = Some(joiner.to_string_lossy().into_owned());
-        config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
-        config.model_config.model_type = Some("nemo_transducer".into());
-        config.model_config.num_threads = std::thread::available_parallelism()
-            .map(|n| n.get() as i32)
-            .unwrap_or(4);
+        let config = build_recognizer_config(&encoder, &decoder, &joiner, &tokens);
 
         let recognizer = sherpa_onnx::OfflineRecognizer::create(&config)
             .ok_or_else(|| anyhow!("failed to create sherpa-onnx Parakeet recognizer"))?;
@@ -71,6 +63,25 @@ impl TranscribeBackend for ParakeetBackend {
             speaker: None,
         }])
     }
+}
+
+/// Build the sherpa-onnx recognizer config for a Parakeet transducer model.
+fn build_recognizer_config(
+    encoder: &Path,
+    decoder: &Path,
+    joiner: &Path,
+    tokens: &Path,
+) -> sherpa_onnx::OfflineRecognizerConfig {
+    let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
+    config.model_config.transducer.encoder = Some(encoder.to_string_lossy().into_owned());
+    config.model_config.transducer.decoder = Some(decoder.to_string_lossy().into_owned());
+    config.model_config.transducer.joiner = Some(joiner.to_string_lossy().into_owned());
+    config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
+    config.model_config.model_type = Some("nemo_transducer".into());
+    config.model_config.num_threads = std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4);
+    config
 }
 
 /// Find the first `*<kind>*.onnx` file in `dir` (handles `.int8.onnx` variants

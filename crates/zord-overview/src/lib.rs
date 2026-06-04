@@ -142,11 +142,7 @@ fn collect_digests(
                 generated += 1;
                 progress(&format!("Compressing meeting {} ({})…", generated, meeting_title(&s)));
                 let names = store.speaker_names(&s.id).unwrap_or_default();
-                let transcript = segs
-                    .iter()
-                    .map(|seg| format!("{}: {}", seg.speaker_label(&names), seg.text))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let transcript = build_transcript(&segs, &names);
                 let c = summarizer.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
                 store.set_compressed(&s.id, &c)?;
                 c
@@ -289,6 +285,19 @@ fn take_within_budget(
 #[cfg(feature = "llama")]
 fn input_budget(n_ctx: u32, reserve_out: usize) -> usize {
     (n_ctx as usize).saturating_sub(reserve_out + 600)
+}
+
+/// Render segments as newline-joined `speaker: text` lines.
+#[cfg(feature = "llama")]
+fn build_transcript(
+    segs: &[zord_core::Segment],
+    names: &std::collections::HashMap<i32, String>,
+) -> String {
+    segs
+        .iter()
+        .map(|seg| format!("{}: {}", seg.speaker_label(names), seg.text))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Assemble `(header, body)` pairs into the model-facing input block.

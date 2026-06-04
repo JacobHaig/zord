@@ -219,6 +219,32 @@ fn to_cfg_path(p: &std::path::Path) -> Option<String> {
     Some(p.to_string_lossy().into_owned())
 }
 
+/// Assemble the offline diarization config from the model paths and clustering knobs.
+fn build_diar_config(
+    seg: &std::path::Path,
+    emb: &std::path::Path,
+    num_speakers: Option<i32>,
+    threshold: f32,
+) -> OfflineSpeakerDiarizationConfig {
+    OfflineSpeakerDiarizationConfig {
+        segmentation: OfflineSpeakerSegmentationModelConfig {
+            pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
+                model: to_cfg_path(seg),
+            },
+            ..Default::default()
+        },
+        embedding: SpeakerEmbeddingExtractorConfig {
+            model: to_cfg_path(emb),
+            ..Default::default()
+        },
+        clustering: FastClusteringConfig {
+            num_clusters: num_speakers.unwrap_or(-1),
+            threshold,
+        },
+        ..Default::default()
+    }
+}
+
 /// One diarized span: a time range (session-relative ms) labeled with a 0-based
 /// speaker index.
 #[derive(Debug, Clone, Copy)]
@@ -242,23 +268,7 @@ impl Diarizer {
         if !seg.exists() || !emb.exists() {
             anyhow::bail!("diarization models are not downloaded yet");
         }
-        let config = OfflineSpeakerDiarizationConfig {
-            segmentation: OfflineSpeakerSegmentationModelConfig {
-                pyannote: OfflineSpeakerSegmentationPyannoteModelConfig {
-                    model: to_cfg_path(&seg),
-                },
-                ..Default::default()
-            },
-            embedding: SpeakerEmbeddingExtractorConfig {
-                model: to_cfg_path(&emb),
-                ..Default::default()
-            },
-            clustering: FastClusteringConfig {
-                num_clusters: num_speakers.unwrap_or(-1),
-                threshold,
-            },
-            ..Default::default()
-        };
+        let config = build_diar_config(&seg, &emb, num_speakers, threshold);
         let inner = OfflineSpeakerDiarization::create(&config)
             .ok_or_else(|| anyhow!("failed to create the diarizer (bad/missing models?)"))?;
         Ok(Self { inner })

@@ -40,43 +40,58 @@ impl TranscribeBackend for WhisperBackend {
     fn transcribe(&self, samples: &[f32], source: Source, base_offset_ms: u64) -> Result<Vec<Segment>> {
         let mut state = self.ctx.create_state()?;
 
-        let mut params =
-            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_n_threads(self.n_threads);
-        params.set_language(Some("en"));
-        params.set_translate(false);
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_suppress_blank(true);
+        let params = build_full_params(self.n_threads);
 
         state.full(params, samples)?;
 
-        let n = state.full_n_segments();
-        let mut out = Vec::new();
-        for i in 0..n {
-            let segment = match state.get_segment(i) {
-                Some(s) => s,
-                None => continue,
-            };
-            let text = segment.to_str()?.trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            // whisper timestamps are in centiseconds (10 ms units).
-            let t0 = segment.start_timestamp().max(0) as u64 * 10;
-            let t1 = segment.end_timestamp().max(0) as u64 * 10;
-            out.push(Segment {
-                id: None,
-                source,
-                t_start_ms: base_offset_ms + t0,
-                t_end_ms: base_offset_ms + t1,
-                text,
-                words: Vec::new(),
-                speaker: None,
-            });
-        }
-        Ok(out)
+        collect_segments(&state, source, base_offset_ms)
     }
+}
+
+/// Build the whisper full-inference parameters for the given thread count.
+fn build_full_params(n_threads: i32) -> whisper_rs::FullParams<'static, 'static> {
+    let mut params =
+        whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(n_threads);
+    params.set_language(Some("en"));
+    params.set_translate(false);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_suppress_blank(true);
+    params
+}
+
+/// Collect non-empty transcript segments from a completed whisper state.
+fn collect_segments(
+    state: &whisper_rs::WhisperState,
+    source: Source,
+    base_offset_ms: u64,
+) -> Result<Vec<Segment>> {
+    let n = state.full_n_segments();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let segment = match state.get_segment(i) {
+            Some(s) => s,
+            None => continue,
+        };
+        let text = segment.to_str()?.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        // whisper timestamps are in centiseconds (10 ms units).
+        let t0 = segment.start_timestamp().max(0) as u64 * 10;
+        let t1 = segment.end_timestamp().max(0) as u64 * 10;
+        out.push(Segment {
+            id: None,
+            source,
+            t_start_ms: base_offset_ms + t0,
+            t_end_ms: base_offset_ms + t1,
+            text,
+            words: Vec::new(),
+            speaker: None,
+        });
+    }
+    Ok(out)
 }

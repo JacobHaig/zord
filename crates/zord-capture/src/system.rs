@@ -269,25 +269,31 @@ mod windows_impl {
             if frames == 0 {
                 continue;
             }
-            let mut mono = Vec::with_capacity(frames);
-            for _ in 0..frames {
-                let mut sum = 0.0f32;
-                for _ in 0..CHANNELS {
-                    let b = [
-                        queue.pop_front().unwrap(),
-                        queue.pop_front().unwrap(),
-                        queue.pop_front().unwrap(),
-                        queue.pop_front().unwrap(),
-                    ];
-                    sum += f32::from_le_bytes(b);
-                }
-                mono.push(sum / CHANNELS as f32);
-            }
+            let mono = drain_frames_to_mono(&mut queue, frames);
             if sink.send(mono).is_err() {
                 break; // pipeline dropped the receiver
             }
         }
         let _ = audio_client.stop_stream();
+    }
+
+    /// Pop `frames` interleaved f32 frames off `queue` and downmix to mono.
+    fn drain_frames_to_mono(queue: &mut VecDeque<u8>, frames: usize) -> Vec<f32> {
+        let mut mono = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            let mut sum = 0.0f32;
+            for _ in 0..CHANNELS {
+                let b = [
+                    queue.pop_front().unwrap(),
+                    queue.pop_front().unwrap(),
+                    queue.pop_front().unwrap(),
+                    queue.pop_front().unwrap(),
+                ];
+                sum += f32::from_le_bytes(b);
+            }
+            mono.push(sum / CHANNELS as f32);
+        }
+        mono
     }
 }
 

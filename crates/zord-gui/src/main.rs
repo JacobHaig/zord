@@ -580,11 +580,7 @@ fn MainApp() -> Element {
                 let s = settings.peek().clone();
                 let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
                 let audio_dir = s.audio_dir().unwrap_or_else(|_| PathBuf::from("audio"));
-                let (record_mic, record_system) = match s.capture_mode.as_str() {
-                    "mic" => (true, false),
-                    "system" => (false, true),
-                    _ => (true, true),
-                };
+                let (record_mic, record_system) = capture_sources(s.capture_mode.as_str());
                 let _ = engine.rec_tx.send(RecorderCmd::Start {
                     model,
                     keep_audio: s.keep_audio,
@@ -1232,27 +1228,8 @@ fn MainApp() -> Element {
                                     let elapsed = now.saturating_sub(start) / 1000;
                                     let (icon, title) = job_label(&key);
                                     // Per-job detail, optional progress %, and ETA.
-                                    let (detail, pct): (String, Option<u8>) = match key.as_str() {
-                                        "download" => {
-                                            let (name, p) = mp.clone().unwrap_or_default();
-                                            let eta = if p > 0 && p < 100 {
-                                                format!(" · ETA {}", fmt_dur(elapsed * (100 - p as u64) / p as u64))
-                                            } else {
-                                                String::new()
-                                            };
-                                            (format!("{name} · {p}%{eta}"), Some(p))
-                                        }
-                                        "diarize" => {
-                                            let d = match est {
-                                                Some(e) => format!("~{} left (estimate)", fmt_dur(e.saturating_sub(elapsed))),
-                                                None => "processing audio…".to_string(),
-                                            };
-                                            (d, None)
-                                        }
-                                        "record" => ("capturing audio".to_string(), None),
-                                        "overview" => ("compressing + synthesizing".to_string(), None),
-                                        _ => ("running…".to_string(), None),
-                                    };
+                                    let (detail, pct): (String, Option<u8>) =
+                                        job_detail(key.as_str(), &mp, est, elapsed);
                                     rsx! {
                                         div { key: "{key}", class: "job-row",
                                             span { class: "job-icon", "{icon}" }
@@ -2370,6 +2347,36 @@ fn job_label(key: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Per-job detail line + optional progress % for a background-job row.
+fn job_detail(
+    key: &str,
+    mp: &Option<(String, u8)>,
+    est: Option<u64>,
+    elapsed: u64,
+) -> (String, Option<u8>) {
+    match key {
+        "download" => {
+            let (name, p) = mp.clone().unwrap_or_default();
+            let eta = if p > 0 && p < 100 {
+                format!(" · ETA {}", fmt_dur(elapsed * (100 - p as u64) / p as u64))
+            } else {
+                String::new()
+            };
+            (format!("{name} · {p}%{eta}"), Some(p))
+        }
+        "diarize" => {
+            let d = match est {
+                Some(e) => format!("~{} left (estimate)", fmt_dur(e.saturating_sub(elapsed))),
+                None => "processing audio…".to_string(),
+            };
+            (d, None)
+        }
+        "record" => ("capturing audio".to_string(), None),
+        "overview" => ("compressing + synthesizing".to_string(), None),
+        _ => ("running…".to_string(), None),
+    }
+}
+
 /// Stable display order for the jobs panel.
 fn job_order(key: &str) -> u8 {
     match key {
@@ -2381,6 +2388,15 @@ fn job_order(key: &str) -> u8 {
         "diarize" => 5,
         "chat" => 6,
         _ => 9,
+    }
+}
+
+/// Map a capture-mode string to `(record_mic, record_system)` flags.
+fn capture_sources(mode: &str) -> (bool, bool) {
+    match mode {
+        "mic" => (true, false),
+        "system" => (false, true),
+        _ => (true, true),
     }
 }
 
