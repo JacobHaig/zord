@@ -262,8 +262,11 @@ body {
 .search-input-big { padding: 11px 14px; font-size: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--fg); }
 .search-input-big:focus { outline: none; border-color: var(--me); }
 .search-count { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
-.search-results { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
-.search-group { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+/* Normal scrolling block (NOT a flex column — flex items shrink to fit the
+   height and, with the group's overflow:hidden, clip their own contents). */
+.search-results { flex: 1; min-height: 0; overflow-y: auto; }
+.search-group { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 12px; }
+.search-group:last-child { margin-bottom: 0; }
 .search-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 10px 14px; cursor: pointer; border-bottom: 1px solid var(--line); background: var(--panel-2); }
 .search-group-head:hover .sg-title { color: var(--me); }
 .sg-title { font-size: 14px; font-weight: 600; }
