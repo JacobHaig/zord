@@ -181,15 +181,20 @@ fn catalog() -> Vec<ModelInfo> {
         });
     }
     #[cfg(feature = "diarization")]
-    for &m in zord_diarize::EmbeddingModel::ALL {
-        models.push(ModelInfo {
-            name: m.name().to_string(),
-            size: m.size_label().to_string(),
-            description: m.label().to_string(),
-            downloaded: zord_diarize::diar_models_present(m),
-            kind: "diarization".to_string(),
-            urls: m.download_urls(),
-        });
+    {
+        let seg = zord_diarize::SegmentationModel::parse_or_default(
+            &zord_config::Settings::load().diarize_segmentation_model,
+        );
+        for &m in zord_diarize::EmbeddingModel::ALL {
+            models.push(ModelInfo {
+                name: m.name().to_string(),
+                size: m.size_label().to_string(),
+                description: m.label().to_string(),
+                downloaded: zord_diarize::diar_models_present(seg, m),
+                kind: "diarization".to_string(),
+                urls: m.download_urls(seg),
+            });
+        }
     }
     models
 }
@@ -719,7 +724,10 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
 
                 #[cfg(feature = "diarization")]
                 let handled_diar = if let Some(dm) = zord_diarize::EmbeddingModel::parse(&name) {
-                    if let Err(e) = zord_diarize::ensure_diar_models(dm, &mut progress) {
+                    let seg = zord_diarize::SegmentationModel::parse_or_default(
+                        &zord_config::Settings::load().diarize_segmentation_model,
+                    );
+                    if let Err(e) = zord_diarize::ensure_diar_models(seg, dm, &mut progress) {
                         tracing::warn!("model download failed for {name}: {e}");
                         let _ = ev.send(Event::DownloadFailed { name: name.clone() });
                     }
@@ -1093,8 +1101,10 @@ fn apply_diarization(
 
     let settings = zord_config::Settings::load();
     let model = zord_diarize::EmbeddingModel::parse_or_default(&settings.diarize_embedding_model);
+    let seg =
+        zord_diarize::SegmentationModel::parse_or_default(&settings.diarize_segmentation_model);
 
-    if !zord_diarize::diar_models_present(model) {
+    if !zord_diarize::diar_models_present(seg, model) {
         let _ = ev.send(Event::Notice("Downloading speaker models…".to_string()));
         let ev2 = ev.clone();
         let mut progress = move |done: u64, total: Option<u64>| {
@@ -1105,7 +1115,7 @@ fn apply_diarization(
                 });
             }
         };
-        if let Err(e) = zord_diarize::ensure_diar_models(model, &mut progress) {
+        if let Err(e) = zord_diarize::ensure_diar_models(seg, model, &mut progress) {
             let _ = ev.send(Event::Notice(format!("speaker models: {e}")));
             return;
         }
@@ -1117,7 +1127,7 @@ fn apply_diarization(
     let pinned = num_speakers.unwrap_or(settings.diarize_num_speakers);
     let num_speakers = (pinned > 0).then_some(pinned as i32);
     let threshold = settings.diarize_threshold.clamp(0.1, 0.95);
-    let diarizer = match zord_diarize::Diarizer::load(model, num_speakers, threshold) {
+    let diarizer = match zord_diarize::Diarizer::load(seg, model, num_speakers, threshold) {
         Ok(d) => d,
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("diarizer: {e}")));

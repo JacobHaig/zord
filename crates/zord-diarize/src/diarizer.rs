@@ -18,12 +18,70 @@ const SEG_TAG: &str =
 const EMB_TAG: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models";
 
-/// The shared segmentation model (pyannote 3.0). Archive stem == extracted dir.
-const SEG_STEM: &str = "sherpa-onnx-pyannote-segmentation-3-0";
-
 /// Default cosine threshold for clustering / online matching. Lower = more
 /// likely to merge speakers; higher = more likely to split.
 const DEFAULT_THRESHOLD: f32 = 0.5;
+
+/// Selectable speaker-segmentation model. All of these load through sherpa's
+/// pyannote config — the Reverb models are pyannote-architecture variants
+/// fine-tuned by Rev on ~26k hours of expertly-labeled real meetings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentationModel {
+    /// pyannote segmentation-3.0 — the long-standing default (MIT license).
+    Pyannote30,
+    /// Rev Reverb v1 — pyannote-3.0 fine-tune, ~16% better word-diarization
+    /// error than stock pyannote. Non-commercial license (Rev).
+    ReverbV1,
+    /// Rev Reverb v2 — WavLM-based, Rev's most accurate (~22% better than
+    /// stock pyannote). Large download. Non-commercial license (Rev).
+    ReverbV2,
+}
+
+impl SegmentationModel {
+    pub const ALL: &'static [SegmentationModel] = &[
+        SegmentationModel::Pyannote30,
+        SegmentationModel::ReverbV1,
+        SegmentationModel::ReverbV2,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SegmentationModel::Pyannote30 => "pyannote-3.0",
+            SegmentationModel::ReverbV1 => "reverb-v1",
+            SegmentationModel::ReverbV2 => "reverb-v2",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SegmentationModel::Pyannote30 => "pyannote 3.0 — default (MIT license)",
+            SegmentationModel::ReverbV1 => {
+                "Reverb v1 — more accurate, ~11 MB (non-commercial license)"
+            }
+            SegmentationModel::ReverbV2 => {
+                "Reverb v2 — most accurate, ~254 MB (non-commercial license)"
+            }
+        }
+    }
+
+    /// Archive stem on the sherpa-onnx release == the extracted directory name
+    /// (each contains `model.onnx`).
+    fn stem(self) -> &'static str {
+        match self {
+            SegmentationModel::Pyannote30 => "sherpa-onnx-pyannote-segmentation-3-0",
+            SegmentationModel::ReverbV1 => "sherpa-onnx-reverb-diarization-v1",
+            SegmentationModel::ReverbV2 => "sherpa-onnx-reverb-diarization-v2",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.name() == s)
+    }
+
+    pub fn parse_or_default(s: &str) -> Self {
+        Self::parse(s).unwrap_or(SegmentationModel::Pyannote30)
+    }
+}
 
 /// Selectable speaker-embedding model. Segmentation (pyannote) is shared by all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,11 +159,11 @@ impl EmbeddingModel {
     }
 
     /// Direct download URLs for manual fetch when the in-app download fails.
-    /// Diarization needs two files: the shared pyannote segmentation archive
+    /// Diarization needs two files: the chosen segmentation archive
     /// (`.tar.bz2`, extract into the models folder) and this embedding `.onnx`.
-    pub fn download_urls(self) -> Vec<String> {
+    pub fn download_urls(self, seg: SegmentationModel) -> Vec<String> {
         vec![
-            format!("{SEG_TAG}/{SEG_STEM}.tar.bz2"),
+            format!("{SEG_TAG}/{}.tar.bz2", seg.stem()),
             format!("{EMB_TAG}/{}", self.filename()),
         ]
     }
@@ -119,15 +177,15 @@ fn models_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn segmentation_path() -> Result<PathBuf> {
-    Ok(models_dir()?.join(SEG_STEM).join("model.onnx"))
+fn segmentation_path(seg: SegmentationModel) -> Result<PathBuf> {
+    Ok(models_dir()?.join(seg.stem()).join("model.onnx"))
 }
 
-fn segmentation_present() -> bool {
+fn segmentation_present(seg: SegmentationModel) -> bool {
     // Require a non-empty file: a truncated/interrupted download leaves a 0-byte
     // (or partial) model.onnx that "exists" but makes sherpa produce garbage or
     // no segments. Treat empty as absent so it gets re-fetched.
-    segmentation_path()
+    segmentation_path(seg)
         .map(|p| p.exists() && std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false))
         .unwrap_or(false)
 }
@@ -142,40 +200,46 @@ fn embedding_present(model: EmbeddingModel) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether *both* required models (segmentation + the chosen embedding) are
+/// Whether *both* required models (the chosen segmentation + embedding) are
 /// present locally, i.e. diarization can run without a download.
-pub fn diar_models_present(model: EmbeddingModel) -> bool {
-    segmentation_present() && embedding_present(model)
+pub fn diar_models_present(seg: SegmentationModel, model: EmbeddingModel) -> bool {
+    segmentation_present(seg) && embedding_present(model)
 }
 
 /// Catalog entry for the model-management UI: (id, label, size, present).
-pub fn list_embedding_models() -> Vec<(&'static str, &'static str, &'static str, bool)> {
+pub fn list_embedding_models(
+    seg: SegmentationModel,
+) -> Vec<(&'static str, &'static str, &'static str, bool)> {
     EmbeddingModel::ALL
         .iter()
-        .map(|m| (m.name(), m.label(), m.size_label(), diar_models_present(*m)))
+        .map(|m| (m.name(), m.label(), m.size_label(), diar_models_present(seg, *m)))
         .collect()
 }
 
-/// Ensure both the shared segmentation model and the chosen embedding model are
+/// Ensure both the chosen segmentation model and the chosen embedding model are
 /// downloaded; returns their paths. `progress` → (downloaded, total) bytes.
 pub fn ensure_diar_models(
+    seg: SegmentationModel,
     model: EmbeddingModel,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(PathBuf, PathBuf)> {
-    let seg = ensure_segmentation(progress)?;
+    let seg = ensure_segmentation(seg, progress)?;
     let emb = ensure_embedding(model, progress)?;
     Ok((seg, emb))
 }
 
-fn ensure_segmentation(progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<PathBuf> {
-    let path = segmentation_path()?;
+fn ensure_segmentation(
+    seg: SegmentationModel,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf> {
+    let path = segmentation_path(seg)?;
     if path.exists() {
         return Ok(path);
     }
     let dir = models_dir()?;
-    let archive_url = format!("{SEG_TAG}/{SEG_STEM}.tar.bz2");
+    let archive_url = format!("{SEG_TAG}/{}.tar.bz2", seg.stem());
     tracing::info!(%archive_url, "downloading diarization segmentation model (first run)");
-    let tarball = dir.join(format!("{SEG_STEM}.tar.bz2"));
+    let tarball = dir.join(format!("{}.tar.bz2", seg.stem()));
     zord_net::download_to_file(&archive_url, &tarball, progress)?;
 
     let file = std::fs::File::open(&tarball)?;
@@ -260,10 +324,16 @@ pub struct Diarizer {
 }
 
 impl Diarizer {
-    /// Load the diarizer for `model`. `num_speakers` forces a fixed count
-    /// (`None` = auto-detect). `threshold` controls clustering granularity.
-    pub fn load(model: EmbeddingModel, num_speakers: Option<i32>, threshold: f32) -> Result<Self> {
-        let seg = segmentation_path()?;
+    /// Load the diarizer for the chosen segmentation + embedding models.
+    /// `num_speakers` forces a fixed count (`None` = auto-detect). `threshold`
+    /// controls clustering granularity.
+    pub fn load(
+        seg_model: SegmentationModel,
+        model: EmbeddingModel,
+        num_speakers: Option<i32>,
+        threshold: f32,
+    ) -> Result<Self> {
+        let seg = segmentation_path(seg_model)?;
         let emb = embedding_path(model)?;
         if !seg.exists() || !emb.exists() {
             anyhow::bail!("diarization models are not downloaded yet");
@@ -272,17 +342,6 @@ impl Diarizer {
         let inner = OfflineSpeakerDiarization::create(&config)
             .ok_or_else(|| anyhow!("failed to create the diarizer (bad/missing models?)"))?;
         Ok(Self { inner })
-    }
-
-    /// Convenience constructor using the default threshold and auto speaker count.
-    pub fn load_default(model: EmbeddingModel) -> Result<Self> {
-        Self::load(model, None, DEFAULT_THRESHOLD)
-    }
-
-    /// Like [`load_default`], but pin a fixed speaker count (`None` = auto).
-    /// Forcing the known headcount avoids auto-clustering over-splitting.
-    pub fn load_with_speakers(model: EmbeddingModel, num_speakers: Option<i32>) -> Result<Self> {
-        Self::load(model, num_speakers, DEFAULT_THRESHOLD)
     }
 
     /// Sample rate the segmentation model expects (typically 16 kHz).

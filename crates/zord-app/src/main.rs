@@ -369,8 +369,10 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
 
     let settings = zord_config::Settings::load();
     let model = zord_diarize::EmbeddingModel::parse_or_default(&settings.diarize_embedding_model);
-    eprintln!("Preparing speaker models '{}'…", model.name());
-    zord_diarize::ensure_diar_models(model, &mut |done, total| {
+    let seg =
+        zord_diarize::SegmentationModel::parse_or_default(&settings.diarize_segmentation_model);
+    eprintln!("Preparing speaker models '{}' + '{}'…", seg.name(), model.name());
+    zord_diarize::ensure_diar_models(seg, model, &mut |done, total| {
         if let Some(total) = total {
             eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
         }
@@ -379,8 +381,12 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
 
     let num_speakers =
         (settings.diarize_num_speakers > 0).then_some(settings.diarize_num_speakers as i32);
-    let diarizer =
-        zord_diarize::Diarizer::load(model, num_speakers, settings.diarize_threshold.clamp(0.1, 0.95))?;
+    let diarizer = zord_diarize::Diarizer::load(
+        seg,
+        model,
+        num_speakers,
+        settings.diarize_threshold.clamp(0.1, 0.95),
+    )?;
     let spans = diarizer.diarize(&samples)?;
     if spans.is_empty() {
         eprintln!(

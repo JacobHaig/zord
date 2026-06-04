@@ -1773,6 +1773,25 @@ fn MainApp() -> Element {
                                                     }
                                                 }
                                                 div { class: "field",
+                                                    label { "Segmentation model" }
+                                                    select {
+                                                        onchange: move |e: FormEvent| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.diarize_segmentation_model = e.value();
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                        for sm in seg_model_options() {
+                                                            option {
+                                                                value: "{sm.0}",
+                                                                selected: settings.read().diarize_segmentation_model == sm.0,
+                                                                "{sm.1}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                p { class: "field-note", "How speech is split into speaker turns. Rev's Reverb models are fine-tuned on ~26k hours of real meetings — noticeably better turn detection, but licensed for non-commercial use. Downloads on first use; re-run Identify speakers to apply." }
+                                                div { class: "field",
                                                     label { "Clustering threshold (auto mode): {settings.read().diarize_threshold:.2}" }
                                                     input {
                                                         r#type: "number", min: "0.1", max: "0.95", step: "0.05", class: "days",
@@ -2606,6 +2625,22 @@ fn relative_time(ms: u64) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Segmentation-model choices for the Speakers settings: (id, label).
+/// Empty without the diarization feature (the section isn't shown then).
+fn seg_model_options() -> Vec<(&'static str, &'static str)> {
+    #[cfg(feature = "diarization")]
+    {
+        zord_diarize::SegmentationModel::ALL
+            .iter()
+            .map(|m| (m.name(), m.label()))
+            .collect()
+    }
+    #[cfg(not(feature = "diarization"))]
+    {
+        Vec::new()
     }
 }
 

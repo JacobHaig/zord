@@ -44,6 +44,8 @@ storage happen on your machine.
   transcript + exports. Runs offline after recording (and on demand); an optional
   live mode shows provisional labels while recording. Each meeting remembers its
   own expected speaker count (set it next to **Identify speakers**; blank = auto).
+  The segmentation model is selectable too: stock pyannote 3.0, or Rev's
+  **Reverb v1/v2** fine-tunes (more accurate; non-commercial license).
 - 🔊 **Per-line audio replay** — hover a transcript line and press ▶ to hear
   exactly that span of the retained audio (handy for fixing a mis-transcribed
   line by ear). The button appears only when that channel's audio file exists

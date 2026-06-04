@@ -14,5 +14,5 @@ mod diarizer;
 #[cfg(feature = "sherpa")]
 pub use diarizer::{
     delete_embedding, diar_models_present, ensure_diar_models, list_embedding_models, DiarSegment,
-    Diarizer, EmbeddingModel, LiveLabeler,
+    Diarizer, EmbeddingModel, LiveLabeler, SegmentationModel,
 };

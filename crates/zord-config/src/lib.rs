@@ -77,6 +77,11 @@ pub struct Settings {
     /// auto. Lower = split into more speakers; higher = merge into fewer.
     #[serde(default = "default_diarize_threshold")]
     pub diarize_threshold: f32,
+    /// Speaker-segmentation model id for diarization ("pyannote-3.0",
+    /// "reverb-v1", "reverb-v2"). Reverb = Rev's fine-tunes — more accurate but
+    /// under a non-commercial license; downloaded on first use.
+    #[serde(default = "default_segmentation_model")]
+    pub diarize_segmentation_model: String,
     /// Context window (tokens) used when *compressing* a meeting into dense prose
     /// (Phase 23). Larger ingests a longer meeting without truncation but costs
     /// more KV-cache RAM + CPU prefill time. 16K fits ~an hour; a 3B model is the
@@ -196,6 +201,10 @@ fn default_embedding_model() -> String {
     "3dspeaker-eres2netv2".to_string()
 }
 
+fn default_segmentation_model() -> String {
+    "pyannote-3.0".to_string()
+}
+
 fn default_capture_mode() -> String {
     "both".to_string()
 }
@@ -254,6 +263,7 @@ impl Default for Settings {
             diarize_num_speakers: 0,
             auto_title: true,
             diarize_threshold: default_diarize_threshold(),
+            diarize_segmentation_model: default_segmentation_model(),
             compress_ctx: default_compress_ctx(),
             overview_ctx: default_overview_ctx(),
             overview_max_meetings: default_overview_max_meetings(),
