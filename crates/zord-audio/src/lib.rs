@@ -7,4 +7,4 @@ mod wav;
 
 pub use resample::MonoResampler;
 pub use segment::{Segmenter, SegmenterConfig, VadSegment};
-pub use wav::{read_wav_mono_f32, WavWriter};
+pub use wav::{read_wav_mono_f32, read_wav_slice_mono_f32, WavWriter};

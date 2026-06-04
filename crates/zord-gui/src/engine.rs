@@ -87,6 +87,15 @@ pub enum Event {
     ChatReply { scope: ChatScope, reply: String },
     /// Custom names for diarized speakers in the viewed session (index → name).
     Speakers(std::collections::HashMap<i32, String>),
+    /// The viewed session's saved expected-speaker count (0 = auto-detect).
+    DiarizeSpeakers(u32),
+    /// Which retained per-channel WAVs exist on disk for the viewed session
+    /// (absolute paths, me/others). Lines from a channel without a file get no
+    /// replay button.
+    AudioFiles { me: Option<String>, others: Option<String> },
+    /// The transcript line (db id) currently playing back. `None` = stopped or
+    /// finished.
+    Playing(Option<i64>),
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -220,12 +229,18 @@ pub enum DbCmd {
         title: String,
     },
     DeleteSession(String),
+    /// Delete a session's stored AI summary (transcript is untouched).
+    ClearSummary(String),
+    /// Delete a session's stored dense-prose compression (transcript is untouched).
+    ClearCompressed(String),
     EditSegment {
         segment_id: i64,
         text: String,
     },
     /// (Re-)run speaker diarization on a past session's retained "Others" audio.
-    Diarize(String),
+    /// `num_speakers` pins the speaker count for this session (0 = auto-detect);
+    /// it is persisted on the session so it's remembered next time.
+    Diarize { id: String, num_speakers: u32 },
     /// Rename a diarized speaker (0-based index) within a session.
     RenameSpeaker {
         id: String,
@@ -234,6 +249,22 @@ pub enum DbCmd {
     },
     /// Load the most recently stored cross-meeting Overview (Phase 23).
     LoadOverview,
+}
+
+/// Replay commands for the playback worker. The rodio output stream is `!Send`
+/// (like the capture streams), so a dedicated thread owns it.
+pub enum PlayCmd {
+    /// Play `[start_ms, end_ms)` of `wav` — a retained 16 kHz track, which is
+    /// wall-clock aligned, so segment timestamps map 1:1 onto sample offsets.
+    /// `segment_id` is reported back via [`Event::Playing`] to mark the line.
+    Play {
+        segment_id: i64,
+        wav: PathBuf,
+        start_ms: u64,
+        end_ms: u64,
+    },
+    /// Stop any current playback.
+    Stop,
 }
 
 /// Model-management commands (download/delete can take minutes, so they run on
@@ -268,6 +299,8 @@ pub struct Engine {
     pub model_tx: mpsc::Sender<ModelCmd>,
     /// Summarize / compress a session (heavy; runs on its own thread).
     pub summ_tx: mpsc::Sender<SummCmd>,
+    /// Replay a transcript line from a retained WAV.
+    pub play_tx: mpsc::Sender<PlayCmd>,
 }
 
 impl Engine {
@@ -279,6 +312,7 @@ impl Engine {
         let (db_tx, db_rx) = mpsc::channel::<DbCmd>();
         let (model_tx, model_rx) = mpsc::channel::<ModelCmd>();
         let (summ_tx, summ_rx) = mpsc::channel::<SummCmd>();
+        let (play_tx, play_rx) = mpsc::channel::<PlayCmd>();
 
         {
             let ev = ev_tx.clone();
@@ -295,8 +329,12 @@ impl Engine {
             thread::spawn(move || model_loop(model_rx, ev));
         }
         {
-            let ev = ev_tx;
+            let ev = ev_tx.clone();
             thread::spawn(move || summarize_loop(summ_rx, ev, db_path));
+        }
+        {
+            let ev = ev_tx;
+            thread::spawn(move || play_loop(play_rx, ev));
         }
         (
             Engine {
@@ -304,6 +342,7 @@ impl Engine {
                 db_tx,
                 model_tx,
                 summ_tx,
+                play_tx,
             },
             ev_rx,
         )
@@ -782,6 +821,11 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
                 let _ = ev.send(Event::Summary(store.get_summary(&id).ok().flatten()));
                 let _ = ev.send(Event::Compressed(store.get_compressed(&id).ok().flatten()));
+                let _ = ev.send(Event::DiarizeSpeakers(
+                    store.get_diarize_speakers(&id).ok().flatten().unwrap_or(0),
+                ));
+                let (me, others) = session_audio_files(&store, &id);
+                let _ = ev.send(Event::AudioFiles { me, others });
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
                 Ok(path) => {
@@ -799,6 +843,16 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = store.delete_session(&id);
                 emit_sessions(&store, &ev);
             }
+            DbCmd::ClearSummary(id) => {
+                let _ = store.clear_summary(&id);
+                let _ = ev.send(Event::Summary(None));
+                emit_sessions(&store, &ev); // refresh sidebar badges
+            }
+            DbCmd::ClearCompressed(id) => {
+                let _ = store.clear_compressed(&id);
+                let _ = ev.send(Event::Compressed(None));
+                emit_sessions(&store, &ev); // refresh sidebar badges
+            }
             DbCmd::EditSegment { segment_id, text } => {
                 let _ = store.update_segment_text(segment_id, &text);
             }
@@ -810,12 +864,121 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let data = load_overview(&store);
                 let _ = ev.send(Event::Overview(data));
             }
-            DbCmd::Diarize(id) => {
+            DbCmd::Diarize { id, num_speakers } => {
+                // Remember the chosen count on the session for next time.
+                let _ = store.set_diarize_speakers(&id, num_speakers);
                 // Heavy (loads ONNX + clusters); run off the db thread so queries
                 // stay responsive. The worker opens its own Store.
                 let ev = ev.clone();
                 let db_path = db_path.clone();
-                thread::spawn(move || diarize_session_ondemand(&db_path, &id, &ev));
+                thread::spawn(move || diarize_session_ondemand(&db_path, &id, num_speakers, &ev));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Playback thread (replay one transcript line from a retained WAV)
+// ---------------------------------------------------------------------------
+
+/// Absolute paths of the retained per-channel WAVs that actually exist on disk
+/// for a session, as (me, others). Either may be missing: with default settings
+/// only the Others track is kept (for re-diarization), and retention may have
+/// deleted old audio.
+fn session_audio_files(store: &Store, session_id: &str) -> (Option<String>, Option<String>) {
+    let prefix = store
+        .get_session(session_id)
+        .ok()
+        .flatten()
+        .and_then(|s| s.audio_path);
+    let Some(prefix) = prefix else {
+        return (None, None);
+    };
+    let existing = |suffix: &str| {
+        let p = format!("{prefix}.{suffix}.wav");
+        std::path::Path::new(&p).exists().then_some(p)
+    };
+    (existing("me"), existing("others"))
+}
+
+/// Owns the audio output stream (created lazily on first play) and plays one
+/// clip at a time: a new `Play` replaces the current clip, `Stop` silences.
+/// Emits [`Event::Playing`] transitions so the UI can mark the active line.
+fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
+    let mut output: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
+    let mut sink: Option<rodio::Sink> = None;
+    let mut current: Option<i64> = None;
+    loop {
+        // Block when idle; poll while playing so we can report "finished".
+        let cmd = if current.is_some() {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(c) => Some(c),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        } else {
+            match rx.recv() {
+                Ok(c) => Some(c),
+                Err(_) => return,
+            }
+        };
+        match cmd {
+            Some(PlayCmd::Play { segment_id, wav, start_ms, end_ms }) => {
+                if let Some(s) = sink.take() {
+                    s.stop();
+                }
+                current = None;
+                if output.is_none() {
+                    output = rodio::OutputStream::try_default().ok();
+                }
+                let Some((_, handle)) = output.as_ref() else {
+                    let _ = ev.send(Event::Notice("No audio output device available.".to_string()));
+                    let _ = ev.send(Event::Playing(None));
+                    continue;
+                };
+                // Retained WAVs are wall-clock aligned (silence-padded), so the
+                // segment's timestamps map directly onto sample offsets.
+                let sr = zord_core::WHISPER_SAMPLE_RATE as u64;
+                let start = (start_ms * sr / 1000) as u32;
+                let len = (end_ms.saturating_sub(start_ms) * sr / 1000) as u32;
+                let samples = zord_audio::read_wav_slice_mono_f32(&wav, start, len).unwrap_or_default();
+                if samples.is_empty() {
+                    let _ = ev.send(Event::Notice("Couldn't read this line's audio.".to_string()));
+                    let _ = ev.send(Event::Playing(None));
+                    continue;
+                }
+                match rodio::Sink::try_new(handle) {
+                    Ok(s) => {
+                        s.append(rodio::buffer::SamplesBuffer::new(
+                            1,
+                            zord_core::WHISPER_SAMPLE_RATE,
+                            samples,
+                        ));
+                        sink = Some(s);
+                        current = Some(segment_id);
+                        let _ = ev.send(Event::Playing(Some(segment_id)));
+                    }
+                    Err(e) => {
+                        let _ = ev.send(Event::Notice(format!("audio output: {e}")));
+                        let _ = ev.send(Event::Playing(None));
+                    }
+                }
+            }
+            Some(PlayCmd::Stop) => {
+                if let Some(s) = sink.take() {
+                    s.stop();
+                }
+                if current.take().is_some() {
+                    let _ = ev.send(Event::Playing(None));
+                }
+            }
+            // Poll tick: did the current clip finish on its own?
+            None => {
+                if sink.as_ref().is_some_and(|s| s.empty()) {
+                    sink = None;
+                    current = None;
+                    let _ = ev.send(Event::Playing(None));
+                }
             }
         }
     }
@@ -823,10 +986,16 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
 
 /// On-demand diarization for a past session: locate its retained "Others" WAV
 /// from the stored audio prefix, then run the offline pass.
-fn diarize_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedSender<Event>) {
+/// `num_speakers` pins the speaker count (0 = auto-detect).
+fn diarize_session_ondemand(
+    db_path: &PathBuf,
+    session_id: &str,
+    num_speakers: u32,
+    ev: &UnboundedSender<Event>,
+) {
     #[cfg(not(feature = "diarization"))]
     {
-        let _ = (db_path, session_id);
+        let _ = (db_path, session_id, num_speakers);
         let _ = ev.send(Event::Notice(
             "Diarization isn't built in — rebuild with `--features diarization`.".to_string(),
         ));
@@ -839,7 +1008,7 @@ fn diarize_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedS
         // how this exits (success, no-result, error, or panic) — otherwise a
         // failed run leaves the button stuck and the user sees nothing happen.
         let ran = catch_unwind(AssertUnwindSafe(|| {
-            diarize_session_inner(db_path, session_id, ev)
+            diarize_session_inner(db_path, session_id, num_speakers, ev)
         }));
         if ran.is_err() {
             let _ = ev.send(Event::Notice(
@@ -857,7 +1026,12 @@ fn diarize_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedS
 /// The actual on-demand diarization work; wrapped by [`diarize_session_ondemand`]
 /// for panic-safety + guaranteed busy-state clearing.
 #[cfg(feature = "diarization")]
-fn diarize_session_inner(db_path: &PathBuf, session_id: &str, ev: &UnboundedSender<Event>) {
+fn diarize_session_inner(
+    db_path: &PathBuf,
+    session_id: &str,
+    num_speakers: u32,
+    ev: &UnboundedSender<Event>,
+) {
     let store = match Store::open(db_path) {
         Ok(s) => s,
         Err(e) => {
@@ -890,16 +1064,19 @@ fn diarize_session_inner(db_path: &PathBuf, session_id: &str, ev: &UnboundedSend
         ));
         return;
     }
-    apply_diarization(&store, session_id, &wav, ev);
+    apply_diarization(&store, session_id, &wav, Some(num_speakers), ev);
 }
 
 /// Load the "Others" WAV, run the offline diarizer, and write speaker labels
 /// onto the session's segments. Emits progress notices + a refreshed transcript.
+/// `num_speakers`: `Some(n)` pins the count for this run (`Some(0)` = auto);
+/// `None` falls back to the config-file setting (post-recording auto pass).
 #[cfg(feature = "diarization")]
 fn apply_diarization(
     store: &Store,
     session_id: &str,
     others_wav: &std::path::Path,
+    num_speakers: Option<u32>,
     ev: &UnboundedSender<Event>,
 ) {
     let samples = match zord_audio::read_wav_mono_f32(others_wav) {
@@ -935,8 +1112,10 @@ fn apply_diarization(
     }
 
     let _ = ev.send(Event::Notice("Identifying speakers…".to_string()));
-    // Pin the speaker count when the user set one (0 = auto-detect).
-    let num_speakers = (settings.diarize_num_speakers > 0).then_some(settings.diarize_num_speakers as i32);
+    // Pin the speaker count when the user set one (0 = auto-detect). The
+    // per-session value (next to "Identify speakers") wins over the config file.
+    let pinned = num_speakers.unwrap_or(settings.diarize_num_speakers);
+    let num_speakers = (pinned > 0).then_some(pinned as i32);
     let threshold = settings.diarize_threshold.clamp(0.1, 0.95);
     let diarizer = match zord_diarize::Diarizer::load(model, num_speakers, threshold) {
         Ok(d) => d,
@@ -1347,7 +1526,7 @@ fn run_session(
     #[cfg(feature = "diarization")]
     if diarize_auto {
         if let Some(wav) = others_wav.as_ref() {
-            apply_diarization(&store, &session_id, wav, ev);
+            apply_diarization(&store, &session_id, wav, None, ev);
         }
     }
     if !persist_audio {

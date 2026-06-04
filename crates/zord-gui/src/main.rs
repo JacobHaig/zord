@@ -8,8 +8,8 @@ mod osutil;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{
-    ChatScope, DbCmd, Engine, Event, ModelCmd, ModelInfo, OverviewData, RecorderCmd, Status,
-    SummCmd,
+    ChatScope, DbCmd, Engine, Event, ModelCmd, ModelInfo, OverviewData, PlayCmd, RecorderCmd,
+    Status, SummCmd,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -295,6 +295,14 @@ fn MainApp() -> Element {
     let mut summarizing = use_signal(|| false);
     let mut compressing = use_signal(|| false);
     let mut diarizing = use_signal(|| false);
+    // Expected speaker count for the viewed session's diarization, as typed
+    // (empty = auto-detect). Loaded from / persisted on the session row.
+    let mut diar_speakers = use_signal(String::new);
+    // Retained WAV paths (me, others) that exist on disk for the viewed session.
+    // A line only gets a replay button when its channel's file is present.
+    let mut audio_files = use_signal(|| (Option::<String>::None, Option::<String>::None));
+    // The transcript line (db id) currently playing back.
+    let mut playing_seg = use_signal(|| Option::<i64>::None);
     // Cross-meeting Overview rollup (Phase 23c) + whether a synthesis is running.
     let mut overview = use_signal(|| Option::<OverviewData>::None);
     let mut overview_busy = use_signal(|| false);
@@ -318,6 +326,10 @@ fn MainApp() -> Element {
     let mut mic_muted = use_signal(|| false);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
+    // Sidebar width (px) — adjusted by dragging the splitter, persisted in
+    // settings on release.
+    let mut sidebar_w = use_signal(|| settings.peek().sidebar_width.clamp(160, 480));
+    let mut dragging_split = use_signal(|| false);
     let devices = use_hook(zord_capture::input_devices);
     let mut models = use_signal(Vec::<ModelInfo>::new);
     // (model name currently downloading, percent).
@@ -401,6 +413,11 @@ fn MainApp() -> Element {
                     diarizing.set(false);
                     diarize_est_secs.set(None);
                 }
+                Event::DiarizeSpeakers(n) => {
+                    diar_speakers.set(if n > 0 { n.to_string() } else { String::new() });
+                }
+                Event::AudioFiles { me, others } => audio_files.set((me, others)),
+                Event::Playing(v) => playing_seg.set(v),
             };
 
             while let Some(first) = ev_rx.recv().await {
@@ -573,6 +590,8 @@ fn MainApp() -> Element {
                 summarizing.set(false);
                 compressing.set(false);
                 diarizing.set(false);
+                audio_files.set((None, None));
+                let _ = engine.play_tx.send(PlayCmd::Stop);
                 reset_chat(chat, chat_input, chat_busy, chat_scope);
                 speaker_names.write().clear();
                 mic_muted.set(false);
@@ -684,11 +703,55 @@ fn MainApp() -> Element {
         }
     };
 
+    // Replay one transcript line from its retained WAV (None = stop playback).
+    let on_play_segment = {
+        let engine = engine.clone();
+        move |req: Option<(String, i64, u64, u64)>| {
+            let cmd = match req {
+                Some((wav, segment_id, start_ms, end_ms)) => PlayCmd::Play {
+                    segment_id,
+                    wav: PathBuf::from(wav),
+                    start_ms,
+                    end_ms,
+                },
+                None => PlayCmd::Stop,
+            };
+            let _ = engine.play_tx.send(cmd);
+        }
+    };
+
     rsx! {
         style { dangerous_inner_html: CSS }
         div { class: "app",
+            // Splitter drag: track the pointer anywhere in the app while the
+            // handle is held; persist the final width when released.
+            onmousemove: move |e| {
+                if *dragging_split.peek() {
+                    let x = e.client_coordinates().x;
+                    sidebar_w.set((x as u32).clamp(160, 480));
+                }
+            },
+            onmouseup: move |_| {
+                if *dragging_split.peek() {
+                    dragging_split.set(false);
+                    let mut s = settings.peek().clone();
+                    s.sidebar_width = *sidebar_w.peek();
+                    let _ = s.save();
+                    settings.set(s);
+                }
+            },
+            // Pointer left the window mid-drag: end the drag there.
+            onmouseleave: move |_| {
+                if *dragging_split.peek() {
+                    dragging_split.set(false);
+                    let mut s = settings.peek().clone();
+                    s.sidebar_width = *sidebar_w.peek();
+                    let _ = s.save();
+                    settings.set(s);
+                }
+            },
             // ---- Sidebar: session history ----
-            aside { class: "sidebar",
+            aside { class: "sidebar", style: "width: {sidebar_w}px;",
                 div { class: "brand", "ZORD" }
                 button {
                     class: if matches!(&*view.read(), View::Overview) { "overview-btn active" } else { "overview-btn" },
@@ -811,6 +874,9 @@ fn MainApp() -> Element {
                                                 summarizing.set(false);
                                                 compressing.set(false);
                                                 diarizing.set(false);
+                                                diar_speakers.set(String::new());
+                                                audio_files.set((None, None));
+                                                let _ = eng_open.play_tx.send(PlayCmd::Stop);
                                                 reset_chat(chat, chat_input, chat_busy, chat_scope);
                                                 let _ = eng_open.db_tx.send(DbCmd::Load(id_open.clone()));
                                             },
@@ -851,6 +917,15 @@ fn MainApp() -> Element {
                         }
                     }
                 }
+            }
+
+            // ---- Sidebar / main divider (drag to resize) ----
+            div {
+                class: if *dragging_split.read() { "splitter active" } else { "splitter" },
+                onmousedown: move |e| {
+                    e.prevent_default();
+                    dragging_split.set(true);
+                },
             }
 
             // ---- Main column ----
@@ -976,9 +1051,21 @@ fn MainApp() -> Element {
                                             .map(|secs| (secs / 6).max(15));
                                         diarize_est_secs.set(est);
                                         notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
-                                        let _ = eng_diar.db_tx.send(DbCmd::Diarize(sid_diar.clone()));
+                                        let n = diar_speakers.peek().trim().parse::<u32>().unwrap_or(0);
+                                        let _ = eng_diar.db_tx.send(DbCmd::Diarize { id: sid_diar.clone(), num_speakers: n });
                                     },
                                     if diarizing() { "🗣 Identifying…" } else { "🗣 Identify speakers" }
+                                }
+                                input {
+                                    class: "spk-count",
+                                    r#type: "number",
+                                    min: "0",
+                                    placeholder: "auto",
+                                    title: "How many people spoke in this meeting (blank = auto-detect). \
+                                            Remembered for this session; auto-clustering can over-split a \
+                                            noisy mix, so set it when you know the headcount.",
+                                    value: "{diar_speakers}",
+                                    oninput: move |e| diar_speakers.set(e.value()),
                                 }
                                 button {
                                     class: "export-btn",
@@ -1041,6 +1128,14 @@ fn MainApp() -> Element {
                         {
                             let text_copy = text.clone();
                             let open = *show_summary.read();
+                            // Deleting only makes sense for a saved session.
+                            let del_id = match &*view.read() {
+                                View::Session(id) => Some(id.clone()),
+                                _ => None,
+                            };
+                            let can_del = del_id.is_some();
+                            let did = del_id.unwrap_or_default();
+                            let eng_del = engine.clone();
                             rsx! {
                                 div { class: "summary",
                                     div { class: "summary-head",
@@ -1057,6 +1152,17 @@ fn MainApp() -> Element {
                                                 notice.set(Some("Summary copied to clipboard".to_string()));
                                             },
                                             "Copy"
+                                        }
+                                        if can_del {
+                                            button {
+                                                class: "row-btn",
+                                                title: "Delete this summary (the transcript is kept)",
+                                                onclick: move |_| {
+                                                    let _ = eng_del.db_tx.send(DbCmd::ClearSummary(did.clone()));
+                                                    notice.set(Some("Summary deleted".to_string()));
+                                                },
+                                                "🗑"
+                                            }
                                         }
                                     }
                                     if open {
@@ -1075,6 +1181,14 @@ fn MainApp() -> Element {
                         {
                             let text_copy = text.clone();
                             let expanded = *show_compressed.read();
+                            // Deleting only makes sense for a saved session.
+                            let del_id = match &*view.read() {
+                                View::Session(id) => Some(id.clone()),
+                                _ => None,
+                            };
+                            let can_del = del_id.is_some();
+                            let did = del_id.unwrap_or_default();
+                            let eng_del = engine.clone();
                             rsx! {
                                 div { class: "summary compressed",
                                     div { class: "summary-head",
@@ -1094,6 +1208,17 @@ fn MainApp() -> Element {
                                                 notice.set(Some("Compressed text copied to clipboard".to_string()));
                                             },
                                             "Copy"
+                                        }
+                                        if can_del {
+                                            button {
+                                                class: "row-btn",
+                                                title: "Delete this compression (the transcript is kept)",
+                                                onclick: move |_| {
+                                                    let _ = eng_del.db_tx.send(DbCmd::ClearCompressed(did.clone()));
+                                                    notice.set(Some("Compressed text deleted".to_string()));
+                                                },
+                                                "🗑"
+                                            }
                                         }
                                     }
                                     if expanded {
@@ -1164,9 +1289,9 @@ fn MainApp() -> Element {
                         if *view.read() == View::Overview {
                             OverviewView { overview, busy: overview_busy, notice, on_generate: on_generate_overview }
                         } else if *view.read() == View::Live {
-                            TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment }
+                            TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
                         } else {
-                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment }
+                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
                         }
                     }
                 }
@@ -1648,20 +1773,6 @@ fn MainApp() -> Element {
                                                     }
                                                 }
                                                 div { class: "field",
-                                                    label { "Expected number of speakers (0 = auto-detect)" }
-                                                    input {
-                                                        r#type: "number", min: "0", class: "days", placeholder: "auto",
-                                                        value: if settings.read().diarize_num_speakers > 0 { settings.read().diarize_num_speakers.to_string() } else { String::new() },
-                                                        oninput: move |e: FormEvent| {
-                                                            let mut s = settings.peek().clone();
-                                                            s.diarize_num_speakers = e.value().trim().parse::<u32>().unwrap_or(0);
-                                                            let _ = s.save();
-                                                            settings.set(s);
-                                                        },
-                                                    }
-                                                }
-                                                p { class: "field-note", "Auto-clustering can over-split a noisy meeting mix into far too many speakers. If you know the headcount, set it here to force exactly that many. Re-run Identify speakers to apply." }
-                                                div { class: "field",
                                                     label { "Clustering threshold (auto mode): {settings.read().diarize_threshold:.2}" }
                                                     input {
                                                         r#type: "number", min: "0.1", max: "0.95", step: "0.05", class: "days",
@@ -1676,7 +1787,7 @@ fn MainApp() -> Element {
                                                         },
                                                     }
                                                 }
-                                                p { class: "field-note", "Only used when speaker count is auto (0 above). Lower = split into more speakers; higher = merge into fewer. Default 0.50." }
+                                                p { class: "field-note", "Only used when the speaker count (set next to 'Identify speakers' on a session) is auto. Lower = split into more speakers; higher = merge into fewer. Default 0.50." }
                                                 div { class: "field-row",
                                                     label { class: "field-label", "Identify speakers automatically after recording" }
                                                     button {
@@ -1964,6 +2075,12 @@ fn TranscriptView(
     speaker_names: Signal<std::collections::HashMap<i32, String>>,
     highlight: Signal<Option<i64>>,
     on_edit: EventHandler<(i64, String)>,
+    /// Retained WAV paths (me, others) that exist on disk for this session.
+    audio: Signal<(Option<String>, Option<String>)>,
+    /// The line (db id) currently playing back.
+    playing: Signal<Option<i64>>,
+    /// Replay a line: `Some((wav, segment_id, start_ms, end_ms))`, or `None` to stop.
+    on_play: EventHandler<Option<(String, i64, u64, u64)>>,
 ) -> Element {
     let mut editing = use_signal(|| Option::<i64>::None);
     let mut buf = use_signal(String::new);
@@ -1981,6 +2098,15 @@ fn TranscriptView(
                 let text = seg.text.clone();
                 let text_for_edit = text.clone();
                 let who = seg.speaker_label(&names);
+                // Replay is offered only when this channel's WAV exists on disk.
+                let wav = match seg.source {
+                    Source::Me => audio.read().0.clone(),
+                    Source::Others => audio.read().1.clone(),
+                };
+                let can_play = sid.is_some() && wav.is_some();
+                let wav_play = wav.unwrap_or_default();
+                let is_playing = sid.is_some() && *playing.read() == sid;
+                let (t0, t1) = (seg.t_start_ms, seg.t_end_ms);
                 // DOM anchor + flash highlight so a search result can jump here.
                 let dom_id = sid.map(|i| format!("seg-{i}")).unwrap_or_default();
                 let hit = if sid.is_some() && sid == hl { " hit" } else { "" };
@@ -2019,6 +2145,20 @@ fn TranscriptView(
                                     }
                                 },
                                 "{text}"
+                            }
+                        }
+                        if can_play {
+                            button {
+                                class: if is_playing { "play-btn on" } else { "play-btn" },
+                                title: if is_playing { "Stop playback" } else { "Replay this line's audio" },
+                                onclick: move |_| {
+                                    if is_playing {
+                                        on_play.call(None);
+                                    } else {
+                                        on_play.call(Some((wav_play.clone(), sid.unwrap_or_default(), t0, t1)));
+                                    }
+                                },
+                                if is_playing { "⏹" } else { "▶" }
                             }
                         }
                     }
@@ -2437,7 +2577,8 @@ fn now_ms() -> u64 {
 fn session_title(s: &Session) -> String {
     match s.title.as_ref().filter(|t| !t.trim().is_empty()) {
         Some(t) => t.clone(),
-        None => format!("Recording · {}", relative_time(s.started_at)),
+        // The time lives on the meta line, so the fallback is just a label.
+        None => "Recording".to_string(),
     }
 }
 
@@ -2468,12 +2609,25 @@ fn relative_time(ms: u64) -> String {
     }
 }
 
-/// Sidebar second line: model + recording duration when known.
+/// "Jun 4, 2026" in local time.
+fn fmt_date(ms: u64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms as i64)
+        .single()
+        .map(|d| d.format("%b %-d, %Y").to_string())
+        .unwrap_or_default()
+}
+
+/// Sidebar second line: date + how long ago + duration when known.
 fn session_meta(s: &Session) -> String {
-    match s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000) {
-        Some(secs) if secs > 0 => format!("{} · {}", s.model, fmt_dur(secs)),
-        _ => s.model.clone(),
+    let mut meta = format!("{} · {}", fmt_date(s.started_at), relative_time(s.started_at));
+    if let Some(secs) = s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000) {
+        if secs > 0 {
+            meta.push_str(&format!(" · {}", fmt_dur(secs)));
+        }
     }
+    meta
 }
 
 fn fmt_dur(secs: u64) -> String {

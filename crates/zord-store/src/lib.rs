@@ -73,7 +73,31 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE segments ADD COLUMN speaker INTEGER", []);
+        // Per-session expected speaker count for diarization (NULL = auto-detect),
+        // set from the control next to "Identify speakers".
+        let _ = self
+            .conn
+            .execute("ALTER TABLE sessions ADD COLUMN diarize_speakers INTEGER", []);
         Ok(())
+    }
+
+    /// Remember the expected speaker count for a session's diarization
+    /// (0 clears it back to auto-detect).
+    pub fn set_diarize_speakers(&self, session_id: &str, n: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET diarize_speakers = ?2 WHERE id = ?1",
+            params![session_id, (n > 0).then_some(n)],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a session's expected speaker count, if one was set (None = auto).
+    pub fn get_diarize_speakers(&self, session_id: &str) -> Result<Option<u32>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT diarize_speakers FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, Option<u32>>(0))?;
+        Ok(rows.next().transpose()?.flatten().filter(|n| *n > 0))
     }
 
     /// Store (or replace) the AI-generated summary for a session.
@@ -81,6 +105,15 @@ impl Store {
         self.conn.execute(
             "UPDATE sessions SET summary = ?2 WHERE id = ?1",
             params![session_id, summary],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a session's stored summary (e.g. when the generation was bad).
+    pub fn clear_summary(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET summary = NULL WHERE id = ?1",
+            params![session_id],
         )?;
         Ok(())
     }
@@ -125,6 +158,15 @@ impl Store {
         self.conn.execute(
             "UPDATE sessions SET compressed = ?2 WHERE id = ?1",
             params![session_id, compressed],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a session's stored compression (e.g. when the generation was bad).
+    pub fn clear_compressed(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET compressed = NULL WHERE id = ?1",
+            params![session_id],
         )?;
         Ok(())
     }

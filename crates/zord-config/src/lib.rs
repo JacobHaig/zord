@@ -64,9 +64,9 @@ pub struct Settings {
     /// track lives in the audio dir and is pruned by `auto_delete_days`.
     #[serde(default = "default_true")]
     pub diarize_keep_audio: bool,
-    /// Force a fixed number of speakers for diarization (0 = auto-detect).
-    /// Set this to a known headcount when auto-clustering over-splits (e.g. a
-    /// 10-person call coming out as 80 "speakers").
+    /// Fallback fixed speaker count for diarization (0 = auto-detect), used by
+    /// the CLI and the post-recording auto pass. In the GUI, each session has
+    /// its own count next to "Identify speakers" which takes precedence.
     #[serde(default)]
     pub diarize_num_speakers: u32,
     /// Auto-generate a short session title from the summary (needs a summary
@@ -91,6 +91,14 @@ pub struct Settings {
     /// How many of the most recent meetings to feed into the Overview synthesis.
     #[serde(default = "default_overview_max_meetings")]
     pub overview_max_meetings: u32,
+    /// GUI sidebar width in px (the session-list / main-window divider is
+    /// draggable; the chosen width persists here).
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u32,
+}
+
+fn default_sidebar_width() -> u32 {
+    240
 }
 
 fn default_diarize_threshold() -> f32 {
@@ -249,6 +257,7 @@ impl Default for Settings {
             compress_ctx: default_compress_ctx(),
             overview_ctx: default_overview_ctx(),
             overview_max_meetings: default_overview_max_meetings(),
+            sidebar_width: default_sidebar_width(),
         }
     }
 }

@@ -42,7 +42,12 @@ storage happen on your machine.
 - 🗣 **Per-speaker diarization** *(optional)* — split the "Others" channel into
   **Speaker 1/2/3** (sherpa-onnx), rename them, and see them colored in the
   transcript + exports. Runs offline after recording (and on demand); an optional
-  live mode shows provisional labels while recording.
+  live mode shows provisional labels while recording. Each meeting remembers its
+  own expected speaker count (set it next to **Identify speakers**; blank = auto).
+- 🔊 **Per-line audio replay** — hover a transcript line and press ▶ to hear
+  exactly that span of the retained audio (handy for fixing a mis-transcribed
+  line by ear). The button appears only when that channel's audio file exists
+  on disk.
 - 🎚️ **Configurable** — capture mic-only / system-only / both, **mute your mic
   mid-recording** with a toggle next to Record, auto-generate a meeting **title**,
   edit transcript lines inline, and tune summary model + prompt from the settings

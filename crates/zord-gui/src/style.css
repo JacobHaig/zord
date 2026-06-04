@@ -21,7 +21,8 @@ body {
 
 /* Sidebar */
 .sidebar {
-  width: 240px;
+  width: 240px; /* default; the splitter sets an inline width */
+  flex-shrink: 0;
   background: var(--panel);
   border-right: 1px solid var(--line);
   display: flex;
@@ -29,6 +30,9 @@ body {
   padding: 16px 12px;
   gap: 8px;
 }
+/* Draggable divider between the sidebar and the main column. */
+.splitter { width: 5px; margin-left: -3px; flex-shrink: 0; cursor: col-resize; user-select: none; background: transparent; }
+.splitter:hover, .splitter.active { background: var(--me); opacity: 0.5; }
 .brand { font-weight: 800; letter-spacing: 3px; color: var(--accent); font-size: 18px; padding: 4px 6px 12px; }
 .side-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 0 6px; }
 .session-list { overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
@@ -172,7 +176,9 @@ body {
 .notice-x { background: transparent; border: none; color: var(--others); cursor: pointer; font-size: 12px; opacity: 0.7; }
 .notice-x:hover { opacity: 1; }
 .rec-timer { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 700; }
-.summary-head { display: flex; align-items: center; justify-content: space-between; }
+/* Title on the left; the action buttons (Copy / delete) group on the right. */
+.summary-head { display: flex; align-items: center; gap: 6px; }
+.summary-head .panel-toggle { margin-right: auto; }
 
 .search {
   width: 100%; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line);
@@ -200,6 +206,14 @@ body {
 @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 0.7; } }
 .export-btn.ghost { color: var(--muted); }
 .export-btn.ghost:hover { color: var(--text); }
+/* Per-session expected-speaker count, lives beside "Identify speakers". */
+.spk-count {
+  width: 84px; background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px;
+  font-size: 12px; outline: none; text-align: center;
+}
+.spk-count:focus { border-color: var(--me); }
+.spk-count::placeholder { color: var(--muted); }
 .export-sep { color: var(--line); padding: 0 2px; }
 
 /* AI summary panel */
@@ -208,7 +222,6 @@ body {
 .summary-body { white-space: pre-wrap; font-size: 13px; line-height: 1.5; max-height: 220px; overflow-y: auto; }
 /* Dense-prose compression panel: distinct accent + room for inline head buttons. */
 .summary.compressed { border-left-color: var(--others); margin-top: 10px; }
-.summary.compressed .summary-head > div { display: flex; gap: 6px; }
 /* Collapsible-panel header toggle (Summary / Compressed). */
 .panel-toggle { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; padding: 0; }
 .panel-toggle .chev { font-size: 10px; width: 10px; display: inline-block; color: var(--muted); }
@@ -337,5 +350,11 @@ body {
 .speaker-name.spk-6 { border-left: 3px solid #80ffd4; }
 .speaker-name.spk-7 { border-left: 3px solid #ff6e6e; }
 .line-edit { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--me); border-radius: 6px; padding: 4px 8px; font: inherit; outline: none; }
+/* Per-line audio replay (rendered only when the line's retained WAV exists).
+   Hidden until the line is hovered, except while that line is playing. */
+.play-btn { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; border-radius: 4px; visibility: hidden; }
+.line:hover .play-btn { visibility: visible; }
+.play-btn:hover { color: var(--text); }
+.play-btn.on { visibility: visible; color: var(--me); }
 .prompt-edit { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: 13px/1.4 ui-monospace, monospace; outline: none; resize: vertical; }
 .prompt-edit:focus { border-color: var(--me); }
