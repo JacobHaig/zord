@@ -213,6 +213,9 @@ body {
   font-size: 12px; outline: none; text-align: center;
 }
 .spk-count:focus { border-color: var(--me); }
+/* External LLM model picker: dropdown + Test connection side by side. */
+.remote-model-row { display: flex; gap: 8px; align-items: center; }
+.remote-model-row select { flex: 1; max-width: 360px; }
 .spk-count::placeholder { color: var(--muted); }
 .export-sep { color: var(--line); padding: 0 2px; }
 

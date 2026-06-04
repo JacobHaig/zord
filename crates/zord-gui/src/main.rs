@@ -330,6 +330,8 @@ fn MainApp() -> Element {
     // settings on release.
     let mut sidebar_w = use_signal(|| settings.peek().sidebar_width.clamp(160, 480));
     let mut dragging_split = use_signal(|| false);
+    // Model ids reported by the external LLM server (Phase 24c picker).
+    let mut remote_models = use_signal(Vec::<String>::new);
     let devices = use_hook(zord_capture::input_devices);
     let mut models = use_signal(Vec::<ModelInfo>::new);
     // (model name currently downloading, percent).
@@ -418,6 +420,26 @@ fn MainApp() -> Element {
                 }
                 Event::AudioFiles { me, others } => audio_files.set((me, others)),
                 Event::Playing(v) => playing_seg.set(v),
+                Event::RemoteModels { models, error } => {
+                    if let Some(e) = error {
+                        notice.set(Some(format!("External LLM: {e}")));
+                    } else {
+                        notice.set(Some(format!(
+                            "Connected — {} model(s) available.",
+                            models.len()
+                        )));
+                        // Auto-pick the first model when none is chosen yet.
+                        if settings.peek().llm_model.trim().is_empty() {
+                            if let Some(first) = models.first() {
+                                let mut s = settings.peek().clone();
+                                s.llm_model = first.clone();
+                                let _ = s.save();
+                                settings.set(s);
+                            }
+                        }
+                    }
+                    remote_models.set(models);
+                }
             };
 
             while let Some(first) = ev_rx.recv().await {
@@ -1611,7 +1633,91 @@ fn MainApp() -> Element {
                                                 p { class: "field-note", "Build with `--features summaries` to enable local AI summaries." }
                                             }
                                         } else {
+                                            let external = settings.read().llm_backend == "external";
+                                            let eng_remote = engine.clone();
                                             rsx! {
+                                                div { class: "field",
+                                                    label { "LLM backend" }
+                                                    select {
+                                                        onchange: move |e: FormEvent| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.llm_backend = e.value();
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                        option { value: "local", selected: !external, "Built-in (local model)" }
+                                                        option { value: "external", selected: external, "External server (OpenAI-compatible)" }
+                                                    }
+                                                }
+                                                if external {
+                                                    div { class: "field",
+                                                        label { "Server URL" }
+                                                        input {
+                                                            r#type: "text", class: "days",
+                                                            placeholder: "http://localhost:1234",
+                                                            value: "{settings.read().llm_base_url}",
+                                                            oninput: move |e: FormEvent| {
+                                                                let mut s = settings.peek().clone();
+                                                                s.llm_base_url = e.value();
+                                                                let _ = s.save();
+                                                                settings.set(s);
+                                                            },
+                                                        }
+                                                    }
+                                                    div { class: "field",
+                                                        label { "API key (optional — most local servers need none)" }
+                                                        input {
+                                                            r#type: "password", class: "days",
+                                                            value: "{settings.read().llm_api_key}",
+                                                            oninput: move |e: FormEvent| {
+                                                                let mut s = settings.peek().clone();
+                                                                s.llm_api_key = e.value();
+                                                                let _ = s.save();
+                                                                settings.set(s);
+                                                            },
+                                                        }
+                                                    }
+                                                    div { class: "field",
+                                                        label { "Model" }
+                                                        div { class: "remote-model-row",
+                                                            select {
+                                                                onchange: move |e: FormEvent| {
+                                                                    let mut s = settings.peek().clone();
+                                                                    s.llm_model = e.value();
+                                                                    let _ = s.save();
+                                                                    settings.set(s);
+                                                                },
+                                                                // Keep the saved choice visible before/without a fetch.
+                                                                {
+                                                                    let cur = settings.read().llm_model.clone();
+                                                                    let listed = remote_models.read().clone();
+                                                                    let show_cur = !cur.trim().is_empty() && !listed.contains(&cur);
+                                                                    rsx! {
+                                                                        if show_cur {
+                                                                            option { value: "{cur}", selected: true, "{cur}" }
+                                                                        }
+                                                                        if listed.is_empty() && cur.trim().is_empty() {
+                                                                            option { value: "", selected: true, disabled: true, "— test the connection to list models —" }
+                                                                        }
+                                                                        for m in listed {
+                                                                            option { value: "{m}", selected: m == settings.read().llm_model, "{m}" }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            button {
+                                                                class: "mbtn",
+                                                                title: "Contact the server's /v1/models — verifies the connection and fills the model list",
+                                                                onclick: move |_| {
+                                                                    notice.set(Some("Contacting the LLM server…".to_string()));
+                                                                    let _ = eng_remote.model_tx.send(ModelCmd::ListRemoteLlm);
+                                                                },
+                                                                "Test connection"
+                                                            }
+                                                        }
+                                                    }
+                                                    p { class: "field-note", "Works with anything OpenAI-compatible: LM Studio (http://localhost:1234), Ollama (http://localhost:11434), llama-server, vLLM, Jan… Summaries, compression, Overview, chat and auto-titles all use this server. Note: transcripts are sent to it, so point Zord only at a server you trust — there is no fallback to the local model." }
+                                                } else {
                                                 p { class: "field-note", "Download and pick the summary model. Bigger = better notes but slower. No HuggingFace access? Drop any GGUF into the models folder (Files & folders, below) and it appears here as a custom model." }
                                                 for m in summary_models.iter() {
                                                     {
@@ -1665,6 +1771,7 @@ fn MainApp() -> Element {
                                                             }
                                                         }
                                                     }
+                                                }
                                                 }
                                                 div { class: "field-row",
                                                     label { class: "field-label", "Auto-generate a meeting title after summarizing" }

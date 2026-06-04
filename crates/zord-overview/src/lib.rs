@@ -47,31 +47,28 @@ pub fn load(store: &Store) -> Result<Option<Overview>> {
 // Synthesis (needs the local LLM)
 // ---------------------------------------------------------------------------
 
+/// Synthesize the Overview with an already-built LLM backend (Phase 24: the
+/// caller picks local GGUF vs external server and keeps it for the whole run —
+/// lazy compressions + the final synthesis pass).
 #[cfg(feature = "llama")]
 pub fn synthesize(
     db_path: &Path,
     settings: &Settings,
+    llm: &zord_summarize::LlmBackend,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Overview> {
-    use std::path::PathBuf;
-    use zord_summarize::{GenOpts, LlmBackend};
+    use zord_summarize::GenOpts;
 
     let store = Store::open(db_path)?;
 
-    // Resolve + load the summary model once; reused for any lazy compressions
-    // and the final synthesis pass, so it's only paged into RAM for this run.
-    progress("Preparing the summary model…");
-    let model_path: PathBuf = resolve_model_path(settings)?;
-    let llm = LlmBackend::load_local(&model_path)?;
-
     // Gather the most recent meetings (lazily compressing any missing), then fit
     // them to the synthesis context (condensing in groups if they overflow).
-    let digests = collect_digests(&store, &llm, settings, progress)?;
+    let digests = collect_digests(&store, llm, settings, progress)?;
     if digests.is_empty() {
         anyhow::bail!("no meetings with transcripts to synthesize yet");
     }
     let n_ctx = settings.overview_ctx.clamp(8192, 131_072);
-    let input = fit_to_budget(&llm, &digests, n_ctx, 2048, settings, progress)?;
+    let input = fit_to_budget(llm, &digests, n_ctx, 2048, settings, progress)?;
 
     progress("Synthesizing the cross-meeting overview…");
     let text = llm.generate(&input, zord_config::overview_prompt(), GenOpts::overview(n_ctx))?;
@@ -84,15 +81,6 @@ pub fn synthesize(
         .unwrap_or(0);
     progress(&format!("Overview ready — {} meetings.", digests.len()));
     Ok(Overview { text, meetings: digests.len(), generated_at_ms })
-}
-
-#[cfg(not(feature = "llama"))]
-pub fn synthesize(
-    _db_path: &Path,
-    _settings: &Settings,
-    _progress: &mut dyn FnMut(&str),
-) -> Result<Overview> {
-    anyhow::bail!("overview synthesis needs the summaries feature (build with `--features summaries`)")
 }
 
 /// Build the grounding context for **cross-meeting chat** (Phase 23d): gather the
@@ -177,20 +165,6 @@ fn fit_to_budget(
         n_ctx
     ));
     hierarchical_reduce(llm, digests, budget, settings, progress)
-}
-
-#[cfg(feature = "llama")]
-fn resolve_model_path(settings: &Settings) -> Result<std::path::PathBuf> {
-    if let Some(m) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
-        Ok(zord_summarize::ensure_summary_model(m, &mut |_d, _t| {})?)
-    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
-        Ok(p)
-    } else {
-        anyhow::bail!(
-            "summary model '{}' not found — pick one in Settings or drop its .gguf in the models folder",
-            settings.summary_model
-        )
-    }
 }
 
 /// Greedily pack the digests (newest first) into groups, condense each group

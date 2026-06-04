@@ -23,7 +23,10 @@ storage happen on your machine.
   full-text search.
 - ✨ **Local AI summaries** *(optional)* — a local LLM (llama.cpp) turns a
   session into Markdown notes, fully offline. Pick the model (Qwen2.5 1.5B/3B/7B),
-  a style preset, or write your own prompt — all in settings.
+  a style preset, or write your own prompt — all in settings. Or point Zord at
+  your **own inference server** (LM Studio, Ollama, llama-server, vLLM — any
+  OpenAI-compatible endpoint) in Settings → Summaries, and every AI feature
+  (summaries, compression, Overview, chat, auto-titles) uses it instead.
 - 🗜 **Dense compression** *(optional)* — condense a whole meeting into
   token-minimal dense prose (projects + state, action items, decisions, open
   questions) with one click. Stored per session and copyable; the context window

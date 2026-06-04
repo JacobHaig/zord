@@ -100,6 +100,38 @@ pub struct Settings {
     /// draggable; the chosen width persists here).
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u32,
+    /// Which LLM runs the AI features (summarize/compress/overview/chat/title):
+    /// "local" (built-in llama.cpp GGUF) or "external" (a user-provided
+    /// OpenAI-compatible server — Phase 24).
+    #[serde(default = "default_llm_backend")]
+    pub llm_backend: String,
+    /// External server root, e.g. `http://localhost:1234` (LM Studio's default;
+    /// Ollama serves on `http://localhost:11434`). Trailing `/v1` is tolerated.
+    #[serde(default = "default_llm_base_url")]
+    pub llm_base_url: String,
+    /// Optional bearer token for the external server ("" = none — typical for
+    /// LAN servers). Stored in plaintext here by decision (Phase 24).
+    #[serde(default)]
+    pub llm_api_key: String,
+    /// Model id on the external server (as its `/v1/models` reports it).
+    #[serde(default)]
+    pub llm_model: String,
+    /// Per-request timeout (seconds) for the external server — generations on
+    /// big models can take a while.
+    #[serde(default = "default_llm_timeout_secs")]
+    pub llm_timeout_secs: u64,
+}
+
+fn default_llm_backend() -> String {
+    "local".to_string()
+}
+
+fn default_llm_base_url() -> String {
+    "http://localhost:1234".to_string()
+}
+
+fn default_llm_timeout_secs() -> u64 {
+    300
 }
 
 fn default_sidebar_width() -> u32 {
@@ -268,6 +300,11 @@ impl Default for Settings {
             overview_ctx: default_overview_ctx(),
             overview_max_meetings: default_overview_max_meetings(),
             sidebar_width: default_sidebar_width(),
+            llm_backend: default_llm_backend(),
+            llm_base_url: default_llm_base_url(),
+            llm_api_key: String::new(),
+            llm_model: String::new(),
+            llm_timeout_secs: default_llm_timeout_secs(),
         }
     }
 }

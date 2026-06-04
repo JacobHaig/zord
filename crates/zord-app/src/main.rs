@@ -191,23 +191,28 @@ fn transcript_text(
         .join("\n")
 }
 
+/// Build the configured LLM backend (Phase 24): the external OpenAI-compatible
+/// server when selected in settings, otherwise the local GGUF (downloading it
+/// on first use with progress on stderr).
 #[cfg(feature = "summaries")]
-fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
-    let db_path = resolve_db(db)?;
-    let store = Store::open(&db_path)?;
-    let segs = store.segments(session_id)?;
-    if segs.is_empty() {
-        anyhow::bail!("session '{session_id}' has no transcript to summarize");
+fn build_llm_backend(settings: &zord_config::Settings) -> Result<zord_summarize::LlmBackend> {
+    if settings.llm_backend == "external" {
+        anyhow::ensure!(
+            !settings.llm_model.trim().is_empty(),
+            "the external LLM server has no model configured — pick one in Settings → Summaries"
+        );
+        eprintln!(
+            "Using external LLM '{}' at {}…",
+            settings.llm_model, settings.llm_base_url
+        );
+        return Ok(zord_summarize::LlmBackend::remote(zord_summarize::RemoteConfig {
+            base_url: settings.llm_base_url.clone(),
+            api_key: settings.llm_api_key.clone(),
+            model: settings.llm_model.clone(),
+            timeout_secs: settings.llm_timeout_secs,
+        }));
     }
-    let names = store.speaker_names(session_id).unwrap_or_default();
-    let transcript = transcript_text(&segs, &names);
-
-    let settings = zord_config::Settings::load();
-    // Built-in catalog model (download if needed), or a custom GGUF the user
-    // dropped into the models folder (any source — no HuggingFace required).
-    let model_path = if let Some(model) =
-        zord_summarize::SummaryModel::parse(&settings.summary_model)
-    {
+    let model_path = if let Some(model) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
         eprintln!("Preparing summary model '{}'…", model.name());
         zord_summarize::ensure_summary_model(model, &mut |done, total| {
             if let Some(total) = total {
@@ -223,9 +228,24 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
             settings.summary_model
         );
     };
-    eprintln!("\r  model ready. Summarizing…              ");
+    eprintln!("\r  model ready.                          ");
+    zord_summarize::LlmBackend::load_local(&model_path)
+}
 
-    let llm = zord_summarize::LlmBackend::load_local(&model_path)?;
+#[cfg(feature = "summaries")]
+fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
+    let db_path = resolve_db(db)?;
+    let store = Store::open(&db_path)?;
+    let segs = store.segments(session_id)?;
+    if segs.is_empty() {
+        anyhow::bail!("session '{session_id}' has no transcript to summarize");
+    }
+    let names = store.speaker_names(session_id).unwrap_or_default();
+    let transcript = transcript_text(&segs, &names);
+
+    let settings = zord_config::Settings::load();
+    let llm = build_llm_backend(&settings)?;
+    eprintln!("Summarizing…");
     let summary = llm.summarize(&transcript, &settings.effective_summary_prompt())?;
     store.set_summary(session_id, &summary)?;
     println!("{summary}");
@@ -266,27 +286,8 @@ fn cmd_compress(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let transcript = transcript_text(&segs, &names);
 
     let settings = zord_config::Settings::load();
-    let model_path = if let Some(model) =
-        zord_summarize::SummaryModel::parse(&settings.summary_model)
-    {
-        eprintln!("Preparing summary model '{}'…", model.name());
-        zord_summarize::ensure_summary_model(model, &mut |done, total| {
-            if let Some(total) = total {
-                eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
-            }
-        })?
-    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
-        eprintln!("Using custom model '{}'…", settings.summary_model);
-        p
-    } else {
-        anyhow::bail!(
-            "summary model '{}' not found — set one in the GUI, or drop its .gguf in the models folder",
-            settings.summary_model
-        );
-    };
-    eprintln!("\r  model ready. Compressing (ctx {} tokens)…       ", settings.compress_ctx);
-
-    let llm = zord_summarize::LlmBackend::load_local(&model_path)?;
+    let llm = build_llm_backend(&settings)?;
+    eprintln!("Compressing (ctx {} tokens)…", settings.compress_ctx);
     let compressed =
         llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
     store.set_compressed(session_id, &compressed)?;
@@ -310,7 +311,8 @@ fn cmd_overview(max: Option<u32>, db: Option<PathBuf>) -> Result<()> {
         "Synthesizing overview across up to {} recent meeting(s) (ctx {} tokens)…",
         settings.overview_max_meetings, settings.overview_ctx
     );
-    let result = zord_overview::synthesize(&db_path, &settings, &mut |note| {
+    let llm = build_llm_backend(&settings)?;
+    let result = zord_overview::synthesize(&db_path, &settings, &llm, &mut |note| {
         eprintln!("  {note}");
     })?;
     println!("{}", result.text);

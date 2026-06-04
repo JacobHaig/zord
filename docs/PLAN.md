@@ -813,13 +813,19 @@ Sub-phases:
   (refused → "is the server running?", 401/403 → key, 404 → wrong endpoint/
   model). `LlmBackend::Remote` wired; `count_tokens` estimates chars/4.
   Tested: unit tests + an end-to-end in-process mock-server test.
-- **24c** — **settings + wiring.** `zord-config`: `llm_backend`
-  ("local"|"external", default local), `llm_base_url`, `llm_api_key`,
-  `llm_model`. Settings → Summaries: backend toggle; External swaps the GGUF
-  model list for URL/key fields, a model dropdown fed by `/v1/models`, a
-  **Test connection** button, and a privacy note (transcripts are sent to that
-  server — the "fully local" promise gets a user-controlled asterisk). Engine +
-  CLI route by the setting.
+- **24c** — ✅ **done** — **settings + wiring.** `zord-config`: `llm_backend`
+  ("local"|"external", default local), `llm_base_url` (default LM Studio's
+  `http://localhost:1234`), `llm_api_key`, `llm_model`, `llm_timeout_secs`
+  (300). Settings → Summaries: backend selector; External swaps the GGUF model
+  list for URL/key fields, a model dropdown fed by `/v1/models`
+  (`ModelCmd::ListRemoteLlm` → `Event::RemoteModels`; auto-picks the first
+  model when none chosen), a **Test connection** button, and the privacy note.
+  Engine routes via one `build_llm_backend` (summarize/compress/overview/chat/
+  auto-title); the resident chat cache keys on `ChatLlmKey` (GGUF path | remote
+  config) so editing the connection rebuilds it. `zord_overview::synthesize`
+  now takes the prebuilt backend. CLI shares a `build_llm_backend` helper
+  (deduplicated the old per-command model resolution). Not verified against a
+  real LM Studio yet — the mock-server test covers the wire format.
 - **24d** — **polish / later.** Streaming for Chat; relabel the Phase 22
   "via Ollama" *download* entries so "Ollama" isn't overloaded now that an
   Ollama *server* is also a thing; optionally un-gate the remote backend from
