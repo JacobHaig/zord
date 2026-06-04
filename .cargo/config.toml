@@ -2,6 +2,12 @@
 # Targeting 13.0 (our minimum — runs on all Apple Silicon).
 [env]
 MACOSX_DEPLOYMENT_TARGET = "13.0"
+# Force llama-cpp-sys-2 to build ggml/llama against the STATIC MSVC CRT (/MT) so
+# it matches Rust's +crt-static, whisper, and sherpa on Windows. Without this its
+# build.rs defaults to /MD (dynamic), making llama the lone dynamic-CRT component
+# → cross-heap free → instant silent crash on summarize/compress. MSVC-only knob;
+# a no-op on macOS/Linux toolchains (kept here so local Windows builds match CI).
+LLAMA_STATIC_CRT = "1"
 
 # The transitive Swift bridges (apple-metal / apple-cf) FORCE_LOAD the Swift
 # back-compat static libs, but the linker only searches the full-Xcode path.

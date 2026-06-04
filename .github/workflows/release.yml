@@ -143,6 +143,13 @@ jobs:
       # crt-static (set in .cargo/config.toml). Avoids LNK2038/LNK2005.
       CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
       CMAKE_POLICY_DEFAULT_CMP0091: NEW # honor CMAKE_MSVC_RUNTIME_LIBRARY
+      # CRITICAL: llama-cpp-sys-2's build.rs calls config.static_crt(false) UNLESS
+      # LLAMA_STATIC_CRT=1, which forces ggml/llama onto the DYNAMIC CRT (/MD) and
+      # silently overrides CMAKE_MSVC_RUNTIME_LIBRARY above. That makes llama the
+      # lone /MD component while Rust/whisper/sherpa are /MT — at inference a buffer
+      # freed across the two CRT heaps corrupts the heap and the process vanishes
+      # instantly (every Summarize/Compress, no panic, no log). Force it static too.
+      LLAMA_STATIC_CRT: "1"
     steps:
       - uses: actions/checkout@v4
 
