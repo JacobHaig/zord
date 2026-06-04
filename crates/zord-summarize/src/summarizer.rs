@@ -86,7 +86,7 @@ pub enum ChatRole {
 }
 
 impl ChatRole {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
@@ -460,7 +460,7 @@ fn breadcrumb(line: &str) {
     }
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }

@@ -6,10 +6,14 @@
 #[cfg(feature = "llama")]
 mod backend;
 #[cfg(feature = "llama")]
+mod remote;
+#[cfg(feature = "llama")]
 mod summarizer;
 
 #[cfg(feature = "llama")]
 pub use backend::LlmBackend;
+#[cfg(feature = "llama")]
+pub use remote::{list_models as list_remote_models, RemoteConfig};
 #[cfg(feature = "llama")]
 pub use summarizer::{
     custom_model_path, delete_custom_model, delete_summary_model, ensure_ollama_model,

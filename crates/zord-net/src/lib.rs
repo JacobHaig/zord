@@ -56,6 +56,81 @@ fn proxy_from_env() -> Option<String> {
     .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
 }
 
+/// Why a JSON API call failed — split so callers can give targeted hints
+/// (e.g. "is the server running?" vs "check the API key").
+#[derive(Debug)]
+pub enum ApiError {
+    /// The server couldn't be reached at all (refused / DNS / TLS / timeout).
+    Connect(String),
+    /// The server responded with a non-2xx status.
+    Status { code: u16, body: String },
+    /// The 2xx response body wasn't valid JSON.
+    BadJson(String),
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::Connect(e) => write!(f, "connection failed: {e}"),
+            ApiError::Status { code, body } => write!(f, "HTTP {code}: {body}"),
+            ApiError::BadJson(e) => write!(f, "invalid JSON response: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// POST a JSON body to `url` and parse the JSON response. Uses the same
+/// OS-cert-store + proxy agent as downloads. `bearer` (when non-empty) is sent
+/// as an `Authorization: Bearer` header. `timeout` bounds the whole request —
+/// LLM generations can take minutes, so callers pick it.
+pub fn post_json(
+    url: &str,
+    bearer: Option<&str>,
+    body: &serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, ApiError> {
+    let mut req = agent()
+        .post(url)
+        .set("Content-Type", "application/json")
+        .timeout(timeout);
+    if let Some(key) = bearer.filter(|k| !k.trim().is_empty()) {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    json_response(req.send_string(&body.to_string()))
+}
+
+/// GET `url` and parse the JSON response (see [`post_json`] for agent/auth).
+pub fn get_json(
+    url: &str,
+    bearer: Option<&str>,
+    timeout: Duration,
+) -> Result<serde_json::Value, ApiError> {
+    let mut req = agent().get(url).timeout(timeout);
+    if let Some(key) = bearer.filter(|k| !k.trim().is_empty()) {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    json_response(req.call())
+}
+
+fn json_response(
+    result: Result<ureq::Response, ureq::Error>,
+) -> Result<serde_json::Value, ApiError> {
+    match result {
+        Ok(resp) => {
+            let text = resp
+                .into_string()
+                .map_err(|e| ApiError::Connect(format!("reading response: {e}")))?;
+            serde_json::from_str(&text).map_err(|e| ApiError::BadJson(e.to_string()))
+        }
+        Err(ureq::Error::Status(code, resp)) => Err(ApiError::Status {
+            code,
+            body: resp.into_string().unwrap_or_default(),
+        }),
+        Err(ureq::Error::Transport(t)) => Err(ApiError::Connect(t.to_string())),
+    }
+}
+
 /// Stream `url` to `dest` (atomic via a `.partial` temp), reporting
 /// `(downloaded, total)` progress. Retries transient failures a few times.
 pub fn download_to_file(

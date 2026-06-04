@@ -8,13 +8,14 @@ license.workspace = true
 default = []
 # Local LLM summaries via llama.cpp. Heavy build (compiles llama.cpp); the
 # default build leaves this crate empty so the workspace stays lean.
-llama = ["dep:llama-cpp-2", "dep:zord-net", "dep:directories"]
+llama = ["dep:llama-cpp-2", "dep:zord-net", "dep:directories", "dep:serde_json"]
 
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
 zord-net = { workspace = true, optional = true }
 directories = { version = "5", optional = true }
+serde_json = { version = "1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 llama-cpp-2 = { version = "0.1", default-features = false, features = ["metal"], optional = true }

@@ -6956,6 +6956,7 @@ dependencies = [
  "anyhow",
  "directories",
  "llama-cpp-2",
+ "serde_json",
  "tracing",
  "zord-net",
 ]

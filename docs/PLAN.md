@@ -803,11 +803,16 @@ Sub-phases:
   and the CLI all ported; nothing outside `zord-summarize` touches `Summarizer`
   directly anymore. `count_tokens` → chars/4 estimate on the remote path
   (Overview budgeting only; the server owns its real context).
-- **24b** — **OpenAI-compatible client.** `RemoteLlm` on `zord-net`'s existing
-  ureq agent (OS cert store + proxy aware, Phase 18): non-streaming
-  `/v1/chat/completions`, `/v1/models`, config {base_url, api_key, model,
-  timeout}. Map `GenOpts` → `max_tokens`/`temperature`. Friendly error mapping
-  (refused/timeout/401/404-model).
+- **24b** — ✅ **done** — **OpenAI-compatible client.** `zord-net` grew
+  `post_json`/`get_json` + a typed `ApiError` (Connect/Status/BadJson) on the
+  Phase 18 OS-cert-store + proxy agent. `zord-summarize::remote`: `RemoteLlm`
+  (non-streaming `/v1/chat/completions`, `temperature: 0` to mirror the local
+  greedy decode), `list_models` (`/v1/models`, doubles as test-connection),
+  `RemoteConfig {base_url, api_key, model, timeout_secs}` with base-URL
+  normalization (tolerates trailing `/` and `/v1`), and friendly error mapping
+  (refused → "is the server running?", 401/403 → key, 404 → wrong endpoint/
+  model). `LlmBackend::Remote` wired; `count_tokens` estimates chars/4.
+  Tested: unit tests + an end-to-end in-process mock-server test.
 - **24c** — **settings + wiring.** `zord-config`: `llm_backend`
   ("local"|"external", default local), `llm_base_url`, `llm_api_key`,
   `llm_model`. Settings → Summaries: backend toggle; External swaps the GGUF
