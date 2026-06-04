@@ -395,13 +395,25 @@ impl Summarizer {
             .model
             .new_context(backend, LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx)))?;
 
-        let mut batch = LlamaBatch::new(n_ctx as usize, 1);
+        // Prefill the prompt in chunks no larger than the batch size. Submitting
+        // the whole prompt in a single `decode` aborts inside ggml (ggml_abort)
+        // once it exceeds n_batch (default 2048) — which a large Overview prompt
+        // easily does. 512-token chunks stay safely under n_batch on every backend.
+        const PREFILL_CHUNK: usize = 512;
+        let mut batch = LlamaBatch::new(PREFILL_CHUNK, 1);
         let last = tokens.len() - 1;
-        for (i, tok) in tokens.iter().enumerate() {
-            batch.add(*tok, i as i32, &[0], i == last)?;
+        breadcrumb(&format!("infer:prefill ({} tokens, chunk {PREFILL_CHUNK})", tokens.len()));
+        let mut start = 0usize;
+        while start < tokens.len() {
+            let end = (start + PREFILL_CHUNK).min(tokens.len());
+            batch.clear();
+            for (offset, tok) in tokens[start..end].iter().enumerate() {
+                let pos = (start + offset) as i32;
+                batch.add(*tok, pos, &[0], (start + offset) == last)?;
+            }
+            ctx.decode(&mut batch)?;
+            start = end;
         }
-        breadcrumb("infer:prefill");
-        ctx.decode(&mut batch)?;
         breadcrumb("infer:prefill-done");
 
         let mut sampler = LlamaSampler::greedy();
@@ -453,4 +465,40 @@ fn truncate_chars(s: &str, max: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max).collect()
+}
+
+#[cfg(all(test, feature = "llama"))]
+mod prefill_tests {
+    use super::*;
+
+    /// Regression test for the ggml_abort on large prompts: feed a prompt well
+    /// over n_batch (default 2048) and confirm generation returns Ok instead of
+    /// aborting the process. Needs a downloaded GGUF; run with:
+    ///   cargo test -p zord-summarize --features llama -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn long_prompt_prefills_without_abort() {
+        let dir = directories::ProjectDirs::from("", "", "Zord")
+            .map(|d| d.data_dir().join("models"))
+            .expect("data dir");
+        let model = std::fs::read_dir(&dir)
+            .expect("models dir")
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().map(|x| x == "gguf").unwrap_or(false))
+            .expect("no .gguf model downloaded to test with");
+        eprintln!("loading {}", model.display());
+        let s = Summarizer::load(&model).expect("load model");
+        // ~7000 tokens — well over the default n_batch of 2048 (Overview-sized).
+        let long = "The quarterly roadmap review covered staffing, budget, and timelines. "
+            .repeat(400);
+        let toks = s.count_tokens(&long).unwrap();
+        eprintln!("prompt ~{toks} tokens");
+        assert!(toks > 2048, "prompt should exceed n_batch to exercise chunking");
+        let out = s
+            .generate(&long, "Summarize the following in one sentence.", GenOpts::overview(32768))
+            .expect("generate should not abort");
+        eprintln!("reply: {out}");
+        assert!(!out.trim().is_empty());
+    }
 }
