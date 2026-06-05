@@ -880,7 +880,7 @@ The CLI already proves the pipeline (`zord retranscribe` / `run_retranscribe`).
   the post-pass, mirroring the diarize temp-WAV behavior.
 
 Sub-phases:
-- **25a** — **settings + capture-only recording.** `zord-config`:
+- **25a** — ✅ **done** — **settings + capture-only recording.** `zord-config`:
   `live_transcription: bool` (default true), `retranscribe_model: String`
   (default `large-v3-turbo-q5_0`). Settings → Transcription: the toggle + the
   re-transcription model dropdown. Recorder: when live is off, skip model

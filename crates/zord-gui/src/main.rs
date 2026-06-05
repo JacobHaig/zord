@@ -646,6 +646,7 @@ fn MainApp() -> Element {
                     audio_dir,
                     record_mic,
                     record_system,
+                    live: s.live_transcription,
                 });
             }
         }
@@ -1336,7 +1337,14 @@ fn MainApp() -> Element {
                         if *view.read() == View::Overview {
                             OverviewView { overview, busy: overview_busy, notice, on_generate: on_generate_overview }
                         } else if *view.read() == View::Live {
-                            TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
+                            // Capture-only mode (Phase 25): no live text by design.
+                            if recording && !settings.read().live_transcription {
+                                div { class: "empty",
+                                    "Recording (capture only) — the transcript will be generated when you stop. Live transcription can be turned back on in Settings → Transcription."
+                                }
+                            } else {
+                                TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
+                            }
                         } else {
                             TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
                         }
@@ -1577,6 +1585,35 @@ fn MainApp() -> Element {
                                             }
                                         }
                                     }
+                                    div { class: "field-row",
+                                        label { class: "field-label", "Live transcription (transcribe while recording)" }
+                                        button {
+                                            class: if settings.read().live_transcription { "toggle on" } else { "toggle" },
+                                            onclick: move |_| {
+                                                let mut s = settings.peek().clone();
+                                                s.live_transcription = !s.live_transcription;
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            if settings.read().live_transcription { "On" } else { "Off" }
+                                        }
+                                    }
+                                    p { class: "field-note", "Off = capture-only recording: meters and audio files, but no CPU spikes or model RAM during the meeting (good for low-power machines). The transcript is generated when you stop, using the re-transcription model below." }
+                                    div { class: "field",
+                                        label { "Re-transcription model" }
+                                        select {
+                                            onchange: move |e: FormEvent| {
+                                                let mut s = settings.peek().clone();
+                                                s.retranscribe_model = e.value();
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            for m in models.read().iter().filter(|m| m.kind == "transcription") {
+                                                option { value: "{m.name}", selected: settings.read().retranscribe_model == m.name, "{m.name}" }
+                                            }
+                                        }
+                                    }
+                                    p { class: "field-note", "Used by Re-transcribe and after capture-only recordings. Real-time doesn't matter here, so a bigger model than the live one is usually worth it. Downloads on first use." }
                                 }
 
                                 section { class: "settings-section",

@@ -120,6 +120,20 @@ pub struct Settings {
     /// big models can take a while.
     #[serde(default = "default_llm_timeout_secs")]
     pub llm_timeout_secs: u64,
+    /// Transcribe while recording (Phase 25). Off = capture-only: meters + WAV
+    /// writing only (~no CPU, no model RAM — for low-power machines where live
+    /// whisper bursts stutter the webcam); transcription runs when you stop.
+    #[serde(default = "default_true")]
+    pub live_transcription: bool,
+    /// Model used by Re-transcribe and by the post-stop pass after capture-only
+    /// recordings (Phase 25). Real-time doesn't constrain it, so it can be
+    /// bigger than the live model.
+    #[serde(default = "default_retranscribe_model")]
+    pub retranscribe_model: String,
+}
+
+fn default_retranscribe_model() -> String {
+    "large-v3-turbo-q5_0".to_string()
 }
 
 fn default_llm_backend() -> String {
@@ -338,6 +352,8 @@ impl Default for Settings {
             llm_api_key: String::new(),
             llm_model: String::new(),
             llm_timeout_secs: default_llm_timeout_secs(),
+            live_transcription: true,
+            retranscribe_model: default_retranscribe_model(),
         }
     }
 }

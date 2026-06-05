@@ -215,6 +215,9 @@ pub enum RecorderCmd {
         audio_dir: PathBuf,
         record_mic: bool,
         record_system: bool,
+        /// Transcribe while recording (Phase 25). `false` = capture-only:
+        /// meters + WAVs, no model load, no transcribe jobs.
+        live: bool,
     },
     Stop,
     /// Mute/unmute the microphone ("Me") mid-recording without stopping. While
@@ -1395,6 +1398,7 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 audio_dir,
                 record_mic,
                 record_system,
+                live,
             } => {
                 // Guard: if neither was requested, record both.
                 let (record_mic, record_system) = if !record_mic && !record_system {
@@ -1409,6 +1413,7 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                     audio_dir,
                     record_mic,
                     record_system,
+                    live,
                 };
                 if run_session(opts, &rx, &ev, &db_path) {
                     break; // session ended due to Shutdown
@@ -1433,6 +1438,8 @@ struct SessionOpts {
     audio_dir: PathBuf,
     record_mic: bool,
     record_system: bool,
+    /// `false` = capture-only (Phase 25): no model, no transcribe jobs.
+    live: bool,
 }
 
 /// Run one recording session. Returns `true` if it ended because of `Shutdown`.
@@ -1449,9 +1456,12 @@ fn run_session(
         audio_dir,
         record_mic,
         record_system,
+        live,
     } = opts;
-    let _ = ev.send(Event::Status(Status::PreparingModel));
-    let model_path = {
+    // Capture-only (Phase 25): no model is loaded and no transcription runs —
+    // the WAVs written below are the input for the post-stop pass.
+    let model_path = if live {
+        let _ = ev.send(Event::Status(Status::PreparingModel));
         let ev = ev.clone();
         match ensure_model(model, &mut |done, total| {
             if let Some(total) = total {
@@ -1459,12 +1469,14 @@ fn run_session(
                 let _ = ev.send(Event::Status(Status::Downloading(pct)));
             }
         }) {
-            Ok(p) => p,
+            Ok(p) => Some(p),
             Err(e) => {
                 let _ = ev.send(Event::Status(Status::Error(format!("model: {e}"))));
                 return false;
             }
         }
+    } else {
+        None
     };
 
     let store = match Store::open(db_path) {
@@ -1486,12 +1498,16 @@ fn run_session(
     //   can re-identify speakers later with a different model, even with
     //   keep_audio off.
     let settings = zord_config::Settings::load();
-    let diarize_auto = cfg!(feature = "diarization") && record_system && settings.diarize_auto;
+    // With live transcription off there are no segments yet at stop — the auto
+    // diarization pass runs after the post-stop transcription instead (25b).
+    let diarize_auto =
+        cfg!(feature = "diarization") && record_system && settings.diarize_auto && live;
     let keep_others_for_diar =
         cfg!(feature = "diarization") && record_system && settings.diarize_keep_audio;
     // We persist audio (so re-transcribe / re-diarize can find it) when the user
-    // keeps audio, or opts to keep the Others track for re-diarization.
-    let persist_audio = keep_audio || keep_others_for_diar;
+    // keeps audio, opts to keep the Others track for re-diarization, or recorded
+    // capture-only (the WAVs ARE the pending transcript — Phase 25).
+    let persist_audio = keep_audio || keep_others_for_diar || !live;
 
     let _ = store.create_session(&Session {
         id: session_id.clone(),
@@ -1506,7 +1522,8 @@ fn run_session(
         model: model.name().to_string(),
     });
     let wav_path = |src: &str| -> Option<PathBuf> {
-        if keep_audio {
+        // Capture-only always writes — the WAV is the transcription input.
+        if keep_audio || !live {
             let _ = std::fs::create_dir_all(&audio_dir);
             Some(audio_dir.join(format!("{session_id}.{src}.wav")))
         } else {
@@ -1514,10 +1531,10 @@ fn run_session(
         }
     };
 
-    // Write the Others WAV if anything needs it: kept audio, the auto pass, or
-    // retaining it for later re-diarization.
+    // Write the Others WAV if anything needs it: kept audio, the auto pass,
+    // retention for later re-diarization, or a capture-only recording.
     let others_wav: Option<PathBuf> =
-        if record_system && (keep_audio || diarize_auto || keep_others_for_diar) {
+        if record_system && (keep_audio || diarize_auto || keep_others_for_diar || !live) {
             let _ = std::fs::create_dir_all(&audio_dir);
             Some(audio_dir.join(format!("{session_id}.others.wav")))
         } else {
@@ -1571,12 +1588,17 @@ fn run_session(
     drop(job_tx);
 
     let _ = ev.send(Event::Status(Status::Recording));
+    if !live {
+        let _ = ev.send(Event::Notice(
+            "Recording (capture only) — transcription will run when you stop.".to_string(),
+        ));
+    }
 
     // Transcription + storage thread: consumes jobs from both channels.
-    let transcribe = {
+    // Capture-only recordings spawn none — VAD jobs are simply dropped.
+    let transcribe = model_path.clone().map(|model_path| {
         let ev = ev.clone();
         let session = session_id.clone();
-        let model_path = model_path.clone();
         let db_path = db_path.clone();
         let stopping = stopping.clone();
         thread::spawn(move || {
@@ -1639,7 +1661,7 @@ fn run_session(
                 }
             }
         })
-    };
+    });
 
     // Wait for Stop / Shutdown (also handle live mic mute toggles).
     let mut shutdown = false;
@@ -1666,7 +1688,9 @@ fn run_session(
     for p in procs {
         let _ = p.join();
     }
-    let _ = transcribe.join();
+    if let Some(t) = transcribe {
+        let _ = t.join();
+    }
     let _ = store.end_session(&session_id, now_ms());
     tracing::info!("control: recording torn down");
 
