@@ -892,7 +892,7 @@ Sub-phases:
   on-demand diarize) with progress notices + a busy state; on Stop of a
   capture-only recording, auto-run it (downloading the post model if needed),
   then the existing diarize-auto chain. Emits refreshed transcript + badges.
-- **25c** — **GUI Re-transcribe.** 🔁 button in the session toolbar next to
+- **25c** — ✅ **done** — **GUI Re-transcribe.** 🔁 button in the session toolbar next to
   Summarize/Compress/Identify speakers — enabled when the session's kept WAVs
   exist; confirm dialog ("replaces the transcript; manual edits are lost");
   busy state with a rough ETA (like diarize); auto re-diarize after when

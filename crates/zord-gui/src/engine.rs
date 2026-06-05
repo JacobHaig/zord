@@ -105,7 +105,7 @@ pub enum Event {
     RemoteModels { models: Vec<String>, error: Option<String> },
     /// Terminal signal for [`DbCmd::Retranscribe`] — sent whether it succeeded
     /// or failed, so the GUI's busy state always clears (Phase 25).
-    Retranscribed(String),
+    Retranscribed,
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -1747,7 +1747,7 @@ fn run_session(
 /// ends with [`Event::Retranscribed`] so the GUI busy state clears.
 fn retranscribe_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedSender<Event>) {
     let done = |ev: &UnboundedSender<Event>| {
-        let _ = ev.send(Event::Retranscribed(session_id.to_string()));
+        let _ = ev.send(Event::Retranscribed);
     };
     let store = match Store::open(db_path) {
         Ok(s) => s,

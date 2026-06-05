@@ -321,6 +321,8 @@ fn MainApp() -> Element {
     let mut editing = use_signal(|| Option::<String>::None);
     let mut edit_text = use_signal(String::new);
     let mut confirm_delete = use_signal(|| Option::<String>::None);
+    // Session id awaiting Re-transcribe confirmation (Phase 25c).
+    let mut confirm_retranscribe = use_signal(|| Option::<String>::None);
     // Seconds elapsed in the current recording (0 when idle).
     let mut rec_secs = use_signal(|| 0u64);
     // Whether the mic ("Me") is muted during the current recording.
@@ -437,7 +439,7 @@ fn MainApp() -> Element {
                     diar_speakers.set(if n > 0 { n.to_string() } else { String::new() });
                 }
                 Event::AudioFiles { me, others } => audio_files.set((me, others)),
-                Event::Retranscribed(_) => retranscribing.set(false),
+                Event::Retranscribed => retranscribing.set(false),
                 Event::Playing(v) => playing_seg.set(v),
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
@@ -631,6 +633,7 @@ fn MainApp() -> Element {
                 summarizing.set(false);
                 compressing.set(false);
                 diarizing.set(false);
+                retranscribing.set(false);
                 audio_files.set((None, None));
                 let _ = engine.play_tx.send(PlayCmd::Stop);
                 reset_chat(chat, chat_input, chat_busy, chat_scope);
@@ -916,6 +919,7 @@ fn MainApp() -> Element {
                                                 summarizing.set(false);
                                                 compressing.set(false);
                                                 diarizing.set(false);
+                                                retranscribing.set(false);
                                                 diar_speakers.set(String::new());
                                                 audio_files.set((None, None));
                                                 let _ = eng_open.play_tx.send(PlayCmd::Stop);
@@ -1044,6 +1048,7 @@ fn MainApp() -> Element {
                         let sid_comp = id.clone();
                         let eng_diar = engine.clone();
                         let sid_diar = id.clone();
+                        let sid_rt = id.clone();
                         let mk = move |fmt: Format| {
                             let id = id.clone();
                             let engine = engine.clone();
@@ -1116,6 +1121,19 @@ fn MainApp() -> Element {
                                             noisy mix, so set it when you know the headcount.",
                                     value: "{diar_speakers}",
                                     oninput: move |e| diar_speakers.set(e.value()),
+                                }
+                                // Re-transcribe (Phase 25c): only when kept audio exists.
+                                if audio_files.read().0.is_some() || audio_files.read().1.is_some() {
+                                    button {
+                                        class: "export-btn",
+                                        title: "Regenerate the transcript from the kept audio with the re-transcription model (Settings → Transcription)",
+                                        disabled: retranscribing(),
+                                        onclick: move |_| {
+                                            if *retranscribing.peek() { return; }
+                                            confirm_retranscribe.set(Some(sid_rt.clone()));
+                                        },
+                                        if retranscribing() { "🔁 Re-transcribing…" } else { "🔁 Re-transcribe" }
+                                    }
                                 }
                                 button {
                                     class: "export-btn",
@@ -1458,6 +1476,37 @@ fn MainApp() -> Element {
                                         confirm_delete.set(None);
                                     },
                                     "Delete"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Confirm-retranscribe dialog (Phase 25c) ----
+        if let Some(rid) = confirm_retranscribe.read().clone() {
+            {
+                let engine = engine.clone();
+                let model = settings.peek().retranscribe_model.clone();
+                rsx! {
+                    div { class: "overlay",
+                        div { class: "confirm-card",
+                            h2 { "Re-transcribe this session?" }
+                            p { class: "field-note",
+                                "The transcript is regenerated from the kept audio with {model} — any manual line edits are lost. Speaker labels are re-derived afterwards. Summaries aren't touched (regenerate them if the text changes a lot)."
+                            }
+                            div { class: "confirm-actions",
+                                button { class: "mbtn ghost", onclick: move |_| confirm_retranscribe.set(None), "Cancel" }
+                                button {
+                                    class: "mbtn",
+                                    onclick: move |_| {
+                                        retranscribing.set(true);
+                                        notice.set(Some("Re-transcribing… (runs in the background)".to_string()));
+                                        let _ = engine.db_tx.send(DbCmd::Retranscribe(rid.clone()));
+                                        confirm_retranscribe.set(None);
+                                    },
+                                    "Re-transcribe"
                                 }
                             }
                         }
