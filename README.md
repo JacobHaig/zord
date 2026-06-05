@@ -52,7 +52,15 @@ storage happen on your machine.
 - 🔊 **Per-line audio replay** — hover a transcript line and press ▶ to hear
   exactly that span of the retained audio (handy for fixing a mis-transcribed
   line by ear). The button appears only when that channel's audio file exists
-  on disk.
+  on disk. Kept audio stores at the device's native rate, so replay is full
+  capture quality; models derive their 16 kHz from it on the fly.
+- 🔁 **Deferred & re-transcription** — on low-power machines, turn **live
+  transcription off** (Settings → Transcription): recording becomes capture-only
+  (meters + audio, no CPU spikes or model RAM mid-meeting) and the transcript
+  generates when you stop, with a separately chosen **re-transcription model**.
+  Or keep live on with a small model and hit **🔁 Re-transcribe** on any session
+  later to regenerate it with a bigger one — speaker labels are re-derived
+  automatically. Kept audio defaults to a 30-day retention window.
 - 🎚️ **Configurable** — capture mic-only / system-only / both, **mute your mic
   mid-recording** with a toggle next to Record, auto-generate a meeting **title**,
   edit transcript lines inline, and tune summary model + prompt from the settings
