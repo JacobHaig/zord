@@ -1360,7 +1360,11 @@ fn MainApp() -> Element {
                             // Capture-only mode (Phase 25): no live text by design.
                             if recording && !settings.read().live_transcription {
                                 div { class: "empty",
-                                    "Recording (capture only) — the transcript will be generated when you stop. Live transcription can be turned back on in Settings → Transcription."
+                                    if settings.read().auto_transcribe {
+                                        "Recording (capture only) — the transcript will be generated when you stop. Live transcription can be turned back on in Settings → Transcription."
+                                    } else {
+                                        "Recording (capture only) — transcription is deferred. Press 🔁 Re-transcribe on the session afterwards, or turn on 'Transcribe automatically after recording' in Settings → Transcription."
+                                    }
                                 }
                             } else {
                                 TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
@@ -1581,41 +1585,83 @@ fn MainApp() -> Element {
                                     }
                                 }
                                 section { class: "settings-section",
-                                    h3 { "Transcription model" }
-                                    p { class: "field-note", "Pick a downloaded model, or download another. Bigger = more accurate but slower; the quantized turbo is the best all-round." }
+                                    h3 { "Transcription" }
+                                    p { class: "field-note", "One model catalog, two jobs: the Live model transcribes while you record (small = fewer CPU spikes); the Re model runs afterwards — 🔁 Re-transcribe and automatic post-passes — where bigger is usually worth it. Models download on first use." }
+                                    div { class: "field-row",
+                                        label { class: "field-label", "Live transcription (transcribe while recording)" }
+                                        button {
+                                            class: if settings.read().live_transcription { "toggle on" } else { "toggle" },
+                                            onclick: move |_| {
+                                                let mut s = settings.peek().clone();
+                                                s.live_transcription = !s.live_transcription;
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            if settings.read().live_transcription { "On" } else { "Off" }
+                                        }
+                                    }
+                                    p { class: "field-note", "Off = capture-only recording: meters and audio only — no CPU spikes or model RAM during the meeting (good for low-power machines)." }
+                                    div { class: "field-row",
+                                        label { class: "field-label", "Transcribe automatically after recording" }
+                                        button {
+                                            class: if settings.read().auto_transcribe { "toggle on" } else { "toggle" },
+                                            onclick: move |_| {
+                                                let mut s = settings.peek().clone();
+                                                s.auto_transcribe = !s.auto_transcribe;
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            if settings.read().auto_transcribe { "On" } else { "Off" }
+                                        }
+                                    }
+                                    p { class: "field-note", "Runs the Re model when you stop. With live transcription on, this upgrades the live transcript; with live off, this is when the transcript is generated (otherwise it waits for 🔁 Re-transcribe on the session)." }
                                     for m in models.read().iter().filter(|m| m.kind == "transcription") {
                                         {
                                             let name = m.name.clone();
-                                            let selected = name == current;
+                                            let is_live = name == current;
+                                            let is_re = name == settings.read().retranscribe_model;
                                             let dl = match &progress {
                                                 Some((n, p)) if *n == name => Some(*p),
                                                 _ => None,
                                             };
                                             let eng_dl = engine.clone();
                                             let eng_del = engine.clone();
-                                            let (n_sel, n_dl, n_del) = (name.clone(), name.clone(), name.clone());
+                                            let (n_live, n_re, n_dl, n_del) =
+                                                (name.clone(), name.clone(), name.clone(), name.clone());
                                             rsx! {
-                                                div { key: "{name}", class: if selected { "model-row sel" } else { "model-row" },
+                                                div { key: "{name}", class: if is_live || is_re { "model-row sel" } else { "model-row" },
                                                     div { class: "model-main",
                                                         div { class: "model-name", "{m.name}" }
                                                         div { class: "model-desc", "{m.description} · {m.size}" }
                                                     }
                                                     div { class: "model-actions",
+                                                        // Role chips: two radio groups across the rows.
+                                                        button {
+                                                            class: if is_live { "chip on" } else { "chip" },
+                                                            title: "Use this model for live transcription",
+                                                            onclick: move |_| {
+                                                                let mut s = settings.peek().clone();
+                                                                s.model = n_live.clone();
+                                                                let _ = s.save();
+                                                                settings.set(s);
+                                                            },
+                                                            "Live"
+                                                        }
+                                                        button {
+                                                            class: if is_re { "chip on" } else { "chip" },
+                                                            title: "Use this model for 🔁 Re-transcribe and automatic post-passes",
+                                                            onclick: move |_| {
+                                                                let mut s = settings.peek().clone();
+                                                                s.retranscribe_model = n_re.clone();
+                                                                let _ = s.save();
+                                                                settings.set(s);
+                                                            },
+                                                            "Re"
+                                                        }
                                                         if m.downloaded {
                                                             button {
-                                                                class: "mbtn",
-                                                                disabled: selected,
-                                                                onclick: move |_| {
-                                                                    let mut s = settings.peek().clone();
-                                                                    s.model = n_sel.clone();
-                                                                    let _ = s.save();
-                                                                    settings.set(s);
-                                                                },
-                                                                if selected { "Selected" } else { "Select" }
-                                                            }
-                                                            button {
                                                                 class: "mbtn ghost",
-                                                                disabled: selected,
+                                                                disabled: is_live || is_re,
                                                                 onclick: move |_| { let _ = eng_del.model_tx.send(ModelCmd::Delete(n_del.clone())); },
                                                                 "Delete"
                                                             }
@@ -1636,35 +1682,6 @@ fn MainApp() -> Element {
                                             }
                                         }
                                     }
-                                    div { class: "field-row",
-                                        label { class: "field-label", "Live transcription (transcribe while recording)" }
-                                        button {
-                                            class: if settings.read().live_transcription { "toggle on" } else { "toggle" },
-                                            onclick: move |_| {
-                                                let mut s = settings.peek().clone();
-                                                s.live_transcription = !s.live_transcription;
-                                                let _ = s.save();
-                                                settings.set(s);
-                                            },
-                                            if settings.read().live_transcription { "On" } else { "Off" }
-                                        }
-                                    }
-                                    p { class: "field-note", "Off = capture-only recording: meters and audio files, but no CPU spikes or model RAM during the meeting (good for low-power machines). The transcript is generated when you stop, using the re-transcription model below." }
-                                    div { class: "field",
-                                        label { "Re-transcription model" }
-                                        select {
-                                            onchange: move |e: FormEvent| {
-                                                let mut s = settings.peek().clone();
-                                                s.retranscribe_model = e.value();
-                                                let _ = s.save();
-                                                settings.set(s);
-                                            },
-                                            for m in models.read().iter().filter(|m| m.kind == "transcription") {
-                                                option { value: "{m.name}", selected: settings.read().retranscribe_model == m.name, "{m.name}" }
-                                            }
-                                        }
-                                    }
-                                    p { class: "field-note", "Used by Re-transcribe and after capture-only recordings. Real-time doesn't matter here, so a bigger model than the live one is usually worth it. Downloads on first use." }
                                 }
 
                                 section { class: "settings-section",

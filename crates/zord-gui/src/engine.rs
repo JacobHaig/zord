@@ -1699,17 +1699,29 @@ fn run_session(
     let _ = store.end_session(&session_id, now_ms());
     tracing::info!("control: recording torn down");
 
-    // Capture-only recording (Phase 25): the transcript is generated now, from
-    // the WAVs we just wrote — before diarization, which labels its segments.
-    if !live {
+    // Post-stop transcription pass (Phase 25): when auto-transcribe is on it
+    // runs from the WAVs we just wrote — with live on it *upgrades* the live
+    // transcript with the re-transcription model; with live off it's where the
+    // transcript comes from. Runs before diarization (which labels segments).
+    let post_pass = settings.auto_transcribe;
+    if post_pass {
         post_transcribe_session(&store, &session_id, &audio_prefix, ev);
+    } else if !live {
+        let _ = ev.send(Event::Notice(
+            "Recording saved — transcription deferred. Open the session and press \
+             🔁 Re-transcribe (or turn on 'Transcribe automatically after recording' \
+             in Settings)."
+                .to_string(),
+        ));
     }
 
     // Offline speaker diarization (accurate, source of truth) over the "Others"
     // track, then drop the temp WAV unless we're retaining it (kept audio, or
     // kept-for-re-diarization).
+    // Diarization needs segments to label — with a fully deferred transcript
+    // (live off, no post pass) it runs after the eventual 🔁 Re-transcribe.
     #[cfg(feature = "diarization")]
-    if diarize_auto {
+    if diarize_auto && (live || post_pass) {
         if let Some(wav) = others_wav.as_ref() {
             apply_diarization(&store, &session_id, wav, None, ev);
         }
@@ -1720,8 +1732,10 @@ fn run_session(
         }
     }
     // Capture-only WAVs were forced on as the transcription input; if the user
-    // doesn't keep audio, drop them now that the post-pass is done.
-    if !live && !keep_audio {
+    // doesn't keep audio, drop them once the post-pass produced a transcript.
+    // A *deferred* recording keeps them regardless — they ARE the pending
+    // transcript (the safety rule: never purge an untranscribed capture).
+    if !live && post_pass && !keep_audio {
         for suffix in ["me", "others"] {
             let _ = std::fs::remove_file(audio_dir.join(format!("{session_id}.{suffix}.wav")));
         }
@@ -1765,12 +1779,17 @@ fn retranscribe_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &Unbou
         .ok()
         .and_then(|b| b.get(session_id).map(|(_, _, spk)| *spk))
         .unwrap_or(false);
+    // A deferred capture-only session has no segments yet — its *first*
+    // transcription should honor the diarize-auto setting like a normal stop.
+    let first_transcription = store.segments(session_id).map(|v| v.is_empty()).unwrap_or(false);
 
     let ok = post_transcribe_session(&store, session_id, std::path::Path::new(&prefix), ev);
     // Segments were replaced — any custom speaker labels were on the old rows.
     let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
 
-    if ok && had_speakers && cfg!(feature = "diarization") {
+    let want_diarize = had_speakers
+        || (first_transcription && zord_config::Settings::load().diarize_auto);
+    if ok && want_diarize && cfg!(feature = "diarization") {
         let _ = ev.send(Event::Notice(
             "Re-identifying speakers on the new transcript…".to_string(),
         ));

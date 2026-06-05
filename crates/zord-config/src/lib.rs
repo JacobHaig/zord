@@ -128,6 +128,13 @@ pub struct Settings {
     /// bigger than the live model.
     #[serde(default = "default_retranscribe_model")]
     pub retranscribe_model: String,
+    /// Run the re-transcription pass automatically when a recording stops
+    /// (Phase 25 polish). With live transcription on, this *upgrades* the live
+    /// transcript with the (usually bigger) re-transcription model; with live
+    /// off, it's when the transcript gets generated at all. Off = defer until
+    /// the user presses 🔁 Re-transcribe.
+    #[serde(default)]
+    pub auto_transcribe: bool,
 }
 
 fn default_retranscribe_model() -> String {
@@ -351,6 +358,7 @@ impl Default for Settings {
             llm_timeout_secs: default_llm_timeout_secs(),
             live_transcription: true,
             retranscribe_model: default_retranscribe_model(),
+            auto_transcribe: false,
         }
     }
 }

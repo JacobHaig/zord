@@ -854,6 +854,14 @@ chunked-prefill (the v0.2.9 crash fix) is llama-only and N/A for remote;
 auto-title rides the same backend switch.
 
 ### Phase 25 — Deferred & re-transcription ✅
+**Post-ship polish (June 2026):** the Transcription settings became one
+holistic panel — a single model list with **Live / Re role chips** per row
+(two radio groups; Delete blocked while a model holds a role) replacing the
+old separate list + dropdown; plus a **"Transcribe automatically after
+recording"** toggle (default off), independent of Live: live+auto = auto-
+upgrade the live transcript at stop with the Re model; off+off = fully
+deferred (WAVs kept regardless of keep-audio until first transcription; the
+first 🔁 honors diarize-auto).
 For low-power machines (Windows + Teams): live transcription bursts the CPU
 60–80% per VAD chunk (webcam stutter) and pins ~1 GB of model RAM for the whole
 meeting. Fix: make live transcription **optional**, and make post-hoc
