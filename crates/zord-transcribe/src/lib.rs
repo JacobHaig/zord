@@ -3,6 +3,7 @@
 //! Both implement [`TranscribeBackend`]; [`Transcriber`] dispatches by model.
 
 mod model;
+mod offline;
 mod whisper;
 
 #[cfg(feature = "parakeet")]
@@ -12,6 +13,7 @@ pub use model::{
     delete_model, ensure_model, is_downloaded, model_cache_dir, model_path_if_present, Engine,
     ModelId,
 };
+pub use offline::transcribe_wav_file;
 
 use anyhow::Result;
 use std::path::Path;

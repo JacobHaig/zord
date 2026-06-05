@@ -230,6 +230,16 @@ impl Store {
         Ok(())
     }
 
+    /// Set or clear a session's kept-audio prefix (cleared when capture-only
+    /// WAVs are removed after the post-stop transcription — Phase 25).
+    pub fn set_audio_path(&self, id: &str, audio_path: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET audio_path = ?2 WHERE id = ?1",
+            params![id, audio_path],
+        )?;
+        Ok(())
+    }
+
     pub fn end_session(&self, id: &str, ended_at: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET ended_at = ?2 WHERE id = ?1",

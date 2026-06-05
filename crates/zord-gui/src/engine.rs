@@ -103,6 +103,9 @@ pub enum Event {
     /// Result of [`ModelCmd::ListRemoteLlm`]: the external server's model ids,
     /// or why it couldn't be reached (Phase 24c).
     RemoteModels { models: Vec<String>, error: Option<String> },
+    /// Terminal signal for [`DbCmd::Retranscribe`] — sent whether it succeeded
+    /// or failed, so the GUI's busy state always clears (Phase 25).
+    Retranscribed(String),
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -256,6 +259,10 @@ pub enum DbCmd {
     /// `num_speakers` pins the speaker count for this session (0 = auto-detect);
     /// it is persisted on the session so it's remembered next time.
     Diarize { id: String, num_speakers: u32 },
+    /// Re-transcribe a past session from its kept WAVs with the configured
+    /// re-transcription model (Phase 25). Replaces existing segments; speaker
+    /// labels are re-derived afterwards when the session had them.
+    Retranscribe(String),
     /// Rename a diarized speaker (0-based index) within a session.
     RenameSpeaker {
         id: String,
@@ -1024,6 +1031,12 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let db_path = db_path.clone();
                 thread::spawn(move || diarize_session_ondemand(&db_path, &id, num_speakers, &ev));
             }
+            DbCmd::Retranscribe(id) => {
+                // Heavy (model load + minutes of inference); own thread + Store.
+                let ev = ev.clone();
+                let db_path = db_path.clone();
+                thread::spawn(move || retranscribe_session_ondemand(&db_path, &id, &ev));
+            }
         }
     }
 }
@@ -1498,10 +1511,7 @@ fn run_session(
     //   can re-identify speakers later with a different model, even with
     //   keep_audio off.
     let settings = zord_config::Settings::load();
-    // With live transcription off there are no segments yet at stop — the auto
-    // diarization pass runs after the post-stop transcription instead (25b).
-    let diarize_auto =
-        cfg!(feature = "diarization") && record_system && settings.diarize_auto && live;
+    let diarize_auto = cfg!(feature = "diarization") && record_system && settings.diarize_auto;
     let keep_others_for_diar =
         cfg!(feature = "diarization") && record_system && settings.diarize_keep_audio;
     // We persist audio (so re-transcribe / re-diarize can find it) when the user
@@ -1694,6 +1704,12 @@ fn run_session(
     let _ = store.end_session(&session_id, now_ms());
     tracing::info!("control: recording torn down");
 
+    // Capture-only recording (Phase 25): the transcript is generated now, from
+    // the WAVs we just wrote — before diarization, which labels its segments.
+    if !live {
+        post_transcribe_session(&store, &session_id, &audio_prefix, ev);
+    }
+
     // Offline speaker diarization (accurate, source of truth) over the "Others"
     // track, then drop the temp WAV unless we're retaining it (kept audio, or
     // kept-for-re-diarization).
@@ -1708,10 +1724,152 @@ fn run_session(
             let _ = std::fs::remove_file(wav);
         }
     }
+    // Capture-only WAVs were forced on as the transcription input; now that the
+    // post-pass is done, fall back to the live-mode retention semantics: the mic
+    // track follows keep-audio, the Others track also honors keep-for-rediarize.
+    if !live && !keep_audio {
+        let _ = std::fs::remove_file(audio_dir.join(format!("{session_id}.me.wav")));
+        if !keep_others_for_diar {
+            let _ = std::fs::remove_file(audio_dir.join(format!("{session_id}.others.wav")));
+            let _ = store.set_audio_path(&session_id, None);
+            emit_sessions(&store, ev); // 🎧 badge off
+        }
+    }
 
     let _ = ev.send(Event::Status(Status::Idle));
     tracing::info!("control: session idle");
     shutdown
+}
+
+/// On-demand re-transcription of a past session (the 🔁 button / Phase 25):
+/// post-transcribe from the kept WAVs, then re-derive speaker labels when the
+/// session had them (re-transcribing wipes segments, labels included). Always
+/// ends with [`Event::Retranscribed`] so the GUI busy state clears.
+fn retranscribe_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedSender<Event>) {
+    let done = |ev: &UnboundedSender<Event>| {
+        let _ = ev.send(Event::Retranscribed(session_id.to_string()));
+    };
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
+            return done(ev);
+        }
+    };
+    let prefix = store
+        .get_session(session_id)
+        .ok()
+        .flatten()
+        .and_then(|s| s.audio_path);
+    let Some(prefix) = prefix else {
+        let _ = ev.send(Event::Notice(
+            "This session has no kept audio to re-transcribe.".to_string(),
+        ));
+        return done(ev);
+    };
+    let had_speakers = store
+        .session_badges()
+        .ok()
+        .and_then(|b| b.get(session_id).map(|(_, _, spk)| *spk))
+        .unwrap_or(false);
+
+    let ok = post_transcribe_session(&store, session_id, std::path::Path::new(&prefix), ev);
+    // Segments were replaced — any custom speaker labels were on the old rows.
+    let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
+
+    if ok && had_speakers && cfg!(feature = "diarization") {
+        let _ = ev.send(Event::Notice(
+            "Re-identifying speakers on the new transcript…".to_string(),
+        ));
+        let pinned = store.get_diarize_speakers(session_id).ok().flatten().unwrap_or(0);
+        diarize_session_ondemand(db_path, session_id, pinned, ev);
+    }
+    done(ev)
+}
+
+/// Post-hoc transcription of a session from its kept WAVs (Phase 25): used
+/// after capture-only recordings and by Re-transcribe. Replaces any existing
+/// segments, stamps the session with the re-transcription model, and emits
+/// progress + the refreshed transcript. Returns `true` on success.
+fn post_transcribe_session(
+    store: &Store,
+    session_id: &str,
+    audio_prefix: &std::path::Path,
+    ev: &UnboundedSender<Event>,
+) -> bool {
+    let settings = zord_config::Settings::load();
+    let model = ModelId::parse(&settings.retranscribe_model)
+        .unwrap_or(ModelId::LargeV3TurboQ5);
+    let _ = ev.send(Event::Notice(format!(
+        "Transcribing with {}… (first run downloads the model)",
+        model.name()
+    )));
+    let model_path = {
+        let ev2 = ev.clone();
+        match ensure_model(model, &mut |done, total| {
+            if let Some(total) = total.filter(|t| *t > 0) {
+                let _ = ev2.send(Event::ModelProgress {
+                    name: model.name().to_string(),
+                    pct: (done * 100 / total) as u8,
+                });
+            }
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("transcription model: {e}")));
+                return false;
+            }
+        }
+    };
+    let transcriber = match Transcriber::load(model, &model_path) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("transcriber: {e}")));
+            return false;
+        }
+    };
+
+    let _ = store.clear_segments(session_id);
+    let _ = store.set_session_model(session_id, model.name());
+    let mut total = 0usize;
+    for (suffix, source) in [("me", Source::Me), ("others", Source::Others)] {
+        let wav = audio_prefix.with_file_name(format!(
+            "{}.{suffix}.wav",
+            audio_prefix
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default()
+        ));
+        if !wav.exists() {
+            continue;
+        }
+        let mut on_segment = |seg: Segment| {
+            let _ = store.insert_segment(session_id, &seg);
+        };
+        match zord_transcribe::transcribe_wav_file(&transcriber, source, &wav, &mut on_segment) {
+            Ok(n) => total += n,
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("transcribing {suffix}: {e}")));
+            }
+        }
+    }
+    if total == 0 {
+        let _ = ev.send(Event::Notice(
+            "No speech found in the kept audio — nothing transcribed.".to_string(),
+        ));
+        return false;
+    }
+    // Refresh whatever the GUI is showing: the transcript (if this session is
+    // open), the sidebar (model name changed), and the badges.
+    if let Ok(v) = store.segments(session_id) {
+        let _ = ev.send(Event::Transcript(v));
+    }
+    emit_sessions(store, ev);
+    let _ = ev.send(Event::Notice(format!(
+        "Transcribed {total} segment(s) with {}.",
+        model.name()
+    )));
+    true
 }
 
 /// Prepend silence to `mono` so the channel's produced-sample count catches up

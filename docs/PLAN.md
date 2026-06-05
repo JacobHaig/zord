@@ -887,7 +887,7 @@ Sub-phases:
   load + transcribe jobs entirely (meters/VAD/WAV writing only — ~1–2% CPU,
   no model RAM); Live view shows "Recording — transcription runs when you
   stop (live transcription is off)".
-- **25b** — **engine post-pass.** Extract the CLI's WAV→VAD→transcribe→insert
+- **25b** — ✅ **done** — **engine post-pass.** Extract the CLI's WAV→VAD→transcribe→insert
   pipeline into shared code; new engine command (dedicated worker thread, like
   on-demand diarize) with progress notices + a busy state; on Stop of a
   capture-only recording, auto-run it (downloading the post model if needed),

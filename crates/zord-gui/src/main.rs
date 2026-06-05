@@ -295,6 +295,7 @@ fn MainApp() -> Element {
     let mut summarizing = use_signal(|| false);
     let mut compressing = use_signal(|| false);
     let mut diarizing = use_signal(|| false);
+    let mut retranscribing = use_signal(|| false);
     // Expected speaker count for the viewed session's diarization, as typed
     // (empty = auto-detect). Loaded from / persisted on the session row.
     let mut diar_speakers = use_signal(String::new);
@@ -436,6 +437,7 @@ fn MainApp() -> Element {
                     diar_speakers.set(if n > 0 { n.to_string() } else { String::new() });
                 }
                 Event::AudioFiles { me, others } => audio_files.set((me, others)),
+                Event::Retranscribed(_) => retranscribing.set(false),
                 Event::Playing(v) => playing_seg.set(v),
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {

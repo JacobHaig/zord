@@ -6968,10 +6968,12 @@ dependencies = [
  "anyhow",
  "bzip2",
  "directories",
+ "hound",
  "sherpa-onnx",
  "tar",
  "tracing",
  "whisper-rs",
+ "zord-audio",
  "zord-core",
  "zord-net",
 ]

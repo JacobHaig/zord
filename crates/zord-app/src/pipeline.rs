@@ -220,6 +220,8 @@ pub fn run_retranscribe(
 }
 
 /// Load a WAV, resample to 16 kHz mono, VAD-segment, transcribe, and insert.
+/// Thin wrapper over the shared offline pipeline (zord-transcribe) that also
+/// stores + prints each segment.
 fn transcribe_wav(
     transcriber: &Transcriber,
     store: &Store,
@@ -227,46 +229,11 @@ fn transcribe_wav(
     source: Source,
     wav_path: &Path,
 ) -> Result<usize> {
-    let mut reader = hound::WavReader::open(wav_path)?;
-    let spec = reader.spec();
-    let interleaved: Vec<f32> = read_interleaved_samples(&mut reader, spec)?;
-    tracing::info!(rate = spec.sample_rate, channels = spec.channels, ?source, "loaded WAV");
-
-    let mut resampler = MonoResampler::new(spec.sample_rate, spec.channels)?;
-    let mono = resampler.process(&interleaved)?;
-    let mut segmenter = Segmenter::new(SegmenterConfig::default());
-    let mut segments = segmenter.push(&mono);
-    if let Some(seg) = segmenter.flush() {
-        segments.push(seg);
-    }
-
-    let mut count = 0usize;
-    for vad in segments {
-        for seg in transcriber.transcribe(&vad.samples, source, vad.t_start_ms)? {
-            store.insert_segment(session_id, &seg)?;
-            println!("[{} {}] {}", fmt_ts(seg.t_start_ms), seg.source.label(), seg.text);
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Read all WAV samples as interleaved f32, normalizing integer formats to [-1, 1].
-fn read_interleaved_samples(
-    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
-    spec: hound::WavSpec,
-) -> Result<Vec<f32>> {
-    let interleaved: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
-        hound::SampleFormat::Int => {
-            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .samples::<i32>()
-                .map(|s| s.map(|v| v as f32 / scale))
-                .collect::<Result<Vec<_>, _>>()?
-        }
+    let mut on_segment = |seg: zord_core::Segment| {
+        let _ = store.insert_segment(session_id, &seg);
+        println!("[{} {}] {}", fmt_ts(seg.t_start_ms), seg.source.label(), seg.text);
     };
-    Ok(interleaved)
+    zord_transcribe::transcribe_wav_file(transcriber, source, wav_path, &mut on_segment)
 }
 
 /// `foo.wav` + "me" -> `foo.me.wav`

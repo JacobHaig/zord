@@ -12,8 +12,10 @@ parakeet = ["dep:sherpa-onnx", "dep:tar", "dep:bzip2"]
 
 [dependencies]
 zord-core = { workspace = true }
+zord-audio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+hound = "3"
 directories = "5"
 zord-net = { workspace = true }
 sherpa-onnx = { version = "1.13", optional = true }
