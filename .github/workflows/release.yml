@@ -125,7 +125,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
 
       - name: Upload artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -202,7 +201,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
 
       - name: Upload artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -210,3 +208,33 @@ jobs:
         with:
           name: zord-windows-x64
           path: dist/*
+
+  # One curated notes pass per release (the build jobs only attach files —
+  # running generate_release_notes in both used to print the changelog twice).
+  # "Highlights" comes from the release commit's body, which is written as a
+  # human overview of what was added/fixed rather than a 1:1 commit list.
+  notes:
+    name: Release notes
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Write curated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          {
+            echo "## Highlights"
+            echo
+            git log -1 --format=%b "$TAG"
+            echo
+            if [ -n "$PREV" ]; then
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+          } > notes.md
+          gh release edit "$TAG" --notes-file notes.md
