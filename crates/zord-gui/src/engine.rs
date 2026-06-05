@@ -85,6 +85,10 @@ pub enum Event {
     /// conversation it belongs to. (Only produced in `summaries` builds.)
     #[allow(dead_code)]
     ChatReply { scope: ChatScope, reply: String },
+    /// A streamed piece of the in-progress chat reply (Phase 24d). Always
+    /// followed by a terminal [`Event::ChatReply`] with the full text.
+    #[allow(dead_code)]
+    ChatDelta { scope: ChatScope, delta: String },
     /// Custom names for diarized speakers in the viewed session (index → name).
     Speakers(std::collections::HashMap<i32, String>),
     /// The viewed session's saved expected-speaker count (0 = auto-detect).
@@ -619,12 +623,23 @@ fn chat_one(
         .map(|(is_user, t)| (if is_user { ChatRole::User } else { ChatRole::Assistant }, t))
         .collect();
     let _ = ev.send(Event::Notice("Thinking…".to_string()));
-    match llm.chat(&system, &mapped, n_ctx) {
+    // Stream the reply as it generates; the terminal ChatReply carries the full
+    // text (it also clears the GUI's busy state, so it is sent on error too —
+    // an error reply in the conversation beats a stuck spinner).
+    let ev_delta = ev.clone();
+    let scope_delta = scope.clone();
+    let mut on_delta = |piece: &str| {
+        let _ = ev_delta.send(Event::ChatDelta {
+            scope: scope_delta.clone(),
+            delta: piece.to_string(),
+        });
+    };
+    match llm.chat_stream(&system, &mapped, n_ctx, &mut on_delta) {
         Ok(reply) => {
             let _ = ev.send(Event::ChatReply { scope, reply });
         }
         Err(e) => {
-            let _ = ev.send(Event::Notice(format!("chat failed: {e}")));
+            let _ = ev.send(Event::ChatReply { scope, reply: format!("⚠️ Chat failed: {e}") });
         }
     }
 }

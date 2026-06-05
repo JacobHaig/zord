@@ -99,9 +99,54 @@ impl RemoteLlm {
 
     /// Multi-turn grounded chat (Phase 23d shape).
     pub fn chat(&self, system_prompt: &str, turns: &[(ChatRole, String)], n_ctx: u32) -> Result<String> {
+        self.complete(self.chat_messages(system_prompt, turns), GenOpts::chat(n_ctx))
+    }
+
+    /// Like [`chat`], but streams (`stream: true` + SSE), calling `on_delta`
+    /// with each content piece as the server emits it (Phase 24d). Returns the
+    /// accumulated reply at the end.
+    pub fn chat_stream(
+        &self,
+        system_prompt: &str,
+        turns: &[(ChatRole, String)],
+        n_ctx: u32,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<String> {
+        let opts = GenOpts::chat(n_ctx);
+        let body = serde_json::json!({
+            "model": self.cfg.model,
+            "messages": self.chat_messages(system_prompt, turns),
+            "max_tokens": opts.max_new_tokens,
+            "temperature": 0,
+            "stream": true,
+        });
+        let url = self.cfg.endpoint("chat/completions");
+        tracing::info!(%url, model = %self.cfg.model, "remote LLM request (streaming)");
+        let mut full = String::new();
+        zord_net::post_sse(&url, self.cfg.bearer(), &body, self.cfg.timeout(), &mut |data| {
+            // Each SSE payload is a chunk object; content lives in
+            // choices[0].delta.content (absent on role/finish chunks).
+            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(piece) = chunk["choices"][0]["delta"]["content"].as_str() {
+                    if !piece.is_empty() {
+                        full.push_str(piece);
+                        on_delta(piece);
+                    }
+                }
+            }
+        })
+        .map_err(|e| friendly(e, &self.cfg))?;
+        let full = full.trim().to_string();
+        if full.is_empty() {
+            anyhow::bail!("the server streamed no completion text");
+        }
+        Ok(full)
+    }
+
+    fn chat_messages(&self, system_prompt: &str, turns: &[(ChatRole, String)]) -> Vec<serde_json::Value> {
         let mut messages = vec![message("system", system_prompt)];
         messages.extend(turns.iter().map(|(role, content)| message(role.as_str(), content)));
-        self.complete(messages, GenOpts::chat(n_ctx))
+        messages
     }
 
     fn complete(&self, messages: Vec<serde_json::Value>, opts: GenOpts) -> Result<String> {
@@ -278,5 +323,53 @@ mod tests {
         assert!(req.contains("\"model\":\"test-model\""));
         assert!(req.contains("\"temperature\":0"));
         assert!(!req.to_lowercase().contains("authorization:"), "empty key must send no auth header");
+    }
+
+    /// Streaming end-to-end: SSE chunks arrive as deltas, role/finish chunks
+    /// and the [DONE] sentinel are skipped, and the accumulated text returns.
+    #[test]
+    fn streams_against_a_mock_sse_server() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Drain the request headers + body (single small read is enough to
+            // unblock; we respond regardless).
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let chunks = [
+                r#"{"choices":[{"delta":{"role":"assistant"}}]}"#, // role chunk: no content
+                r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"lo!"}}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            ];
+            let mut body = String::new();
+            for c in chunks {
+                body.push_str(&format!("data: {c}\n\n"));
+            }
+            body.push_str("data: [DONE]\n\n");
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            req
+        });
+
+        let mut c = cfg(&format!("http://127.0.0.1:{port}"));
+        c.model = "test-model".to_string();
+        let mut deltas = Vec::new();
+        let out = RemoteLlm::new(c)
+            .chat_stream("sys", &[(ChatRole::User, "hi".to_string())], 8192, &mut |d| {
+                deltas.push(d.to_string());
+            })
+            .unwrap();
+        assert_eq!(out, "Hello!");
+        assert_eq!(deltas, vec!["Hel", "lo!"]);
+        let req = server.join().unwrap();
+        assert!(req.contains("\"stream\":true"), "request must ask for streaming");
     }
 }

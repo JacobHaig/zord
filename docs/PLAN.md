@@ -826,12 +826,19 @@ Sub-phases:
   now takes the prebuilt backend. CLI shares a `build_llm_backend` helper
   (deduplicated the old per-command model resolution). Not verified against a
   real LM Studio yet — the mock-server test covers the wire format.
-- **24d** — **polish / later.** Streaming for Chat; relabel the Phase 22
-  "via Ollama" *download* entries so "Ollama" isn't overloaded now that an
-  Ollama *server* is also a thing; optionally un-gate the remote backend from
-  the `summaries` build feature (release binaries ship `summaries` anyway, so
-  low priority — it would only help from-source builds skip the llama.cpp
-  toolchain).
+- **24d** — **polish / later.** ✅ **Chat streaming** (done): replies render
+  as they generate on both backends — `LlmBackend::chat_stream(…, on_delta)`
+  (local: per-token pieces from the decode loop; remote: `stream: true` + SSE
+  via `zord_net::post_sse`, `[DONE]`/role/finish chunks filtered),
+  `Event::ChatDelta` appends to the in-progress bubble, terminal
+  `Event::ChatReply` replaces it with the full text. Errors now also land as a
+  ChatReply ("⚠️ Chat failed: …"), fixing the pre-existing stuck-busy spinner
+  on chat errors. Summarize/compress/overview stay single-shot by design.
+  Still open: relabel the Phase 22 "via Ollama" *download* entries so "Ollama"
+  isn't overloaded now that an Ollama *server* is also a thing; optionally
+  un-gate the remote backend from the `summaries` build feature (release
+  binaries ship `summaries` anyway, so low priority — it would only help
+  from-source builds skip the llama.cpp toolchain).
 
 Known gaps: `compress_ctx`/`overview_ctx` become input-budget knobs only for
 remote (server-side context is the server's business — UI wording to match);

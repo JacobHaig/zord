@@ -361,16 +361,38 @@ impl Summarizer {
     /// answer from) over `turns` of alternating user/assistant messages. Returns
     /// the assistant's next reply.
     pub fn chat(&self, system_prompt: &str, turns: &[(ChatRole, String)], n_ctx: u32) -> Result<String> {
+        self.chat_stream(system_prompt, turns, n_ctx, &mut |_| {})
+    }
+
+    /// Like [`chat`], but calls `on_delta` with each decoded piece as it is
+    /// generated (Phase 24d streaming). Returns the full reply at the end.
+    pub fn chat_stream(
+        &self,
+        system_prompt: &str,
+        turns: &[(ChatRole, String)],
+        n_ctx: u32,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<String> {
         let mut messages = vec![LlamaChatMessage::new("system".to_string(), system_prompt.to_string())?];
         for (role, content) in turns {
             messages.push(LlamaChatMessage::new(role.as_str().to_string(), content.clone())?);
         }
-        self.complete(messages, GenOpts::chat(n_ctx))
+        self.complete_with(messages, GenOpts::chat(n_ctx), on_delta)
     }
 
     /// Apply the model's chat template to `messages`, prefill, and greedily decode
     /// up to `opts.max_new_tokens`. The shared core under [`generate`]/[`chat`].
     fn complete(&self, messages: Vec<LlamaChatMessage>, opts: GenOpts) -> Result<String> {
+        self.complete_with(messages, opts, &mut |_| {})
+    }
+
+    /// [`complete`], reporting each decoded piece to `on_delta` as it lands.
+    fn complete_with(
+        &self,
+        messages: Vec<LlamaChatMessage>,
+        opts: GenOpts,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<String> {
         let backend = backend()?;
         let tmpl = self
             .model
@@ -426,7 +448,11 @@ impl Summarizer {
             if self.model.is_eog_token(token) {
                 break;
             }
-            out.push_str(&self.model.token_to_str(token, Special::Plaintext).unwrap_or_default());
+            let piece = self.model.token_to_str(token, Special::Plaintext).unwrap_or_default();
+            if !piece.is_empty() {
+                on_delta(&piece);
+            }
+            out.push_str(&piece);
             batch.clear();
             batch.add(token, n_cur, &[0], true)?;
             n_cur += 1;

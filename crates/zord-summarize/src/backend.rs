@@ -59,6 +59,22 @@ impl LlmBackend {
         }
     }
 
+    /// Like [`chat`], but reports pieces of the reply to `on_delta` as they are
+    /// generated (Phase 24d streaming) — token pieces locally, SSE deltas
+    /// remotely. Returns the full reply at the end.
+    pub fn chat_stream(
+        &self,
+        system_prompt: &str,
+        turns: &[(ChatRole, String)],
+        n_ctx: u32,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<String> {
+        match self {
+            Self::Local(s) => s.chat_stream(system_prompt, turns, n_ctx, on_delta),
+            Self::Remote(r) => r.chat_stream(system_prompt, turns, n_ctx, on_delta),
+        }
+    }
+
     /// Token count of `text` for input budgeting (Overview / chat context).
     /// Exact for the local model; a ~4 chars/token estimate for remote (the
     /// server owns its real context — this only sizes what we send).

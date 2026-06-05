@@ -113,6 +113,51 @@ pub fn get_json(
     json_response(req.call())
 }
 
+/// POST a JSON body and stream the Server-Sent-Events response, calling
+/// `on_data` with each `data:` payload (the `[DONE]` sentinel is filtered
+/// out). Used for streaming LLM completions.
+pub fn post_sse(
+    url: &str,
+    bearer: Option<&str>,
+    body: &serde_json::Value,
+    timeout: Duration,
+    on_data: &mut dyn FnMut(&str),
+) -> Result<(), ApiError> {
+    use std::io::BufRead;
+    let mut req = agent()
+        .post(url)
+        .set("Content-Type", "application/json")
+        .set("Accept", "text/event-stream")
+        .timeout(timeout);
+    if let Some(key) = bearer.filter(|k| !k.trim().is_empty()) {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    match req.send_string(&body.to_string()) {
+        Ok(resp) => {
+            let reader = std::io::BufReader::new(resp.into_reader());
+            for line in reader.lines() {
+                let line =
+                    line.map_err(|e| ApiError::Connect(format!("reading stream: {e}")))?;
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data == "[DONE]" {
+                        break;
+                    }
+                    if !data.is_empty() {
+                        on_data(data);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(ureq::Error::Status(code, resp)) => Err(ApiError::Status {
+            code,
+            body: resp.into_string().unwrap_or_default(),
+        }),
+        Err(ureq::Error::Transport(t)) => Err(ApiError::Connect(t.to_string())),
+    }
+}
+
 fn json_response(
     result: Result<ureq::Response, ureq::Error>,
 ) -> Result<serde_json::Value, ApiError> {

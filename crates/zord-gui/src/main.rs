@@ -405,10 +405,27 @@ fn MainApp() -> Element {
                 }
                 Event::ChatReply { scope, reply } => {
                     // Only land the reply if it belongs to the open conversation.
+                    // If pieces of it were streamed, the partial assistant
+                    // message is already last — replace it with the full text.
                     if chat_scope.peek().as_ref() == Some(&scope) {
-                        chat.write().push((false, reply));
+                        let mut c = chat.write();
+                        match c.last_mut() {
+                            Some((false, text)) if *chat_busy.peek() => *text = reply,
+                            _ => c.push((false, reply)),
+                        }
                     }
                     chat_busy.set(false);
+                }
+                Event::ChatDelta { scope, delta } => {
+                    // Append to the in-progress assistant message (creating it
+                    // on the first piece) — only for the open conversation.
+                    if chat_scope.peek().as_ref() == Some(&scope) && *chat_busy.peek() {
+                        let mut c = chat.write();
+                        match c.last_mut() {
+                            Some((false, text)) => text.push_str(&delta),
+                            _ => c.push((false, delta)),
+                        }
+                    }
                 }
                 Event::Speakers(v) => {
                     speaker_names.set(v);
