@@ -439,6 +439,7 @@ fn MainApp() -> Element {
                     diar_speakers.set(if n > 0 { n.to_string() } else { String::new() });
                 }
                 Event::AudioFiles { me, others } => audio_files.set((me, others)),
+                Event::Retranscribing => retranscribing.set(true),
                 Event::Retranscribed => retranscribing.set(false),
                 Event::Playing(v) => playing_seg.set(v),
                 Event::RemoteModels { models, error } => {
@@ -566,6 +567,9 @@ fn MainApp() -> Element {
         }
         if model_progress.read().is_some() {
             active.push("download");
+        }
+        if retranscribing() {
+            active.push("transcribe");
         }
         if summarizing() {
             active.push("summarize");
@@ -2728,6 +2732,7 @@ fn reset_chat(
 fn job_label(key: &str) -> (&'static str, &'static str) {
     match key {
         "record" => ("🔴", "Recording"),
+        "transcribe" => ("🔁", "Transcribing"),
         "download" => ("⬇", "Downloading model"),
         "summarize" => ("✨", "Summarizing"),
         "compress" => ("🗜", "Compressing"),
@@ -2763,6 +2768,7 @@ fn job_detail(
             (d, None)
         }
         "record" => ("capturing audio".to_string(), None),
+        "transcribe" => ("transcribing the kept audio…".to_string(), None),
         "overview" => ("compressing + synthesizing".to_string(), None),
         _ => ("running…".to_string(), None),
     }
@@ -2772,12 +2778,13 @@ fn job_detail(
 fn job_order(key: &str) -> u8 {
     match key {
         "record" => 0,
-        "download" => 1,
-        "summarize" => 2,
-        "compress" => 3,
-        "overview" => 4,
-        "diarize" => 5,
-        "chat" => 6,
+        "transcribe" => 1,
+        "download" => 2,
+        "summarize" => 3,
+        "compress" => 4,
+        "overview" => 5,
+        "diarize" => 6,
+        "chat" => 7,
         _ => 9,
     }
 }

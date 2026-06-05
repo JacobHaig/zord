@@ -103,8 +103,11 @@ pub enum Event {
     /// Result of [`ModelCmd::ListRemoteLlm`]: the external server's model ids,
     /// or why it couldn't be reached (Phase 24c).
     RemoteModels { models: Vec<String>, error: Option<String> },
-    /// Terminal signal for [`DbCmd::Retranscribe`] — sent whether it succeeded
-    /// or failed, so the GUI's busy state always clears (Phase 25).
+    /// A post-stop / on-demand transcription pass started (Phase 25) — shows
+    /// up on the background-jobs board as its own entry.
+    Retranscribing,
+    /// Terminal counterpart of [`Event::Retranscribing`] — sent whether the
+    /// pass succeeded or failed, so the GUI's busy state always clears.
     Retranscribed,
 }
 
@@ -1698,6 +1701,10 @@ fn run_session(
     }
     let _ = store.end_session(&session_id, now_ms());
     tracing::info!("control: recording torn down");
+    // The recording is over NOW — flip the UI out of "Recording" before any
+    // post-stop work (transcription/diarization show up as their own
+    // background jobs, not as a stuck recording indicator).
+    let _ = ev.send(Event::Status(Status::Idle));
 
     // Post-stop transcription pass (Phase 25): when auto-transcribe is on it
     // runs from the WAVs we just wrote — with live on it *upgrades* the live
@@ -1743,7 +1750,6 @@ fn run_session(
         emit_sessions(&store, ev); // 🎧 badge off
     }
 
-    let _ = ev.send(Event::Status(Status::Idle));
     tracing::info!("control: session idle");
     shutdown
 }
@@ -1804,6 +1810,20 @@ fn retranscribe_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &Unbou
 /// segments, stamps the session with the re-transcription model, and emits
 /// progress + the refreshed transcript. Returns `true` on success.
 fn post_transcribe_session(
+    store: &Store,
+    session_id: &str,
+    audio_prefix: &std::path::Path,
+    ev: &UnboundedSender<Event>,
+) -> bool {
+    let _ = ev.send(Event::Retranscribing);
+    let ok = post_transcribe_inner(store, session_id, audio_prefix, ev);
+    let _ = ev.send(Event::Retranscribed);
+    ok
+}
+
+/// [`post_transcribe_session`] body — split out so the bracketing
+/// Retranscribing/Retranscribed events cover every early return.
+fn post_transcribe_inner(
     store: &Store,
     session_id: &str,
     audio_prefix: &std::path::Path,
