@@ -853,6 +853,51 @@ remote (server-side context is the server's business — UI wording to match);
 chunked-prefill (the v0.2.9 crash fix) is llama-only and N/A for remote;
 auto-title rides the same backend switch.
 
+### Phase 25 — Deferred & re-transcription ⭐ next
+For low-power machines (Windows + Teams): live transcription bursts the CPU
+60–80% per VAD chunk (webcam stutter) and pins ~1 GB of model RAM for the whole
+meeting. Fix: make live transcription **optional**, and make post-hoc
+(re)transcription a first-class GUI action with its **own model choice** —
+record with nothing (or a small model), transcribe with a big one after.
+The CLI already proves the pipeline (`zord retranscribe` / `run_retranscribe`).
+
+**Design decisions (June 2026):**
+- Two independent knobs, both can be on: **Live transcription** toggle
+  (default on; model picked as today) and a **Re-transcription model**
+  (its own dropdown, all models listed — low-power users may want a small one
+  even post-hoc; default `large-v3-turbo-q5_0`). The Re-transcribe action
+  *always* uses the re-transcription model from settings.
+- **Timestamps:** safe by construction — kept WAVs are wall-clock aligned
+  (silence-padded), so re-derived segment times live on the same session
+  timeline; both channels are re-transcribed from their own WAVs, preserving
+  Me/Others alignment, per-line replay, and diarization span mapping.
+- Re-transcribing **replaces** segments → confirm dialog (manual line edits
+  are lost), then **auto re-run diarization** when the session had speaker
+  labels (and audio is still present). Summary/compression go stale — left in
+  place; the user regenerates if they care.
+- Capture-only recordings always write the per-channel WAVs (transcription
+  input!) regardless of keep-audio; if keep-audio is off they're deleted after
+  the post-pass, mirroring the diarize temp-WAV behavior.
+
+Sub-phases:
+- **25a** — **settings + capture-only recording.** `zord-config`:
+  `live_transcription: bool` (default true), `retranscribe_model: String`
+  (default `large-v3-turbo-q5_0`). Settings → Transcription: the toggle + the
+  re-transcription model dropdown. Recorder: when live is off, skip model
+  load + transcribe jobs entirely (meters/VAD/WAV writing only — ~1–2% CPU,
+  no model RAM); Live view shows "Recording — transcription runs when you
+  stop (live transcription is off)".
+- **25b** — **engine post-pass.** Extract the CLI's WAV→VAD→transcribe→insert
+  pipeline into shared code; new engine command (dedicated worker thread, like
+  on-demand diarize) with progress notices + a busy state; on Stop of a
+  capture-only recording, auto-run it (downloading the post model if needed),
+  then the existing diarize-auto chain. Emits refreshed transcript + badges.
+- **25c** — **GUI Re-transcribe.** 🔁 button in the session toolbar next to
+  Summarize/Compress/Identify speakers — enabled when the session's kept WAVs
+  exist; confirm dialog ("replaces the transcript; manual edits are lost");
+  busy state with a rough ETA (like diarize); auto re-diarize after when
+  speaker labels existed.
+
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
 - ~~Multilingual UX~~ / ~~CUDA release builds~~ — **declined** (not wanted).
