@@ -853,7 +853,7 @@ remote (server-side context is the server's business — UI wording to match);
 chunked-prefill (the v0.2.9 crash fix) is llama-only and N/A for remote;
 auto-title rides the same backend switch.
 
-### Phase 25 — Deferred & re-transcription ⭐ next
+### Phase 25 — Deferred & re-transcription ✅
 For low-power machines (Windows + Teams): live transcription bursts the CPU
 60–80% per VAD chunk (webcam stutter) and pins ~1 GB of model RAM for the whole
 meeting. Fix: make live transcription **optional**, and make post-hoc
@@ -897,7 +897,7 @@ Sub-phases:
   exist; confirm dialog ("replaces the transcript; manual edits are lost");
   busy state with a rough ETA (like diarize); auto re-diarize after when
   speaker labels existed.
-- **25d** — **single full-quality audio track** (REVISED June 2026 —
+- **25d** — ✅ **done** — **single full-quality audio track** (REVISED June 2026 —
   supersedes the earlier two-stage-retention idea). Store ONE WAV per channel
   at the **device's native rate** (mono, 16-bit, wall-clock silence-padded at
   that rate — padding moves to *before* the resampler in `spawn_proc`); the

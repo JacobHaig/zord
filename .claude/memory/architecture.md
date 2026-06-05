@@ -24,7 +24,9 @@ GUI's `engine.rs` runs the recorder on dedicated threads because cpal/SCStream
 are `!Send` — a control thread owns the streams, plus db / model / summarize /
 playback (rodio) worker threads, all emitting `Event`s over a tokio channel
 drained into Dioxus signals. New long-running work = a new worker thread +
-event, never on the UI. Retained WAVs are wall-clock aligned (silence-padded),
-so a segment's `t_start_ms` maps 1:1 to sample offset (`ms × 16` at 16 kHz) —
-this is what makes per-line replay exact.
+event, never on the UI. Retained WAVs (ONE per channel, at the capture
+device's native rate since Phase 25d; models derive 16 kHz on the fly) are
+wall-clock aligned (silence-padded at that rate), so a segment's `t_start_ms`
+maps 1:1 to sample offset (`ms × rate/1000`) — per-line replay and
+re-transcription stay exact at any rate.
 Related: [[capture-design]], [[dx-bundling-gotchas]].

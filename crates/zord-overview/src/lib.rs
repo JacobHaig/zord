@@ -11,7 +11,9 @@
 //! condense in groups first (hierarchical fallback) → store + return the rollup.
 
 use anyhow::Result;
+#[cfg(any(feature = "llama", feature = "remote"))]
 use std::path::Path;
+#[cfg(any(feature = "llama", feature = "remote"))]
 use zord_config::Settings;
 use zord_store::Store;
 

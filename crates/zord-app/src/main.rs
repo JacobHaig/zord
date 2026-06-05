@@ -385,7 +385,9 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let wav = PathBuf::from(format!("{prefix}.others.wav"));
     anyhow::ensure!(wav.exists(), "the 'Others' audio for this session is missing: {wav:?}");
 
-    let samples = zord_audio::read_wav_mono_f32(&wav)?;
+    // Streams + downsamples the (possibly native-rate) track to the 16 kHz the
+    // diarizer expects (Phase 25d).
+    let samples = zord_audio::read_wav_mono_16k(&wav)?;
     anyhow::ensure!(!samples.is_empty(), "no 'Others' audio to diarize");
 
     let settings = zord_config::Settings::load();

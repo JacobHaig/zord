@@ -276,9 +276,10 @@ pub enum DbCmd {
 /// Replay commands for the playback worker. The rodio output stream is `!Send`
 /// (like the capture streams), so a dedicated thread owns it.
 pub enum PlayCmd {
-    /// Play `[start_ms, end_ms)` of `wav` — a retained 16 kHz track, which is
-    /// wall-clock aligned, so segment timestamps map 1:1 onto sample offsets.
-    /// `segment_id` is reported back via [`Event::Playing`] to mark the line.
+    /// Play `[start_ms, end_ms)` of `wav` — a retained track (native capture
+    /// rate, Phase 25d), wall-clock aligned at its own rate so segment
+    /// timestamps map 1:1 onto sample offsets. `segment_id` is reported back
+    /// via [`Event::Playing`] to mark the line.
     Play {
         segment_id: i64,
         wav: PathBuf,
@@ -1100,12 +1101,13 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                     let _ = ev.send(Event::Playing(None));
                     continue;
                 };
-                // Retained WAVs are wall-clock aligned (silence-padded), so the
-                // segment's timestamps map directly onto sample offsets.
-                let sr = zord_core::WHISPER_SAMPLE_RATE as u64;
-                let start = (start_ms * sr / 1000) as u32;
-                let len = (end_ms.saturating_sub(start_ms) * sr / 1000) as u32;
-                let samples = zord_audio::read_wav_slice_mono_f32(&wav, start, len).unwrap_or_default();
+                // Retained WAVs are wall-clock aligned (silence-padded) at their
+                // own rate, so timestamps map directly onto sample offsets — the
+                // reader derives them from the file header (native-rate tracks
+                // from Phase 25d and older 16 kHz ones both work). Native rate
+                // also means playback at full capture quality.
+                let (samples, rate) =
+                    zord_audio::read_wav_slice_ms(&wav, start_ms, end_ms).unwrap_or_default();
                 if samples.is_empty() {
                     let _ = ev.send(Event::Notice("Couldn't read this line's audio.".to_string()));
                     let _ = ev.send(Event::Playing(None));
@@ -1113,11 +1115,7 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 }
                 match rodio::Sink::try_new(handle) {
                     Ok(s) => {
-                        s.append(rodio::buffer::SamplesBuffer::new(
-                            1,
-                            zord_core::WHISPER_SAMPLE_RATE,
-                            samples,
-                        ));
+                        s.append(rodio::buffer::SamplesBuffer::new(1, rate.max(1), samples));
                         sink = Some(s);
                         current = Some(segment_id);
                         let _ = ev.send(Event::Playing(Some(segment_id)));
@@ -1243,7 +1241,9 @@ fn apply_diarization(
     num_speakers: Option<u32>,
     ev: &UnboundedSender<Event>,
 ) {
-    let samples = match zord_audio::read_wav_mono_f32(others_wav) {
+    // Streams + resamples the (possibly native-rate) track down to the 16 kHz
+    // the diarizer expects, without loading the whole file (Phase 25d).
+    let samples = match zord_audio::read_wav_mono_16k(others_wav) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
             let _ = ev.send(Event::Notice("No 'Others' audio to diarize.".to_string()));
@@ -1505,19 +1505,14 @@ fn run_session(
     // record the prefix so re-transcribe / playback can find them.
     let audio_prefix = audio_dir.join(&session_id);
 
-    // Diarization retention. The offline pass needs the full "Others" track:
-    // - `diarize_auto`: run diarization at stop (writes a temp Others WAV).
-    // - `keep_others_for_diar`: retain that WAV (+ record audio_path) so the user
-    //   can re-identify speakers later with a different model, even with
-    //   keep_audio off.
     let settings = zord_config::Settings::load();
+    // `diarize_auto` runs diarization at stop (needs the Others WAV, written as
+    // a temp file even when audio isn't kept).
     let diarize_auto = cfg!(feature = "diarization") && record_system && settings.diarize_auto;
-    let keep_others_for_diar =
-        cfg!(feature = "diarization") && record_system && settings.diarize_keep_audio;
-    // We persist audio (so re-transcribe / re-diarize can find it) when the user
-    // keeps audio, opts to keep the Others track for re-diarization, or recorded
-    // capture-only (the WAVs ARE the pending transcript — Phase 25).
-    let persist_audio = keep_audio || keep_others_for_diar || !live;
+    // We persist audio (so replay / re-transcribe / re-diarize can find it) when
+    // the user keeps audio or recorded capture-only (the WAVs ARE the pending
+    // transcript — Phase 25).
+    let persist_audio = keep_audio || !live;
 
     let _ = store.create_session(&Session {
         id: session_id.clone(),
@@ -1544,7 +1539,7 @@ fn run_session(
     // Write the Others WAV if anything needs it: kept audio, the auto pass,
     // retention for later re-diarization, or a capture-only recording.
     let others_wav: Option<PathBuf> =
-        if record_system && (keep_audio || diarize_auto || keep_others_for_diar || !live) {
+        if record_system && (keep_audio || diarize_auto || !live) {
             let _ = std::fs::create_dir_all(&audio_dir);
             Some(audio_dir.join(format!("{session_id}.others.wav")))
         } else {
@@ -1724,16 +1719,14 @@ fn run_session(
             let _ = std::fs::remove_file(wav);
         }
     }
-    // Capture-only WAVs were forced on as the transcription input; now that the
-    // post-pass is done, fall back to the live-mode retention semantics: the mic
-    // track follows keep-audio, the Others track also honors keep-for-rediarize.
+    // Capture-only WAVs were forced on as the transcription input; if the user
+    // doesn't keep audio, drop them now that the post-pass is done.
     if !live && !keep_audio {
-        let _ = std::fs::remove_file(audio_dir.join(format!("{session_id}.me.wav")));
-        if !keep_others_for_diar {
-            let _ = std::fs::remove_file(audio_dir.join(format!("{session_id}.others.wav")));
-            let _ = store.set_audio_path(&session_id, None);
-            emit_sessions(&store, ev); // 🎧 badge off
+        for suffix in ["me", "others"] {
+            let _ = std::fs::remove_file(audio_dir.join(format!("{session_id}.{suffix}.wav")));
         }
+        let _ = store.set_audio_path(&session_id, None);
+        emit_sessions(&store, ev); // 🎧 badge off
     }
 
     let _ = ev.send(Event::Status(Status::Idle));
@@ -1873,16 +1866,18 @@ fn post_transcribe_session(
 }
 
 /// Prepend silence to `mono` so the channel's produced-sample count catches up
-/// to real elapsed time (sub-30ms jitter ignored; capped at 5 min per buffer).
-fn pad_to_wallclock(session_start: Instant, produced: u64, mono: Vec<f32>) -> Vec<f32> {
-    const SR: u64 = zord_core::WHISPER_SAMPLE_RATE as u64;
+/// to real elapsed time at `rate` (sub-30ms jitter ignored; capped at 5 min per
+/// buffer). Phase 25d: runs at the *device* rate, before resampling, so the
+/// stored native-rate WAV is wall-clock aligned at its own rate.
+fn pad_to_wallclock(session_start: Instant, produced: u64, mono: Vec<f32>, rate: u32) -> Vec<f32> {
+    let sr = rate.max(1) as u64;
     let elapsed_ms = session_start.elapsed().as_millis() as u64;
-    let target = elapsed_ms * SR / 1000;
+    let target = elapsed_ms * sr / 1000;
     let mut pad = target.saturating_sub(produced + mono.len() as u64) as usize;
-    if pad <= (SR * 30 / 1000) as usize {
+    if pad <= (sr * 30 / 1000) as usize {
         pad = 0; // ignore sub-30ms jitter
     }
-    pad = pad.min((SR * 300) as usize); // never inject more than 5 min at once
+    pad = pad.min((sr * 300) as usize); // never inject more than 5 min at once
 
     if pad > 0 {
         let mut b = vec![0.0f32; pad];
@@ -1911,7 +1906,8 @@ fn spawn_proc(
             Err(_) => return,
         };
         let mut segmenter = Segmenter::new(SegmenterConfig::default());
-        let mut wav = wav_path.and_then(|p| WavWriter::create(p).ok());
+        // The stored track keeps the device's native rate (Phase 25d).
+        let mut wav = wav_path.and_then(|p| WavWriter::create(p, sample_rate).ok());
         // Wall-clock-aligned mono sample count emitted so far. Capture sources
         // (notably WASAPI loopback) deliver no samples during silence, so a raw
         // running count drifts behind real time; we pad the gaps with silence so
@@ -1987,23 +1983,27 @@ fn spawn_proc(
                 }
             }
 
-            let mono = match resampler.process(&frame) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
             // Pad the gap (if any) between real elapsed time and samples produced
-            // with silence, so the segmenter's sample-based timestamps equal the
-            // shared wall clock. This is what keeps the two channels in sync: a
-            // capture source that goes quiet (WASAPI loopback emits nothing during
-            // silence) no longer falls behind real time.
-            let out: Vec<f32> = pad_to_wallclock(session_start, produced, mono);
+            // with silence, so timestamps equal the shared wall clock. This is
+            // what keeps the two channels in sync: a capture source that goes
+            // quiet (WASAPI loopback emits nothing during silence) no longer
+            // falls behind real time. Phase 25d: padding happens at the DEVICE
+            // rate, before resampling, so the stored native-rate WAV is itself
+            // wall-clock aligned (`ms × rate/1000` = sample offset).
+            let out: Vec<f32> = pad_to_wallclock(session_start, produced, frame, sample_rate);
             produced += out.len() as u64;
             if let Some(w) = wav.as_mut() {
                 let _ = w.write(&out);
             }
-            // Timestamps are now wall-clock (the stream is padded to real time).
-            for seg in segmenter.push(&out) {
+
+            // Models always consume 16 kHz — derived here on the fly, never stored.
+            let mono = match resampler.process(&out) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            // Timestamps are wall-clock (the input stream is padded to real time;
+            // the resampler adds only ~tens of ms of buffering latency).
+            for seg in segmenter.push(&mono) {
                 let _ = job_tx.send(Job { source, vad: seg });
             }
         }

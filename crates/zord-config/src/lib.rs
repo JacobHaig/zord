@@ -16,9 +16,13 @@ use std::path::PathBuf;
 pub struct Settings {
     /// Whisper model id (see `zord_transcribe::ModelId::parse`).
     pub model: String,
-    /// Keep the captured audio on disk after transcription.
+    /// Keep the captured audio on disk after transcription (Phase 25d: one
+    /// native-rate track per channel — powers replay, re-transcription, and
+    /// re-diarization). On by default, bounded by `auto_delete_days`.
     pub keep_audio: bool,
     /// Auto-delete kept audio older than this many days. `None` = keep forever.
+    /// Default 30 (Phase 25d) — the window for re-transcribing with a better
+    /// model or re-identifying speakers.
     pub auto_delete_days: Option<u32>,
     /// Preferred microphone device name. `None` = system default.
     pub input_device: Option<String>,
@@ -58,12 +62,6 @@ pub struct Settings {
     /// Speaker-embedding model id for diarization (see zord-diarize catalog).
     #[serde(default = "default_embedding_model")]
     pub diarize_embedding_model: String,
-    /// Keep the "Others" track after recording so speakers can be re-identified
-    /// later (e.g. with a different/bigger model), even when `keep_audio` is off.
-    /// On by default so "Identify speakers" works on past recordings; the kept
-    /// track lives in the audio dir and is pruned by `auto_delete_days`.
-    #[serde(default = "default_true")]
-    pub diarize_keep_audio: bool,
     /// Fallback fixed speaker count for diarization (0 = auto-detect), used by
     /// the CLI and the post-recording auto pass. In the GUI, each session has
     /// its own count next to "Identify speakers" which takes precedence.
@@ -324,8 +322,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             model: "large-v3-turbo-q5_0".to_string(),
-            keep_audio: false,
-            auto_delete_days: None,
+            keep_audio: true,
+            auto_delete_days: Some(30),
             input_device: None,
             storage_dir: None,
             encrypted: false,
@@ -338,7 +336,6 @@ impl Default for Settings {
             diarize_auto: true,
             diarize_live: false,
             diarize_embedding_model: default_embedding_model(),
-            diarize_keep_audio: true,
             diarize_num_speakers: 0,
             auto_title: true,
             diarize_threshold: default_diarize_threshold(),

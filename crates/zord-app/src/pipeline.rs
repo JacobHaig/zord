@@ -142,18 +142,20 @@ fn spawn_proc(
         // Sources already emit mono, so channels = 1 (downmix is a no-op).
         let mut resampler = MonoResampler::new(sample_rate, 1)?;
         let mut segmenter = Segmenter::new(SegmenterConfig::default());
+        // The stored track keeps the device's native rate (Phase 25d); the
+        // 16 kHz stream below is derived for VAD/whisper only.
         let mut wav = match wav_path {
-            Some(p) => Some(WavWriter::create(p)?),
+            Some(p) => Some(WavWriter::create(p, sample_rate)?),
             None => None,
         };
         let mut base_ms: Option<u64> = None;
 
         while let Ok(frame) = rx.recv() {
             let base = *base_ms.get_or_insert_with(|| session_start.elapsed().as_millis() as u64);
-            let mono = resampler.process(&frame)?;
             if let Some(w) = wav.as_mut() {
-                w.write(&mono)?;
+                w.write(&frame)?;
             }
+            let mono = resampler.process(&frame)?;
             for mut seg in segmenter.push(&mono) {
                 seg.t_start_ms += base;
                 seg.t_end_ms += base;
