@@ -897,17 +897,33 @@ Sub-phases:
   exist; confirm dialog ("replaces the transcript; manual edits are lost");
   busy state with a rough ETA (like diarize); auto re-diarize after when
   speaker labels existed.
-- **25d** — **two-stage audio retention.** There is only ONE audio tier (the
-  16 kHz per-channel WAVs — already the models' full-quality input; no
-  hi-fi capture needed), but its *lifecycle* has two stages: until
-  re-transcription the WAVs are load-bearing (transcription input — never
-  auto-purge a not-yet-transcribed capture-only recording); after a
-  successful re-transcription they only serve replay / re-diarize / another
-  re-pass. New setting `audio_keep_after_retranscribe_days` (default 7) — a
-  per-session expiry layered under the existing global auto-delete (default:
-  never). Needs a `retranscribed_at` stamp on the session and a DB-aware
-  retention sweep (today's `apply_retention` is file-mtime-only), which also
-  unlocks accurate "audio kept" badges after purges.
+- **25d** — **single full-quality audio track** (REVISED June 2026 —
+  supersedes the earlier two-stage-retention idea). Store ONE WAV per channel
+  at the **device's native rate** (mono, 16-bit, wall-clock silence-padded at
+  that rate — padding moves to *before* the resampler in `spawn_proc`); the
+  16 kHz stream the models need is **derived on the fly** and never stored.
+  (Honest note: device-rate audio improves *playback* only — models consume
+  16 kHz either way — but deriving 16 kHz from the original is lossless, so
+  one original-rate track strictly dominates storing the downsample.)
+  - **Re-transcription:** already rate-agnostic (the pipeline reads the WAV
+    header and resamples) — no change.
+  - **Diarization:** gains an on-the-fly downsample step when loading the
+    Others WAV; stream/chunk it — a 1 h 48 kHz file is ~690 MB as f32 if
+    slurped whole.
+  - **Per-line replay:** reads the rate from the WAV header (today it assumes
+    16 kHz) and plays at native rate — listening quality improves for free.
+    Timestamp math stays exact: `sample = ms × rate/1000` at the file's rate.
+  - **Back-compat:** every reader stays rate-agnostic so existing 16 kHz
+    session WAVs keep working untouched.
+  - **Defaults:** `keep_audio` → **on**, `auto_delete_days` → **30** (was
+    never). ⚠ Existing users' audio older than 30 days gets purged on first
+    launch after upgrade — call out in release notes. `diarize_keep_audio`
+    becomes redundant (the one kept track serves re-diarization) — fold it
+    away. Safety rule kept: never auto-purge a capture-only recording that
+    hasn't been transcribed yet.
+  - **Disk math:** 48 kHz mono 16-bit ≈ 5.8 MB/min/channel (~345 MB per
+    1 h meeting both channels) vs ~1.9 MB/min at 16 kHz — 3×, bounded by the
+    30-day default.
 
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
