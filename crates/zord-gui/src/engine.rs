@@ -151,7 +151,7 @@ fn catalog() -> Vec<ModelInfo> {
             urls: vec![m.download_url()],
         })
         .collect();
-    #[cfg(feature = "summaries")]
+    #[cfg(feature = "llm-local")]
     for &m in zord_summarize::SummaryModel::ALL {
         models.push(ModelInfo {
             name: m.name().to_string(),
@@ -164,7 +164,7 @@ fn catalog() -> Vec<ModelInfo> {
         });
     }
     // Small instruct models downloadable from the Ollama registry (non-HF source).
-    #[cfg(feature = "summaries")]
+    #[cfg(feature = "llm-local")]
     for m in zord_summarize::ollama_models() {
         models.push(ModelInfo {
             name: m.filename.to_string(),
@@ -176,7 +176,7 @@ fn catalog() -> Vec<ModelInfo> {
         });
     }
     // User-supplied GGUFs dropped into the models folder (any source — no HF).
-    #[cfg(feature = "summaries")]
+    #[cfg(feature = "llm-local")]
     for name in zord_summarize::list_custom_models() {
         models.push(ModelInfo {
             name,
@@ -370,10 +370,10 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
     // A chat keeps its model resident across turns so follow-ups don't reload it.
     // One-shot jobs (summarize/compress/overview) load + drop their own model, so
     // we free the resident one first to keep peak RAM at a single model.
-    #[cfg(feature = "summaries")]
+    #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
     let mut chat_model: Option<(ChatLlmKey, zord_summarize::LlmBackend)> = None;
     while let Ok(cmd) = rx.recv() {
-        #[cfg(feature = "summaries")]
+        #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
         match cmd {
             SummCmd::Summarize(id) => {
                 chat_model = None;
@@ -391,12 +391,12 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
                 chat_one(&mut chat_model, scope, turns, &ev, &db_path);
             }
         }
-        #[cfg(not(feature = "summaries"))]
+        #[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
         {
             let _ = &cmd;
             let _ = &db_path;
             let _ = ev.send(Event::Notice(
-                "Summaries aren't built in — rebuild with `--features summaries`.".to_string(),
+                "AI features aren't built in — rebuild with `--features llm-local` and/or `--features llm-remote`.".to_string(),
             ));
         }
     }
@@ -404,7 +404,7 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
 
 /// Render diarized segments into a speaker-labeled transcript (one line per
 /// segment), used as LLM grounding input.
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn render_labeled_transcript(
     segs: &[Segment],
     names: &std::collections::HashMap<i32, String>,
@@ -417,7 +417,7 @@ fn render_labeled_transcript(
 }
 
 /// The external-server connection from settings (Phase 24).
-#[cfg(feature = "summaries")]
+#[cfg(feature = "llm-remote")]
 fn remote_cfg(settings: &zord_config::Settings) -> zord_summarize::RemoteConfig {
     zord_summarize::RemoteConfig {
         base_url: settings.llm_base_url.clone(),
@@ -427,38 +427,67 @@ fn remote_cfg(settings: &zord_config::Settings) -> zord_summarize::RemoteConfig 
     }
 }
 
+/// Whether this request should go to the external server: the setting decides
+/// when both backends are compiled in; with only one compiled, that one is used
+/// regardless (build-time fallback — distinct from the runtime rule of never
+/// silently switching backends on failure).
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+fn use_external(settings: &zord_config::Settings) -> bool {
+    cfg!(feature = "llm-remote")
+        && (settings.llm_backend == "external" || cfg!(not(feature = "llm-local")))
+}
+
 /// Build the configured LLM backend (Phase 24): the external OpenAI-compatible
-/// server when selected, otherwise the local GGUF (resolving/downloading it).
-/// Sends a notice and returns `None` on failure — never silently falls back.
-#[cfg(feature = "summaries")]
+/// server or the local GGUF (resolving/downloading it) — see [`use_external`]
+/// for which. Sends a notice and returns `None` on failure — never silently
+/// falls back at runtime.
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn build_llm_backend(
     settings: &zord_config::Settings,
     ev: &UnboundedSender<Event>,
 ) -> Option<zord_summarize::LlmBackend> {
-    if settings.llm_backend == "external" {
-        if settings.llm_model.trim().is_empty() {
+    if use_external(settings) {
+        #[cfg(feature = "llm-remote")]
+        {
+            if settings.llm_model.trim().is_empty() {
+                let _ = ev.send(Event::Notice(
+                    "No model picked for the external LLM server — choose one in Settings → AI."
+                        .to_string(),
+                ));
+                return None;
+            }
+            return Some(zord_summarize::LlmBackend::remote(remote_cfg(settings)));
+        }
+    }
+    #[cfg(feature = "llm-local")]
+    {
+        if settings.llm_backend == "external" && cfg!(not(feature = "llm-remote")) {
             let _ = ev.send(Event::Notice(
-                "No model picked for the external LLM server — choose one in Settings → Summaries."
+                "External LLM support isn't built into this binary — using the local model."
                     .to_string(),
             ));
-            return None;
         }
-        return Some(zord_summarize::LlmBackend::remote(remote_cfg(settings)));
+        let model_path = resolve_summary_model_path(settings, ev)?;
+        match zord_summarize::LlmBackend::load_local(&model_path) {
+            Ok(llm) => Some(llm),
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("LLM: {e}")));
+                None
+            }
+        }
     }
-    let model_path = resolve_summary_model_path(settings, ev)?;
-    match zord_summarize::LlmBackend::load_local(&model_path) {
-        Ok(llm) => Some(llm),
-        Err(e) => {
-            let _ = ev.send(Event::Notice(format!("LLM: {e}")));
-            None
-        }
+    #[cfg(not(feature = "llm-local"))]
+    {
+        // llm-remote-only build: use_external() is always true, so this point
+        // is unreachable at runtime — it only satisfies the type checker.
+        None
     }
 }
 
 /// Resolve the configured summary model to a local GGUF path: a built-in catalog
 /// model (downloading if needed) or a user-supplied custom GGUF. Sends a notice
 /// and returns `None` on failure. Shared by summarize + compress.
-#[cfg(feature = "summaries")]
+#[cfg(feature = "llm-local")]
 fn resolve_summary_model_path(
     settings: &zord_config::Settings,
     ev: &UnboundedSender<Event>,
@@ -483,7 +512,7 @@ fn resolve_summary_model_path(
 }
 
 /// Compress a session's transcript into dense prose and store it (Phase 23).
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf) {
     let store = match Store::open(db_path) {
         Ok(s) => s,
@@ -520,7 +549,7 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
 
 /// Synthesize the cross-meeting Overview (Phase 23). Long-running; progress is
 /// relayed as notices, the result emitted as `Event::Overview`.
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path) {
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing the LLM…".to_string()));
@@ -546,17 +575,45 @@ fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path) {
 
 /// What the resident chat backend was built from — reload only when it changes
 /// (different GGUF picked, or the external connection details edited).
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 #[derive(PartialEq)]
 enum ChatLlmKey {
+    #[cfg(feature = "llm-local")]
     Local(PathBuf),
+    #[cfg(feature = "llm-remote")]
     Remote(zord_summarize::RemoteConfig),
+}
+
+/// What the resident chat backend would be built from right now (mirrors
+/// [`use_external`] / [`build_llm_backend`]). `None` = unresolvable (notice sent).
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+// The `return`s are needed in single-backend builds where a cfg'd tail follows.
+#[allow(clippy::needless_return)]
+fn chat_llm_key(
+    settings: &zord_config::Settings,
+    ev: &UnboundedSender<Event>,
+) -> Option<ChatLlmKey> {
+    if use_external(settings) {
+        #[cfg(feature = "llm-remote")]
+        return Some(ChatLlmKey::Remote(remote_cfg(settings)));
+    }
+    #[cfg(feature = "llm-local")]
+    {
+        let model_path = resolve_summary_model_path(settings, ev)?;
+        return Some(ChatLlmKey::Local(model_path));
+    }
+    #[cfg(not(feature = "llm-local"))]
+    {
+        // llm-remote-only build: unreachable at runtime (see build_llm_backend).
+        let _ = ev;
+        None
+    }
 }
 
 /// Answer a chat question grounded in a meeting (its transcript, or compression
 /// when the transcript is too big) or across all meetings (Phase 23d). Keeps the
 /// model resident in `cache` across turns.
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn chat_one(
     cache: &mut Option<(ChatLlmKey, zord_summarize::LlmBackend)>,
     scope: ChatScope,
@@ -566,13 +623,8 @@ fn chat_one(
 ) {
     use zord_summarize::ChatRole;
     let settings = zord_config::Settings::load();
-    let key = if settings.llm_backend == "external" {
-        ChatLlmKey::Remote(remote_cfg(&settings))
-    } else {
-        let Some(model_path) = resolve_summary_model_path(&settings, ev) else {
-            return;
-        };
-        ChatLlmKey::Local(model_path)
+    let Some(key) = chat_llm_key(&settings, ev) else {
+        return;
     };
     // (Re)build the backend only on a cache miss (selection/connection changed).
     if cache.as_ref().map(|(k, _)| k != &key).unwrap_or(true) {
@@ -649,7 +701,7 @@ fn chat_one(
 
 /// Grounding context for a single meeting: the full transcript when it fits the
 /// chat context, otherwise its compression (generated + cached if missing).
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn meeting_chat_context(
     store: &Store,
     llm: &zord_summarize::LlmBackend,
@@ -692,7 +744,7 @@ fn meeting_chat_context(
     }
 }
 
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf) {
     let store = match Store::open(db_path) {
         Ok(s) => s,
@@ -767,7 +819,7 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                         });
                     }
                 };
-                #[cfg(feature = "summaries")]
+                #[cfg(feature = "llm-local")]
                 let handled_summary = if let Some(sm) = zord_summarize::SummaryModel::parse(&name) {
                     if let Err(e) = zord_summarize::ensure_summary_model(sm, &mut progress) {
                         tracing::warn!("model download failed for {name}: {e}");
@@ -783,7 +835,7 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 } else {
                     false
                 };
-                #[cfg(not(feature = "summaries"))]
+                #[cfg(not(feature = "llm-local"))]
                 let handled_summary = false;
 
                 #[cfg(feature = "diarization")]
@@ -813,7 +865,7 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 let _ = ev.send(Event::Models(catalog()));
             }
             ModelCmd::Delete(name) => {
-                #[cfg(feature = "summaries")]
+                #[cfg(feature = "llm-local")]
                 if let Some(sm) = zord_summarize::SummaryModel::parse(&name) {
                     let _ = zord_summarize::delete_summary_model(sm);
                 } else {
@@ -830,7 +882,7 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                 let _ = ev.send(Event::Models(catalog()));
             }
             ModelCmd::ListRemoteLlm => {
-                #[cfg(feature = "summaries")]
+                #[cfg(feature = "llm-remote")]
                 {
                     let settings = zord_config::Settings::load();
                     match zord_summarize::list_remote_models(&remote_cfg(&settings)) {
@@ -845,7 +897,7 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                         }
                     }
                 }
-                #[cfg(not(feature = "summaries"))]
+                #[cfg(not(feature = "llm-remote"))]
                 {
                     let _ = ev.send(Event::RemoteModels {
                         models: Vec::new(),

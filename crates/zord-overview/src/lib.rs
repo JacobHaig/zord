@@ -2,8 +2,8 @@
 //!
 //! Turns the per-meeting dense compressions (Phase 23a) into one holistic,
 //! project-grouped rollup oriented around the user ("Me"). The expensive work
-//! (LLM) is behind the `llama` feature; [`load`] (reading a stored rollup) works
-//! without it.
+//! (LLM) is behind the `llama`/`remote` backend features; [`load`] (reading a
+//! stored rollup) works without either.
 //!
 //! Flow: gather the most recent meetings → reuse each meeting's stored
 //! compression, lazily generating + persisting any that are missing → assemble
@@ -50,7 +50,7 @@ pub fn load(store: &Store) -> Result<Option<Overview>> {
 /// Synthesize the Overview with an already-built LLM backend (Phase 24: the
 /// caller picks local GGUF vs external server and keeps it for the whole run —
 /// lazy compressions + the final synthesis pass).
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 pub fn synthesize(
     db_path: &Path,
     settings: &Settings,
@@ -86,7 +86,7 @@ pub fn synthesize(
 /// Build the grounding context for **cross-meeting chat** (Phase 23d): gather the
 /// recent meetings' compressions (lazily generating any missing, with the given
 /// loaded model) and fit them to `n_ctx`. Returns `(context, meetings_covered)`.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 pub fn cross_meeting_context(
     store: &Store,
     llm: &zord_summarize::LlmBackend,
@@ -106,7 +106,7 @@ pub fn cross_meeting_context(
 /// Gather up to `overview_max_meetings` recent meetings as `(header, compressed)`
 /// pairs (newest first), reusing each stored compression and lazily generating +
 /// persisting any that are missing.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn collect_digests(
     store: &Store,
     llm: &zord_summarize::LlmBackend,
@@ -143,7 +143,7 @@ fn collect_digests(
 
 /// Assemble `digests` and, if over the `n_ctx` input budget (after reserving
 /// `reserve_out` for generation), condense them hierarchically until they fit.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn fit_to_budget(
     llm: &zord_summarize::LlmBackend,
     digests: &[(String, String)],
@@ -170,7 +170,7 @@ fn fit_to_budget(
 /// Greedily pack the digests (newest first) into groups, condense each group
 /// into a single dense digest, then assemble those. Falls back to a recency trim
 /// if the condensed digests are *still* over budget.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn hierarchical_reduce(
     llm: &zord_summarize::LlmBackend,
     digests: &[(String, String)],
@@ -209,7 +209,7 @@ fn hierarchical_reduce(
 
 /// Pack items (already newest-first) into groups whose assembled token count
 /// stays under `budget`. An oversized single item becomes its own group.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn pack(
     llm: &zord_summarize::LlmBackend,
     items: &[(String, String)],
@@ -235,7 +235,7 @@ fn pack(
 
 /// Include items (newest-first) until the next would exceed `budget`. Returns
 /// (count_kept, assembled_text).
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn take_within_budget(
     llm: &zord_summarize::LlmBackend,
     items: &[(String, String)],
@@ -256,13 +256,13 @@ fn take_within_budget(
 
 /// Tokens available for input = context minus the output reservation minus a
 /// fixed allowance for the system prompt + chat template.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn input_budget(n_ctx: u32, reserve_out: usize) -> usize {
     (n_ctx as usize).saturating_sub(reserve_out + 600)
 }
 
 /// Render segments as newline-joined `speaker: text` lines.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn build_transcript(
     segs: &[zord_core::Segment],
     names: &std::collections::HashMap<i32, String>,
@@ -275,7 +275,7 @@ fn build_transcript(
 }
 
 /// Assemble `(header, body)` pairs into the model-facing input block.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn assemble(items: &[(String, String)]) -> String {
     items
         .iter()
@@ -285,12 +285,12 @@ fn assemble(items: &[(String, String)]) -> String {
 }
 
 /// "YYYY-MM-DD · <title>" header for a meeting.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn meeting_header(s: &zord_core::Session) -> String {
     format!("{} · {}", fmt_date(s.started_at), meeting_title(s))
 }
 
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn meeting_title(s: &zord_core::Session) -> String {
     s.title
         .as_ref()
@@ -301,14 +301,14 @@ fn meeting_title(s: &zord_core::Session) -> String {
 }
 
 /// Format an epoch-ms timestamp as a UTC `YYYY-MM-DD` date (no chrono dep).
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn fmt_date(ms: u64) -> String {
     let (y, m, d) = civil_from_days((ms / 86_400_000) as i64);
     format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Days-since-Unix-epoch → (year, month, day). Howard Hinnant's `civil_from_days`.
-#[cfg(feature = "llama")]
+#[cfg(any(feature = "llama", feature = "remote"))]
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

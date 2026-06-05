@@ -101,21 +101,21 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
-    /// Summarize a session with a local LLM (requires `--features summaries`).
+    /// Summarize a session with the configured LLM (requires `--features llm-local` or `llm-remote`).
     Summarize {
         session_id: String,
         #[arg(long)]
         db: Option<PathBuf>,
     },
     /// Compress a session into token-minimal dense prose for cross-meeting
-    /// synthesis (requires `--features summaries`).
+    /// synthesis (requires `--features llm-local` or `llm-remote`).
     Compress {
         session_id: String,
         #[arg(long)]
         db: Option<PathBuf>,
     },
     /// Synthesize a cross-meeting Overview across recent sessions (lazily
-    /// compressing any that aren't yet). Requires `--features summaries`.
+    /// compressing any that aren't yet). Requires `--features llm-local` or `llm-remote`.
     Overview {
         /// How many recent meetings to include (default: config setting).
         #[arg(long)]
@@ -179,7 +179,7 @@ fn main() -> Result<()> {
 
 /// Build a plain "Speaker: text" transcript for summarization, using diarized
 /// speaker labels + custom names (`names` maps speaker index → name).
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn transcript_text(
     segments: &[zord_core::Segment],
     names: &std::collections::HashMap<i32, String>,
@@ -191,48 +191,67 @@ fn transcript_text(
         .join("\n")
 }
 
-/// Build the configured LLM backend (Phase 24): the external OpenAI-compatible
-/// server when selected in settings, otherwise the local GGUF (downloading it
-/// on first use with progress on stderr).
-#[cfg(feature = "summaries")]
+/// Build the configured LLM backend (Phase 24). The setting decides when both
+/// backends are compiled in; with only one compiled, that one is used
+/// regardless. Local GGUFs download on first use with progress on stderr.
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+// The `return`s are needed in single-backend builds where a cfg'd tail follows.
+#[allow(clippy::needless_return)]
 fn build_llm_backend(settings: &zord_config::Settings) -> Result<zord_summarize::LlmBackend> {
-    if settings.llm_backend == "external" {
-        anyhow::ensure!(
-            !settings.llm_model.trim().is_empty(),
-            "the external LLM server has no model configured — pick one in Settings → Summaries"
-        );
-        eprintln!(
-            "Using external LLM '{}' at {}…",
-            settings.llm_model, settings.llm_base_url
-        );
-        return Ok(zord_summarize::LlmBackend::remote(zord_summarize::RemoteConfig {
-            base_url: settings.llm_base_url.clone(),
-            api_key: settings.llm_api_key.clone(),
-            model: settings.llm_model.clone(),
-            timeout_secs: settings.llm_timeout_secs,
-        }));
+    let use_external = cfg!(feature = "llm-remote")
+        && (settings.llm_backend == "external" || cfg!(not(feature = "llm-local")));
+    if use_external {
+        #[cfg(feature = "llm-remote")]
+        {
+            anyhow::ensure!(
+                !settings.llm_model.trim().is_empty(),
+                "the external LLM server has no model configured — pick one in Settings → AI"
+            );
+            eprintln!(
+                "Using external LLM '{}' at {}…",
+                settings.llm_model, settings.llm_base_url
+            );
+            return Ok(zord_summarize::LlmBackend::remote(zord_summarize::RemoteConfig {
+                base_url: settings.llm_base_url.clone(),
+                api_key: settings.llm_api_key.clone(),
+                model: settings.llm_model.clone(),
+                timeout_secs: settings.llm_timeout_secs,
+            }));
+        }
     }
-    let model_path = if let Some(model) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
-        eprintln!("Preparing summary model '{}'…", model.name());
-        zord_summarize::ensure_summary_model(model, &mut |done, total| {
-            if let Some(total) = total {
-                eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
-            }
-        })?
-    } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
-        eprintln!("Using custom model '{}'…", settings.summary_model);
-        p
-    } else {
-        anyhow::bail!(
-            "summary model '{}' not found — set one in the GUI, or drop its .gguf in the models folder",
-            settings.summary_model
-        );
-    };
-    eprintln!("\r  model ready.                          ");
-    zord_summarize::LlmBackend::load_local(&model_path)
+    #[cfg(feature = "llm-local")]
+    {
+        if settings.llm_backend == "external" && cfg!(not(feature = "llm-remote")) {
+            eprintln!("(external LLM support isn't built into this binary — using the local model)");
+        }
+        let model_path = if let Some(model) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
+            eprintln!("Preparing summary model '{}'…", model.name());
+            zord_summarize::ensure_summary_model(model, &mut |done, total| {
+                if let Some(total) = total {
+                    eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
+                }
+            })?
+        } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
+            eprintln!("Using custom model '{}'…", settings.summary_model);
+            p
+        } else {
+            anyhow::bail!(
+                "summary model '{}' not found — set one in the GUI, or drop its .gguf in the models folder",
+                settings.summary_model
+            );
+        };
+        eprintln!("\r  model ready.                          ");
+        return zord_summarize::LlmBackend::load_local(&model_path);
+    }
+    #[cfg(not(feature = "llm-local"))]
+    {
+        // llm-remote-only build: use_external is always true, so this point is
+        // unreachable at runtime — it only satisfies the type checker.
+        unreachable!("no LLM backend compiled in")
+    }
 }
 
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
@@ -269,12 +288,12 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "summaries"))]
+#[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
 fn cmd_summarize(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
-    anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
+    anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote`")
 }
 
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn cmd_compress(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
@@ -295,12 +314,12 @@ fn cmd_compress(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "summaries"))]
+#[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
 fn cmd_compress(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
-    anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
+    anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote`")
 }
 
-#[cfg(feature = "summaries")]
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn cmd_overview(max: Option<u32>, db: Option<PathBuf>) -> Result<()> {
     let db_path = resolve_db(db)?;
     let mut settings = zord_config::Settings::load();
@@ -320,9 +339,9 @@ fn cmd_overview(max: Option<u32>, db: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "summaries"))]
+#[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
 fn cmd_overview(_max: Option<u32>, _db: Option<PathBuf>) -> Result<()> {
-    anyhow::bail!("this build has no summary support — rebuild with `--features summaries`")
+    anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote`")
 }
 
 /// Align "Others" transcript segments to diarized speaker spans by max overlap,

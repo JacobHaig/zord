@@ -25,7 +25,7 @@ storage happen on your machine.
   session into Markdown notes, fully offline. Pick the model (Qwen2.5 1.5B/3B/7B),
   a style preset, or write your own prompt — all in settings. Or point Zord at
   your **own inference server** (LM Studio, Ollama, llama-server, vLLM — any
-  OpenAI-compatible endpoint) in Settings → Summaries, and every AI feature
+  OpenAI-compatible endpoint) in Settings → AI, and every AI feature
   (summaries, compression, Overview, chat, auto-titles) uses it instead.
 - 🗜 **Dense compression** *(optional)* — condense a whole meeting into
   token-minimal dense prose (projects + state, action items, decisions, open
@@ -119,20 +119,25 @@ libs). With it enabled, the settings panel lists Parakeet alongside the Whisper
 models to download and select. Without the feature, the default build stays
 lean and Whisper-only.
 
-### Optional: local AI summaries
+### Optional: AI features (summaries, compression, Overview, chat)
 
-Generate meeting notes from a session with a local LLM (no cloud), build with
-the `summaries` feature:
+Two composable features pick the LLM that powers them — build with either or
+both:
 
 ```bash
-cargo run -p zord-gui --features summaries     # GUI: ✨ Summarize / 🗜 Compress on a saved session
-cargo build -p zord-app --features summaries   # CLI: `zord summarize` / `zord compress <session-id>`
+# Built-in local LLM (compiles llama.cpp):
+cargo run -p zord-gui --features llm-local
+# External OpenAI-compatible server (LM Studio, Ollama, …) — no llama.cpp toolchain:
+cargo run -p zord-gui --features llm-remote
+# Both (what releases ship) — pick the backend in Settings → AI:
+cargo run -p zord-gui --features llm-local,llm-remote
+cargo build -p zord-app --features llm-local,llm-remote   # CLI: `zord summarize` / `compress` / `overview`
 ```
 
-This compiles llama.cpp (Metal on Apple Silicon) and, on first use, downloads a
+`llm-local` compiles llama.cpp (Metal on Apple Silicon) and, on first use, downloads a
 ~2 GB instruct model (Qwen2.5-3B-Instruct, Q4_K_M) to the models folder. The same
 model also powers 🗜 **Compress**, which condenses a meeting into token-minimal
-dense prose; its context window is set in Settings → Summaries (default 16K, up to
+dense prose; its context window is set in Settings → AI (default 16K, up to
 128K — a 3B model handles 64K comfortably on a 16 GB machine).
 
 ### Optional: per-speaker diarization
@@ -251,12 +256,12 @@ zord retranscribe <session-id> --model large-v3-turbo
 # + retained audio for that session)
 zord diarize <session-id>
 
-# Summarize / compress a session (needs --features summaries)
+# Summarize / compress a session (needs --features llm-local and/or llm-remote)
 zord summarize <session-id>                            # Markdown notes
 zord compress  <session-id>                            # token-minimal dense prose
 
 # Synthesize a cross-meeting Overview across recent sessions (compresses any
-# meetings that aren't yet, then rolls them up by project). Needs --features summaries
+# meetings that aren't yet, then rolls them up by project). Same features as above.
 zord overview --max 50
 ```
 

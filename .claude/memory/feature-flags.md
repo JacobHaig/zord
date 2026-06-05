@@ -11,7 +11,12 @@ build (and Windows CI) stays lean and fast:
 
 - `parakeet` → NVIDIA Parakeet via `sherpa-onnx` (in `zord-transcribe`).
 - `encryption` → SQLCipher at-rest DB encryption (`rusqlite/bundled-sqlcipher-vendored-openssl`).
-- `summaries` → local LLM summaries via `llama-cpp-2` (in `zord-summarize`).
+- `llm-local` → AI features (summaries/compress/overview/chat/titles) with the
+  built-in LLM via `llama-cpp-2` (crate feature `llama` in `zord-summarize`).
+- `llm-remote` → same AI features against a user-provided OpenAI-compatible
+  server (crate feature `remote` — pure HTTP, no llama.cpp toolchain). The two
+  compose; with only one compiled, it is used regardless of the settings value.
+  (Renamed from `summaries` June 2026 — clean break, no alias.)
 - `diarization` → per-speaker diarization via `sherpa-onnx` (in `zord-diarize`;
   internal crate feature is `sherpa`, like summarize's `llama`). Reuses the same
   sherpa-onnx version as `parakeet`; cargo unifies the sys crate so both can be

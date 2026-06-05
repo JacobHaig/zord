@@ -14,8 +14,12 @@ default = []
 parakeet = ["zord-transcribe/parakeet"]
 # Enable SQLCipher at-rest encryption (unlock screen + enable/disable in settings).
 encryption = ["zord-store/encryption", "zord-config/encryption"]
-# Enable local LLM summaries (llama.cpp) + cross-meeting Overview synthesis.
-summaries = ["dep:zord-summarize", "zord-summarize/llama", "dep:zord-overview", "zord-overview/llama"]
+# AI features (summaries, compression, Overview, chat, auto-titles) with the
+# built-in local LLM (llama.cpp — heavy build).
+llm-local = ["dep:zord-summarize", "zord-summarize/llama", "dep:zord-overview", "zord-overview/llama"]
+# Same AI features against a user-provided OpenAI-compatible server (LM Studio,
+# Ollama, vLLM, …). Pure HTTP — no llama.cpp toolchain. Composes with llm-local.
+llm-remote = ["dep:zord-summarize", "zord-summarize/remote", "dep:zord-overview", "zord-overview/remote"]
 # Enable per-speaker diarization (sherpa-onnx).
 diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 

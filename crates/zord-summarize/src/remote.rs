@@ -11,7 +11,7 @@
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 
-use crate::summarizer::{truncate_chars, ChatRole, GenOpts};
+use crate::opts::{truncate_chars, ChatRole, GenOpts};
 
 /// Connection details for an OpenAI-compatible server (user-provided, from
 /// Settings).

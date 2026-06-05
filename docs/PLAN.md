@@ -834,11 +834,19 @@ Sub-phases:
   `Event::ChatReply` replaces it with the full text. Errors now also land as a
   ChatReply ("⚠️ Chat failed: …"), fixing the pre-existing stuck-busy spinner
   on chat errors. Summarize/compress/overview stay single-shot by design.
-  Still open: relabel the Phase 22 "via Ollama" *download* entries so "Ollama"
-  isn't overloaded now that an Ollama *server* is also a thing; optionally
-  un-gate the remote backend from the `summaries` build feature (release
-  binaries ship `summaries` anyway, so low priority — it would only help
-  from-source builds skip the llama.cpp toolchain).
+  ✅ "via Ollama" download entries relabeled ("GGUF download from the Ollama
+  registry"). ✅ **Backend feature split** (decided + done): `summaries` is
+  replaced (clean break, no alias) by two composable flags — **`llm-local`**
+  (llama.cpp, crate feature `llama`) and **`llm-remote`** (OpenAI-compatible
+  client, new crate feature `remote` in zord-summarize/zord-overview — pure
+  HTTP, no llama.cpp toolchain). Shared types moved to `opts.rs`;
+  `LlmBackend`'s variants compile independently. Rules: with both flags the
+  setting picks; with one, it's used regardless (notice only when the settings
+  explicitly ask for a missing backend); with neither, the old "not built in"
+  message. Settings section renamed **"AI"** (it long outgrew "Summaries") and
+  is capability-aware. Releases ship both flags
+  (`diarization,llm-local,llm-remote,parakeet`). All four build configs +
+  clippy + tests verified.
 
 Known gaps: `compress_ctx`/`overview_ctx` become input-budget knobs only for
 remote (server-side context is the server's business — UI wording to match);

@@ -1644,8 +1644,11 @@ fn MainApp() -> Element {
                                 }
 
                                 section { class: "settings-section",
-                                    h3 { "Summaries" }
+                                    h3 { "AI" }
                                     {
+                                        // Which LLM backends this binary carries.
+                                        let local_avail = cfg!(feature = "llm-local");
+                                        let remote_avail = cfg!(feature = "llm-remote");
                                         let summary_models: Vec<ModelInfo> = models
                                             .read()
                                             .iter()
@@ -1653,14 +1656,19 @@ fn MainApp() -> Element {
                                             .cloned()
                                             .collect();
                                         let cur_sum = settings.read().summary_model.clone();
-                                        if summary_models.is_empty() {
+                                        if !local_avail && !remote_avail {
                                             rsx! {
-                                                p { class: "field-note", "Build with `--features summaries` to enable local AI summaries." }
+                                                p { class: "field-note", "Build with `--features llm-local` (built-in models) and/or `--features llm-remote` (external servers) to enable the AI features — summaries, compression, Overview, chat and auto-titles." }
                                             }
                                         } else {
-                                            let external = settings.read().llm_backend == "external";
+                                            // The setting decides only when both backends are
+                                            // compiled in; otherwise the available one is used.
+                                            let external = remote_avail
+                                                && (settings.read().llm_backend == "external" || !local_avail);
                                             let eng_remote = engine.clone();
                                             rsx! {
+                                                p { class: "field-note", "One LLM drives all AI features: summaries, compression, the Overview, chat and auto-titles." }
+                                                if local_avail && remote_avail {
                                                 div { class: "field",
                                                     label { "LLM backend" }
                                                     select {
@@ -1673,6 +1681,7 @@ fn MainApp() -> Element {
                                                         option { value: "local", selected: !external, "Built-in (local model)" }
                                                         option { value: "external", selected: external, "External server (OpenAI-compatible)" }
                                                     }
+                                                }
                                                 }
                                                 if external {
                                                     div { class: "field",

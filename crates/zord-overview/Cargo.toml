@@ -6,9 +6,11 @@ license.workspace = true
 
 [features]
 default = []
-# Real synthesis needs the local LLM (llama.cpp via zord-summarize). Without it,
-# the crate still compiles but `synthesize` reports that summaries are disabled.
+# Real synthesis needs an LLM backend from zord-summarize — the local llama.cpp
+# engine and/or the remote OpenAI-compatible client. Without either, the crate
+# still compiles but only `load` (reading a stored rollup) is available.
 llama = ["dep:zord-summarize", "zord-summarize/llama"]
+remote = ["dep:zord-summarize", "zord-summarize/remote"]
 
 [dependencies]
 zord-core = { workspace = true }

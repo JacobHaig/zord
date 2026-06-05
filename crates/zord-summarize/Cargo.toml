@@ -6,9 +6,12 @@ license.workspace = true
 
 [features]
 default = []
-# Local LLM summaries via llama.cpp. Heavy build (compiles llama.cpp); the
-# default build leaves this crate empty so the workspace stays lean.
+# Local LLM via llama.cpp. Heavy build (compiles llama.cpp); the default build
+# leaves this crate empty so the workspace stays lean.
 llama = ["dep:llama-cpp-2", "dep:zord-net", "dep:directories", "dep:serde_json"]
+# Remote LLM via a user-provided OpenAI-compatible server (Phase 24). Pure
+# HTTP — no llama.cpp toolchain needed. Composes with `llama`.
+remote = ["dep:zord-net", "dep:serde_json"]
 
 [dependencies]
 anyhow = { workspace = true }
