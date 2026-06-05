@@ -270,6 +270,39 @@ pub fn summary_presets() -> &'static [(&'static str, &'static str, &'static str)
             "Action items only",
             "Extract only the action items from the transcript as a Markdown checklist: who is responsible (use the speaker label prefixing each line — a name or \"Speaker N\"), what they will do, and any due date mentioned. If there are none, say \"No action items.\"",
         ),
+        // The four presets above pick an output *format*; the ones below target
+        // a meeting *type*, structuring the notes around what that kind of
+        // conversation is actually for.
+        (
+            "decisions",
+            "Decision log",
+            "You are keeping a decision log. Each transcript line is prefixed with its speaker: \"Me\" is the local user; others appear by name or as \"Speaker N\". Produce Markdown with two sections: **Decisions** — one bullet per decision: what was decided, the key reasoning, and who made or owns it; and **Open questions** — things discussed but left unresolved, with what's blocking them. Ignore chit-chat and status updates. Be faithful to the transcript and do not invent details.",
+        ),
+        (
+            "technical",
+            "Engineering notes",
+            "You are taking engineering notes. Each transcript line is prefixed with its speaker. Produce Markdown sections, omitting any that don't apply: **Problems & bugs** (symptoms, suspected causes), **Design & architecture** (approaches considered, trade-offs, what was chosen), **Decisions** (one line each), and **Action items** (who + what). Use the transcript's precise technical terminology; keep names, versions and numbers exact. Be faithful; don't invent details.",
+        ),
+        (
+            "standup",
+            "Standup (per person)",
+            "Summarize this status meeting per person. Each transcript line is prefixed with its speaker: \"Me\" is the local user; others appear by name or as \"Speaker N\". For each speaker who gave an update, write a Markdown subsection with up to three bullets: **Done**, **In progress**, and **Blocked / needs** — only the ones mentioned. End with a short **Team-wide** list for anything affecting everyone (announcements, shared blockers). Be faithful; don't invent details.",
+        ),
+        (
+            "interview",
+            "Interview / research debrief",
+            "Debrief this interview or research conversation. Each transcript line is prefixed with its speaker. Produce Markdown with: **Context** (one line — who was talked to, about what), **Key responses** (the interviewee's main answers, grouped by topic), **Notable quotes** (short, verbatim, attributed), **Signals & concerns** (strengths, risks, contradictions), and **Follow-ups** (open questions or promised materials). Be faithful; don't invent details.",
+        ),
+        (
+            "oneonone",
+            "1:1 debrief",
+            "Summarize this one-on-one conversation. Lines are prefixed with the speaker; \"Me\" is the local user. Produce Markdown with: **Topics discussed** (a few bullets), **Feedback** (given and received, attributed), **Agreements & commitments** (who committed to what), and **For next time** (items deferred or to revisit). Keep it brief and discreet in tone. Be faithful; don't invent details.",
+        ),
+        (
+            "study",
+            "Learning notes (lecture/webinar)",
+            "Turn this lecture, webinar or training transcript into study notes. Produce Markdown with: **In one paragraph** (what the session taught), **Concepts** (each as a bold term followed by a one-to-two line explanation as taught), **Examples** (concrete examples or demos walked through), and **To review** (anything emphasized, referenced for later, or assigned). Ignore housekeeping and small talk. Be faithful to the material; don't invent details.",
+        ),
     ]
 }
 
