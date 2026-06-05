@@ -117,19 +117,23 @@ body {
 }
 .close-btn:hover { background: var(--panel-2); }
 .overlay-body { overflow-y: auto; padding: 8px 24px 32px; }
-.settings-section { padding: 18px 0; border-bottom: 1px solid var(--line); }
-.settings-section h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 10px; }
-.field { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
-.field.row { flex-direction: row; align-items: center; justify-content: space-between; }
+.settings-section { padding: 24px 0; border-bottom: 1px solid var(--line); }
+.settings-section h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
 .field label { font-size: 13px; }
-.field-note { color: var(--muted); font-size: 12px; line-height: 1.4; }
+/* A label + toggle on one line: text left, control pushed to the right edge. */
+.field-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 12px 0; }
+.field-label { font-size: 13px; flex: 1; }
+.field-note { color: var(--muted); font-size: 12px; line-height: 1.4; margin: 2px 0 12px; }
 .field select, .days {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: 8px 10px; font-size: 13px; outline: none; max-width: 360px;
 }
+/* On/Off switches: one fixed size everywhere, so "On" and "Off" don't reflow. */
 .toggle {
   border: 1px solid var(--line); background: var(--panel-2);
-  color: var(--muted); padding: 7px 16px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  color: var(--muted); width: 56px; padding: 4px 0; text-align: center;
+  border-radius: 8px; cursor: pointer; font-size: 12px; flex-shrink: 0;
 }
 .toggle.on { background: var(--me); color: #06222f; border-color: var(--me); font-weight: 700; }
 

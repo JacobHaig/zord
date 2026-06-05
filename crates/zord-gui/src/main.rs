@@ -1615,8 +1615,8 @@ fn MainApp() -> Element {
 
                                 section { class: "settings-section",
                                     h3 { "Recording & retention" }
-                                    div { class: "field row",
-                                        label { "Keep audio after transcription" }
+                                    div { class: "field-row",
+                                        label { class: "field-label", "Keep audio after transcription" }
                                         button {
                                             class: if settings.read().keep_audio { "toggle on" } else { "toggle" },
                                             onclick: move |_| {
