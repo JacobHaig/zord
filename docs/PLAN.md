@@ -897,6 +897,17 @@ Sub-phases:
   exist; confirm dialog ("replaces the transcript; manual edits are lost");
   busy state with a rough ETA (like diarize); auto re-diarize after when
   speaker labels existed.
+- **25d** — **two-stage audio retention.** There is only ONE audio tier (the
+  16 kHz per-channel WAVs — already the models' full-quality input; no
+  hi-fi capture needed), but its *lifecycle* has two stages: until
+  re-transcription the WAVs are load-bearing (transcription input — never
+  auto-purge a not-yet-transcribed capture-only recording); after a
+  successful re-transcription they only serve replay / re-diarize / another
+  re-pass. New setting `audio_keep_after_retranscribe_days` (default 7) — a
+  per-session expiry layered under the existing global auto-delete (default:
+  never). Needs a `retranscribed_at` stamp on the session and a DB-aware
+  retention sweep (today's `apply_retention` is file-mtime-only), which also
+  unlocks accurate "audio kept" badges after purges.
 
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
