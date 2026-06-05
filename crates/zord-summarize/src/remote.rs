@@ -325,6 +325,37 @@ mod tests {
         assert!(!req.to_lowercase().contains("authorization:"), "empty key must send no auth header");
     }
 
+    /// Hits a real OpenAI-compatible server — run manually:
+    /// `cargo test -p zord-summarize --features remote -- --ignored real_server`
+    /// Uses `ZORD_TEST_LLM_URL` (default LM Studio's http://localhost:1234) and
+    /// `ZORD_TEST_LLM_MODEL` (default: first model the server lists). Verifies
+    /// list_models + a small streamed chat completion end-to-end.
+    #[test]
+    #[ignore]
+    fn real_server_roundtrip() {
+        let base = std::env::var("ZORD_TEST_LLM_URL")
+            .unwrap_or_else(|_| "http://localhost:1234".to_string());
+        let mut c = cfg(&base);
+        c.timeout_secs = 180; // JIT model load on the server can be slow
+        let models = list_models(&c).expect("list_models failed");
+        eprintln!("server models: {models:?}");
+        c.model = std::env::var("ZORD_TEST_LLM_MODEL").unwrap_or_else(|_| models[0].clone());
+        eprintln!("using model: {}", c.model);
+
+        let mut deltas = 0usize;
+        let out = RemoteLlm::new(c)
+            .chat_stream(
+                "You are a connectivity test. Answer in as few words as possible.",
+                &[(ChatRole::User, "Reply with the single word: ready".to_string())],
+                8192,
+                &mut |_| deltas += 1,
+            )
+            .expect("chat completion failed");
+        eprintln!("reply ({deltas} streamed deltas): {out:?}");
+        assert!(!out.is_empty());
+        assert!(deltas > 0, "expected at least one streamed delta");
+    }
+
     /// Streaming end-to-end: SSE chunks arrive as deltas, role/finish chunks
     /// and the [DONE] sentinel are skipped, and the accumulated text returns.
     #[test]
