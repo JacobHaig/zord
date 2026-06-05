@@ -239,10 +239,10 @@ pub struct OllamaModel {
 /// Curated small instruct models offered via the Ollama registry.
 pub fn ollama_models() -> &'static [OllamaModel] {
     &[
-        OllamaModel { repo: "qwen2.5", tag: "3b", filename: "qwen2.5-3b-ollama.gguf", label: "Qwen2.5 3B Instruct — via Ollama (non-HF)", size_label: "~1.9 GB" },
-        OllamaModel { repo: "qwen2.5", tag: "1.5b", filename: "qwen2.5-1.5b-ollama.gguf", label: "Qwen2.5 1.5B Instruct — via Ollama (non-HF)", size_label: "~1 GB" },
-        OllamaModel { repo: "llama3.2", tag: "3b", filename: "llama3.2-3b-ollama.gguf", label: "Llama 3.2 3B Instruct — via Ollama (non-HF)", size_label: "~2 GB" },
-        OllamaModel { repo: "phi3.5", tag: "latest", filename: "phi3.5-ollama.gguf", label: "Phi-3.5 mini Instruct — via Ollama (non-HF)", size_label: "~2.2 GB" },
+        OllamaModel { repo: "qwen2.5", tag: "3b", filename: "qwen2.5-3b-ollama.gguf", label: "Qwen2.5 3B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~1.9 GB" },
+        OllamaModel { repo: "qwen2.5", tag: "1.5b", filename: "qwen2.5-1.5b-ollama.gguf", label: "Qwen2.5 1.5B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~1 GB" },
+        OllamaModel { repo: "llama3.2", tag: "3b", filename: "llama3.2-3b-ollama.gguf", label: "Llama 3.2 3B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~2 GB" },
+        OllamaModel { repo: "phi3.5", tag: "latest", filename: "phi3.5-ollama.gguf", label: "Phi-3.5 mini Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~2.2 GB" },
     ]
 }
 

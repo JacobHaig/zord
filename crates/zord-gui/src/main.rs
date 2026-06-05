@@ -1058,7 +1058,11 @@ fn MainApp() -> Element {
                                     onclick: move |_| {
                                         if *summarizing.peek() { return; }
                                         summarizing.set(true);
-                                        notice.set(Some("Summarizing… (first run downloads the model)".to_string()));
+                                        notice.set(Some(if settings.peek().llm_backend == "external" {
+                                            "Summarizing via the external LLM server…".to_string()
+                                        } else {
+                                            "Summarizing… (first run downloads the model)".to_string()
+                                        }));
                                         let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
                                     },
                                     if summarizing() { "✨ Summarizing…" } else { "✨ Summarize" }
@@ -1070,7 +1074,11 @@ fn MainApp() -> Element {
                                     onclick: move |_| {
                                         if *compressing.peek() { return; }
                                         compressing.set(true);
-                                        notice.set(Some("Compressing… (first run downloads the model)".to_string()));
+                                        notice.set(Some(if settings.peek().llm_backend == "external" {
+                                            "Compressing via the external LLM server…".to_string()
+                                        } else {
+                                            "Compressing… (first run downloads the model)".to_string()
+                                        }));
                                         let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
                                     },
                                     if compressing() { "🗜 Compressing…" } else { "🗜 Compress" }

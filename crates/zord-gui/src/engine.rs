@@ -618,8 +618,11 @@ fn chat_one(
     };
 
     let system = format!("{}\n\n=== Context ===\n{}", zord_config::chat_system_prompt(), context);
+    // Error bubbles ("⚠️ Chat failed: …") are part of the visible conversation
+    // but not real assistant output — don't feed them back to the model.
     let mapped: Vec<(ChatRole, String)> = turns
         .into_iter()
+        .filter(|(is_user, t)| *is_user || !t.starts_with("⚠️"))
         .map(|(is_user, t)| (if is_user { ChatRole::User } else { ChatRole::Assistant }, t))
         .collect();
     let _ = ev.send(Event::Notice("Thinking…".to_string()));
