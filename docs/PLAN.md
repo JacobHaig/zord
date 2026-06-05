@@ -774,7 +774,7 @@ Reuses the existing llama.cpp summary model (with a larger configurable context
 for compress/synthesis); no new heavy deps. Optional much later: a **live rolling
 summary** during recording (same mid-meeting hardware caveat as live diarization).
 
-### Phase 24 — External LLM endpoints (OpenAI-compatible) ⭐ next — direction change
+### Phase 24 — External LLM endpoints (OpenAI-compatible) ✅ (24a–d done)
 Let the user point Zord at their **own inference server** — LM Studio, Ollama
 (`ollama serve`), llama-server, vLLM, Jan, KoboldCpp — and use it instead of the
 built-in llama.cpp for every LLM feature (Summarize, Compress, Overview, Chat,
