@@ -660,6 +660,27 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Resolve the capture mode (from `--capture` or config) into the
+/// (record_mic, record_system) toggle pair.
+fn resolve_capture_mode(capture: Option<String>) -> (bool, bool) {
+    let mode = capture.unwrap_or_else(|| zord_config::Settings::load().capture_mode);
+    match mode.as_str() {
+        "mic" => (true, false),
+        "system" => (false, true),
+        _ => (true, true),
+    }
+}
+
+/// Human-readable description of what's being captured, for the status line.
+fn capture_description(record_mic: bool, record_system: bool) -> &'static str {
+    match (record_mic, record_system) {
+        (true, true) => "microphone (Me) + system audio (Others)",
+        (true, false) => "microphone (Me) only",
+        (false, true) => "system audio (Others) only",
+        _ => "audio",
+    }
+}
+
 fn cmd_record(
     seconds: u64,
     model: &str,
@@ -669,12 +690,7 @@ fn cmd_record(
 ) -> Result<()> {
     let model_id = ModelId::parse(model)
         .with_context(|| format!("unknown model '{model}'"))?;
-    let mode = capture.unwrap_or_else(|| zord_config::Settings::load().capture_mode);
-    let (record_mic, record_system) = match mode.as_str() {
-        "mic" => (true, false),
-        "system" => (false, true),
-        _ => (true, true),
-    };
+    let (record_mic, record_system) = resolve_capture_mode(capture);
 
     // Ensure the model exists locally (download on first run, with progress).
     eprintln!("Preparing model '{}'...", model_id.name());
@@ -700,12 +716,7 @@ fn cmd_record(
         model: model_id.name().to_string(),
     })?;
 
-    let what = match (record_mic, record_system) {
-        (true, true) => "microphone (Me) + system audio (Others)",
-        (true, false) => "microphone (Me) only",
-        (false, true) => "system audio (Others) only",
-        _ => "audio",
-    };
+    let what = capture_description(record_mic, record_system);
     eprintln!("Session {session_id} — recording {what}.");
     if seconds == 0 {
         eprintln!("Press Enter to stop.");

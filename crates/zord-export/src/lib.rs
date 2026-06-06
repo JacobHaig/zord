@@ -52,29 +52,39 @@ pub fn to_markdown(session: &Session, segments: &[Segment], names: &HashMap<i32,
     let mut out = String::new();
     push_markdown_header(&mut out, session);
     for seg in segments {
-        out.push_str(&format!(
-            "**[{}] {}:** {}\n\n",
-            clock(seg.t_start_ms),
-            seg.speaker_label(names),
-            seg.text.trim()
-        ));
+        out.push_str(&markdown_line(seg, names));
     }
     out
+}
+
+/// Format one segment as a labelled, timestamped markdown line.
+fn markdown_line(seg: &Segment, names: &HashMap<i32, String>) -> String {
+    format!(
+        "**[{}] {}:** {}\n\n",
+        clock(seg.t_start_ms),
+        seg.speaker_label(names),
+        seg.text.trim()
+    )
 }
 
 /// SubRip subtitles. Each segment becomes one cue, prefixed with the speaker.
 pub fn to_srt(segments: &[Segment], names: &HashMap<i32, String>) -> String {
     let mut out = String::new();
     for (i, seg) in segments.iter().enumerate() {
-        out.push_str(&format!("{}\n", i + 1));
-        out.push_str(&format!(
-            "{} --> {}\n",
-            srt_ts(seg.t_start_ms),
-            srt_ts(seg.t_end_ms.max(seg.t_start_ms + 1))
-        ));
-        out.push_str(&format!("{}: {}\n\n", seg.speaker_label(names), seg.text.trim()));
+        push_srt_cue(&mut out, i, seg, names);
     }
     out
+}
+
+/// Write one numbered, timestamped SRT cue for `seg` to `out`.
+fn push_srt_cue(out: &mut String, i: usize, seg: &Segment, names: &HashMap<i32, String>) {
+    out.push_str(&format!("{}\n", i + 1));
+    out.push_str(&format!(
+        "{} --> {}\n",
+        srt_ts(seg.t_start_ms),
+        srt_ts(seg.t_end_ms.max(seg.t_start_ms + 1))
+    ));
+    out.push_str(&format!("{}: {}\n\n", seg.speaker_label(names), seg.text.trim()));
 }
 
 #[derive(Serialize)]

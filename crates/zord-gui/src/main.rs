@@ -612,13 +612,7 @@ fn MainApp() -> Element {
         st,
         Status::Recording | Status::PreparingModel | Status::Downloading(_)
     );
-    let status_text = match &st {
-        Status::Idle => "Idle".to_string(),
-        Status::PreparingModel => "Preparing model…".to_string(),
-        Status::Downloading(p) => format!("Downloading model… {p}%"),
-        Status::Recording => "Recording".to_string(),
-        Status::Error(e) => format!("Error: {e}"),
-    };
+    let status_text = status_label(&st);
 
     let on_record = {
         let engine = engine.clone();
@@ -1414,50 +1408,7 @@ fn MainApp() -> Element {
 
         // ---- Background jobs panel ----
         if *show_jobs.read() && !job_starts.read().is_empty() {
-            {
-                let _ = job_tick.read(); // re-render each second for elapsed timers
-                let now = now_ms();
-                let mp = model_progress.read().clone();
-                let est = *diarize_est_secs.read();
-                let mut rows: Vec<(String, u64)> =
-                    job_starts.read().iter().map(|(k, v)| (k.clone(), *v)).collect();
-                rows.sort_by_key(|(k, _)| job_order(k));
-                rsx! {
-                    div { class: "jobs-overlay", onclick: move |_| show_jobs.set(false),
-                        div {
-                            class: "jobs-card",
-                            onclick: move |e| e.stop_propagation(),
-                            div { class: "jobs-head",
-                                span { "Background jobs" }
-                                button { class: "close-btn", onclick: move |_| show_jobs.set(false), "✕" }
-                            }
-                            for (key, start) in rows {
-                                {
-                                    let elapsed = now.saturating_sub(start) / 1000;
-                                    let (icon, title) = job_label(&key);
-                                    // Per-job detail, optional progress %, and ETA.
-                                    let (detail, pct): (String, Option<u8>) =
-                                        job_detail(key.as_str(), &mp, est, elapsed);
-                                    rsx! {
-                                        div { key: "{key}", class: "job-row",
-                                            span { class: "job-icon", "{icon}" }
-                                            div { class: "job-main",
-                                                div { class: "job-title", "{title}" }
-                                                div { class: "job-detail", "{detail}" }
-                                                if let Some(p) = pct {
-                                                    div { class: "job-bar", div { class: "job-bar-fill", style: "width: {p}%" } }
-                                                }
-                                            }
-                                            span { class: "job-time", "{fmt_dur(elapsed)}" }
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "jobs-foot", "Local processing — times are estimates and vary with your hardware." }
-                        }
-                    }
-                }
-            }
+            JobsPanel { show_jobs, job_starts, job_tick, model_progress, diarize_est_secs }
         }
 
         // ---- Confirm-delete dialog ----
@@ -1688,69 +1639,9 @@ fn MainApp() -> Element {
                                     }
                                 }
 
-                                section { class: "settings-section",
-                                    h3 { "Audio input" }
-                                    div { class: "field",
-                                        label { "Microphone" }
-                                        select {
-                                            onchange: move |e: FormEvent| {
-                                                let mut s = settings.peek().clone();
-                                                let v = e.value();
-                                                s.input_device = if v == "__default__" { None } else { Some(v) };
-                                                let _ = s.save();
-                                                settings.set(s);
-                                            },
-                                            option { value: "__default__", selected: settings.read().input_device.is_none(), "System default" }
-                                            for d in devices.iter() {
-                                                option { value: "{d}", selected: settings.read().input_device.as_deref() == Some(d.as_str()), "{d}" }
-                                            }
-                                        }
-                                    }
-                                    div { class: "field",
-                                        label { "Capture" }
-                                        select {
-                                            onchange: move |e: FormEvent| {
-                                                let mut s = settings.peek().clone();
-                                                s.capture_mode = e.value();
-                                                let _ = s.save();
-                                                settings.set(s);
-                                            },
-                                            option { value: "both", selected: settings.read().capture_mode == "both", "Microphone + system audio" }
-                                            option { value: "mic", selected: settings.read().capture_mode == "mic", "Microphone only (Me)" }
-                                            option { value: "system", selected: settings.read().capture_mode == "system", "System audio only (Others)" }
-                                        }
-                                    }
-                                }
+                                AudioInputSettings { settings, devices: devices.clone() }
 
-                                section { class: "settings-section",
-                                    h3 { "Recording & retention" }
-                                    div { class: "field-row",
-                                        label { class: "field-label", "Keep audio after transcription" }
-                                        button {
-                                            class: if settings.read().keep_audio { "toggle on" } else { "toggle" },
-                                            onclick: move |_| {
-                                                let mut s = settings.peek().clone();
-                                                s.keep_audio = !s.keep_audio;
-                                                let _ = s.save();
-                                                settings.set(s);
-                                            },
-                                            if settings.read().keep_audio { "On" } else { "Off" }
-                                        }
-                                    }
-                                    div { class: "field",
-                                        label { "Auto-delete kept audio after (days)" }
-                                        input {
-                                            r#type: "number", min: "0", class: "days", placeholder: "never",
-                                            value: settings.read().auto_delete_days.map(|n| n.to_string()).unwrap_or_default(),
-                                            oninput: move |e: FormEvent| {
-                                                let mut s = settings.peek().clone();
-                                                s.auto_delete_days = e.value().trim().parse::<u32>().ok().filter(|n| *n > 0);
-                                                let _ = s.save();
-                                                settings.set(s);
-                                            },
-                                        }
-                                    }
-                                }
+                                RetentionSettings { settings }
 
                                 section { class: "settings-section",
                                     h3 { "AI" }
@@ -2091,88 +1982,7 @@ fn MainApp() -> Element {
 
                                 EncryptionSettings { settings, notice }
 
-                                section { class: "settings-section",
-                                    h3 { "Files & folders" }
-                                    p { class: "field-note", "Jump to Zord's files on disk — handy for dropping in a manually-downloaded model, or grabbing logs when something fails." }
-                                    div { class: "btn-row",
-                                        button {
-                                            class: "mbtn",
-                                            title: "Downloaded transcription / summary / speaker models",
-                                            onclick: move |_| {
-                                                if let Ok(d) = zord_config::models_dir() {
-                                                    osutil::open_folder(&d.display().to_string());
-                                                }
-                                            },
-                                            "📁 Models"
-                                        }
-                                        button {
-                                            class: "mbtn",
-                                            title: "Database, recordings, and exports",
-                                            onclick: move |_| {
-                                                if let Ok(d) = settings.peek().storage_dir() {
-                                                    osutil::open_folder(&d.display().to_string());
-                                                }
-                                            },
-                                            "📁 Data"
-                                        }
-                                        button {
-                                            class: "mbtn",
-                                            onclick: move |_| {
-                                                if let Ok(d) = zord_config::logs_dir() {
-                                                    osutil::open_folder(&d.display().to_string());
-                                                }
-                                            },
-                                            "📁 Logs"
-                                        }
-                                        button {
-                                            class: "mbtn ghost",
-                                            onclick: move |_| {
-                                                if let Ok(p) = zord_config::config_path() {
-                                                    osutil::reveal_in_file_manager(&p.display().to_string());
-                                                }
-                                            },
-                                            "📄 Config"
-                                        }
-                                        button {
-                                            class: "mbtn ghost",
-                                            onclick: move |_| {
-                                                if let Ok(p) = settings.peek().db_path() {
-                                                    osutil::reveal_in_file_manager(&p.display().to_string());
-                                                }
-                                            },
-                                            "📄 Database"
-                                        }
-                                    }
-                                    div { class: "btn-row",
-                                        button {
-                                            class: "mbtn ghost",
-                                            onclick: move |_| {
-                                                match zord_config::logs_dir().map(|d| d.join("zord.log")) {
-                                                    Ok(p) if p.exists() => osutil::open_in_editor(&p.display().to_string()),
-                                                    _ => notice.set(Some("No log file yet — it appears after the next launch.".to_string())),
-                                                }
-                                            },
-                                            "📝 Open log"
-                                        }
-                                        button {
-                                            class: "mbtn ghost",
-                                            title: "Copy the most recent log lines to share in a bug report",
-                                            onclick: move |_| {
-                                                let log = zord_config::logs_dir().map(|d| d.join("zord.log"));
-                                                match log.and_then(|p| std::fs::read_to_string(p).map_err(Into::into)) {
-                                                    Ok(txt) => {
-                                                        let lines: Vec<&str> = txt.lines().collect();
-                                                        let start = lines.len().saturating_sub(200);
-                                                        osutil::copy_to_clipboard(&lines[start..].join("\n"));
-                                                        notice.set(Some(format!("Copied last {} log lines to clipboard", lines.len() - start)));
-                                                    }
-                                                    Err(_) => notice.set(Some("No log file to copy yet.".to_string())),
-                                                }
-                                            },
-                                            "📋 Copy recent log"
-                                        }
-                                    }
-                                }
+                                FilesSettings { settings, notice }
 
                                 section { class: "settings-section",
                                     h3 { "About" }
@@ -2726,6 +2536,236 @@ fn reset_chat(
     input.set(String::new());
     busy.set(false);
     scope.set(None);
+}
+
+/// Settings → Files & folders: jump-to-disk shortcuts + log helpers.
+#[component]
+fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Files & folders" }
+            p { class: "field-note", "Jump to Zord's files on disk — handy for dropping in a manually-downloaded model, or grabbing logs when something fails." }
+            div { class: "btn-row",
+                button {
+                    class: "mbtn",
+                    title: "Downloaded transcription / summary / speaker models",
+                    onclick: move |_| {
+                        if let Ok(d) = zord_config::models_dir() {
+                            osutil::open_folder(&d.display().to_string());
+                        }
+                    },
+                    "📁 Models"
+                }
+                button {
+                    class: "mbtn",
+                    title: "Database, recordings, and exports",
+                    onclick: move |_| {
+                        if let Ok(d) = settings.peek().storage_dir() {
+                            osutil::open_folder(&d.display().to_string());
+                        }
+                    },
+                    "📁 Data"
+                }
+                button {
+                    class: "mbtn",
+                    onclick: move |_| {
+                        if let Ok(d) = zord_config::logs_dir() {
+                            osutil::open_folder(&d.display().to_string());
+                        }
+                    },
+                    "📁 Logs"
+                }
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        if let Ok(p) = zord_config::config_path() {
+                            osutil::reveal_in_file_manager(&p.display().to_string());
+                        }
+                    },
+                    "📄 Config"
+                }
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        if let Ok(p) = settings.peek().db_path() {
+                            osutil::reveal_in_file_manager(&p.display().to_string());
+                        }
+                    },
+                    "📄 Database"
+                }
+            }
+            div { class: "btn-row",
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        match zord_config::logs_dir().map(|d| d.join("zord.log")) {
+                            Ok(p) if p.exists() => osutil::open_in_editor(&p.display().to_string()),
+                            _ => notice.set(Some("No log file yet — it appears after the next launch.".to_string())),
+                        }
+                    },
+                    "📝 Open log"
+                }
+                button {
+                    class: "mbtn ghost",
+                    title: "Copy the most recent log lines to share in a bug report",
+                    onclick: move |_| {
+                        let log = zord_config::logs_dir().map(|d| d.join("zord.log"));
+                        match log.and_then(|p| std::fs::read_to_string(p).map_err(Into::into)) {
+                            Ok(txt) => {
+                                let lines: Vec<&str> = txt.lines().collect();
+                                let start = lines.len().saturating_sub(200);
+                                osutil::copy_to_clipboard(&lines[start..].join("\n"));
+                                notice.set(Some(format!("Copied last {} log lines to clipboard", lines.len() - start)));
+                            }
+                            Err(_) => notice.set(Some("No log file to copy yet.".to_string())),
+                        }
+                    },
+                    "📋 Copy recent log"
+                }
+            }
+        }
+    }
+}
+
+/// Settings → Recording & retention: keep-audio toggle + auto-delete window.
+#[component]
+fn RetentionSettings(mut settings: Signal<Settings>) -> Element {
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Recording & retention" }
+            div { class: "field-row",
+                label { class: "field-label", "Keep audio after transcription" }
+                button {
+                    class: if settings.read().keep_audio { "toggle on" } else { "toggle" },
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.keep_audio = !s.keep_audio;
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    if settings.read().keep_audio { "On" } else { "Off" }
+                }
+            }
+            div { class: "field",
+                label { "Auto-delete kept audio after (days)" }
+                input {
+                    r#type: "number", min: "0", class: "days", placeholder: "never",
+                    value: settings.read().auto_delete_days.map(|n| n.to_string()).unwrap_or_default(),
+                    oninput: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.auto_delete_days = e.value().trim().parse::<u32>().ok().filter(|n| *n > 0);
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Settings → Audio input: microphone device + capture-mode pickers.
+#[component]
+fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> Element {
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Audio input" }
+            div { class: "field",
+                label { "Microphone" }
+                select {
+                    onchange: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        let v = e.value();
+                        s.input_device = if v == "__default__" { None } else { Some(v) };
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    option { value: "__default__", selected: settings.read().input_device.is_none(), "System default" }
+                    for d in devices.iter() {
+                        option { value: "{d}", selected: settings.read().input_device.as_deref() == Some(d.as_str()), "{d}" }
+                    }
+                }
+            }
+            div { class: "field",
+                label { "Capture" }
+                select {
+                    onchange: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.capture_mode = e.value();
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    option { value: "both", selected: settings.read().capture_mode == "both", "Microphone + system audio" }
+                    option { value: "mic", selected: settings.read().capture_mode == "mic", "Microphone only (Me)" }
+                    option { value: "system", selected: settings.read().capture_mode == "system", "System audio only (Others)" }
+                }
+            }
+        }
+    }
+}
+
+/// The background-jobs board: one row per running job with elapsed time,
+/// per-job detail, and optional progress. Visibility is gated at the call site.
+#[component]
+fn JobsPanel(
+    mut show_jobs: Signal<bool>,
+    job_starts: Signal<std::collections::HashMap<String, u64>>,
+    job_tick: Signal<u64>,
+    model_progress: Signal<Option<(String, u8)>>,
+    diarize_est_secs: Signal<Option<u64>>,
+) -> Element {
+    let _ = job_tick.read(); // re-render each second for elapsed timers
+    let now = now_ms();
+    let mp = model_progress.read().clone();
+    let est = *diarize_est_secs.read();
+    let mut rows: Vec<(String, u64)> =
+        job_starts.read().iter().map(|(k, v)| (k.clone(), *v)).collect();
+    rows.sort_by_key(|(k, _)| job_order(k));
+    rsx! {
+        div { class: "jobs-overlay", onclick: move |_| show_jobs.set(false),
+            div {
+                class: "jobs-card",
+                onclick: move |e| e.stop_propagation(),
+                div { class: "jobs-head",
+                    span { "Background jobs" }
+                    button { class: "close-btn", onclick: move |_| show_jobs.set(false), "✕" }
+                }
+                for (key, start) in rows {
+                    {
+                        let elapsed = now.saturating_sub(start) / 1000;
+                        let (icon, title) = job_label(&key);
+                        // Per-job detail, optional progress %, and ETA.
+                        let (detail, pct): (String, Option<u8>) =
+                            job_detail(key.as_str(), &mp, est, elapsed);
+                        rsx! {
+                            div { key: "{key}", class: "job-row",
+                                span { class: "job-icon", "{icon}" }
+                                div { class: "job-main",
+                                    div { class: "job-title", "{title}" }
+                                    div { class: "job-detail", "{detail}" }
+                                    if let Some(p) = pct {
+                                        div { class: "job-bar", div { class: "job-bar-fill", style: "width: {p}%" } }
+                                    }
+                                }
+                                span { class: "job-time", "{fmt_dur(elapsed)}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "jobs-foot", "Local processing — times are estimates and vary with your hardware." }
+            }
+        }
+    }
+}
+
+/// Topbar text for the engine status.
+fn status_label(st: &Status) -> String {
+    match st {
+        Status::Idle => "Idle".to_string(),
+        Status::PreparingModel => "Preparing model…".to_string(),
+        Status::Downloading(p) => format!("Downloading model… {p}%"),
+        Status::Recording => "Recording".to_string(),
+        Status::Error(e) => format!("Error: {e}"),
+    }
 }
 
 /// Icon + label for a background-job key.

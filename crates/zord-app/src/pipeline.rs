@@ -102,12 +102,7 @@ pub fn run_record(
     });
 
     // Wait for the stop signal, then stop capture.
-    if seconds == 0 {
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-    } else {
-        thread::sleep(Duration::from_secs(seconds));
-    }
+    wait_for_stop(seconds);
     drop(mic);
     drop(system);
 
@@ -116,6 +111,16 @@ pub fn run_record(
     }
     let count = transcribe.join().expect("transcribe thread panicked")?;
     Ok(count)
+}
+
+/// Block until the stop signal: `seconds == 0` waits for a stdin line, else sleeps.
+fn wait_for_stop(seconds: u64) {
+    if seconds == 0 {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    } else {
+        thread::sleep(Duration::from_secs(seconds));
+    }
 }
 
 /// If neither channel was requested, record both.

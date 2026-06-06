@@ -60,24 +60,7 @@ impl Store {
 
     fn migrate(&self) -> Result<()> {
         create_schema(&self.conn)?;
-        // Added in Phase 13 — tolerate older DBs that predate the column.
-        let _ = self
-            .conn
-            .execute("ALTER TABLE sessions ADD COLUMN summary TEXT", []);
-        // Added in Phase 23 — dense-prose compression of the meeting, kept beside
-        // the human summary for cross-meeting synthesis.
-        let _ = self
-            .conn
-            .execute("ALTER TABLE sessions ADD COLUMN compressed TEXT", []);
-        // Added in Phase 16 — tolerate older DBs that predate the speaker column.
-        let _ = self
-            .conn
-            .execute("ALTER TABLE segments ADD COLUMN speaker INTEGER", []);
-        // Per-session expected speaker count for diarization (NULL = auto-detect),
-        // set from the control next to "Identify speakers".
-        let _ = self
-            .conn
-            .execute("ALTER TABLE sessions ADD COLUMN diarize_speakers INTEGER", []);
+        add_late_columns(&self.conn);
         Ok(())
     }
 
@@ -276,16 +259,7 @@ impl Store {
             "SELECT id, started_at, ended_at, title, audio_path, model
              FROM sessions WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![id], |r| {
-            Ok(Session {
-                id: r.get(0)?,
-                started_at: r.get(1)?,
-                ended_at: r.get(2)?,
-                title: r.get(3)?,
-                audio_path: r.get(4)?,
-                model: r.get(5)?,
-            })
-        })?;
+        let mut rows = stmt.query_map(params![id], row_to_session)?;
         Ok(match rows.next() {
             Some(s) => Some(s?),
             None => None,
@@ -298,16 +272,7 @@ impl Store {
             "SELECT id, started_at, ended_at, title, audio_path, model
              FROM sessions ORDER BY started_at DESC",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Session {
-                id: r.get(0)?,
-                started_at: r.get(1)?,
-                ended_at: r.get(2)?,
-                title: r.get(3)?,
-                audio_path: r.get(4)?,
-                model: r.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map([], row_to_session)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -417,6 +382,21 @@ impl Store {
     }
 }
 
+/// Best-effort `ALTER TABLE`s for columns added after the base schema; each is
+/// ignored if it already exists, so older DBs are brought forward in place.
+fn add_late_columns(conn: &Connection) {
+    // Added in Phase 13 — tolerate older DBs that predate the column.
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT", []);
+    // Added in Phase 23 — dense-prose compression of the meeting, kept beside
+    // the human summary for cross-meeting synthesis.
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN compressed TEXT", []);
+    // Added in Phase 16 — tolerate older DBs that predate the speaker column.
+    let _ = conn.execute("ALTER TABLE segments ADD COLUMN speaker INTEGER", []);
+    // Per-session expected speaker count for diarization (NULL = auto-detect),
+    // set from the control next to "Identify speakers".
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN diarize_speakers INTEGER", []);
+}
+
 /// Create the base tables, indexes, FTS virtual table, and sync triggers
 /// (all `IF NOT EXISTS`, so safe to run on every open).
 fn create_schema(conn: &Connection) -> Result<()> {
@@ -479,6 +459,19 @@ fn create_schema(conn: &Connection) -> Result<()> {
             "#,
     )?;
     Ok(())
+}
+
+/// Build a `Session` from a row selected as `(id, started_at, ended_at, title,
+/// audio_path, model)`.
+fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
+    Ok(Session {
+        id: r.get(0)?,
+        started_at: r.get(1)?,
+        ended_at: r.get(2)?,
+        title: r.get(3)?,
+        audio_path: r.get(4)?,
+        model: r.get(5)?,
+    })
 }
 
 fn row_to_segment(r: &rusqlite::Row) -> rusqlite::Result<Segment> {
