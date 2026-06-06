@@ -66,7 +66,21 @@ pub async fn serve(db_path: PathBuf, port: u16) -> Result<()> {
 }
 
 async fn index() -> impl IntoResponse {
-    Html(INDEX_HTML)
+    // Defense-in-depth headers. `default-src 'self'` keeps any injected content
+    // from exfiltrating off-origin or loading remote code; `object-src`/`base-uri`
+    // 'none' close those vectors. The page ships one inline <script>, so script
+    // needs 'unsafe-inline' — the actual stored-XSS vector is already closed by
+    // escaping every dynamic field in the page, so this is hardening, not the fix.
+    let headers = [
+        (
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'",
+        ),
+        (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (axum::http::header::REFERRER_POLICY, "no-referrer"),
+    ];
+    (headers, Html(INDEX_HTML))
 }
 
 /// Run a blocking SQLite query off the async worker threads.

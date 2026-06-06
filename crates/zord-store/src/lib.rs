@@ -11,6 +11,22 @@ use zord_core::{Segment, Session, Source, Word};
 /// every `Store::open` applies it as the SQLCipher key. `None` = no encryption.
 static DB_KEY: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
+/// Tighten a file to owner-only read/write (`0600`) on Unix; no-op elsewhere.
+/// Best-effort. Used for the plaintext/encrypted DB backups, which hold a full
+/// copy of every transcript.
+#[cfg(feature = "encryption")]
+fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 /// Set or clear the process-wide DB passphrase. Call **before** opening any
 /// `Store`. (In non-`encryption` builds the value is stored but never applied.)
 pub fn set_db_key(key: Option<String>) {
@@ -536,6 +552,9 @@ pub fn encrypt_existing(path: impl AsRef<Path>, key: &str) -> Result<()> {
     let backup = PathBuf::from(format!("{p}.plaintext.bak"));
     let enc = PathBuf::from(format!("{p}.enc"));
     std::fs::copy(path, &backup)?;
+    // The backup is a full plaintext copy of every transcript — never leave it
+    // world-readable beside the now-encrypted DB.
+    restrict_to_owner(&backup);
     let _ = std::fs::remove_file(&enc);
 
     let conn = Connection::open(path)?; // plaintext source
@@ -566,6 +585,7 @@ pub fn decrypt_existing(path: impl AsRef<Path>, key: &str) -> Result<()> {
     let backup = PathBuf::from(format!("{p}.encrypted.bak"));
     let plain = PathBuf::from(format!("{p}.plain"));
     std::fs::copy(path, &backup)?;
+    restrict_to_owner(&backup);
     let _ = std::fs::remove_file(&plain);
 
     let conn = Connection::open(path)?;

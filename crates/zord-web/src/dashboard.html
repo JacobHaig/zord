@@ -67,7 +67,7 @@ function escapeHtml(t){ return t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 async function loadSessions() {
   const r = await fetch('/api/sessions'); const list = await r.json();
   $('sessions').innerHTML = list.length ? list.map(s =>
-    `<div class="session" data-id="${s.id}"><div>${s.title || ('Recording '+Math.floor(s.started_at/1000))}</div><div class="meta">${s.model}</div></div>`
+    `<div class="session" data-id="${escapeHtml(s.id)}"><div>${escapeHtml(s.title || ('Recording '+Math.floor(s.started_at/1000)))}</div><div class="meta">${escapeHtml(s.model)}</div></div>`
   ).join('') : '<div class="empty">No recordings yet.</div>';
   document.querySelectorAll('.session').forEach(el =>
     el.onclick = () => openSession(el.dataset.id));

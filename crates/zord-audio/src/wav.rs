@@ -3,8 +3,22 @@
 //! stored track; models derive 16 kHz from it on the fly), converted to
 //! 16-bit PCM (compact, universally playable).
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::path::Path;
+
+/// Reject WAV headers that would make downstream math misbehave on a crafted or
+/// corrupt file: `sample_rate == 0` makes the resample ratio infinite (→ a huge
+/// allocation), and a `bits_per_sample` outside the supported set can overflow
+/// the `1 << (bits - 1)` scale shift. A bad file errors cleanly instead.
+pub fn validate_wav_spec(spec: hound::WavSpec) -> Result<()> {
+    if spec.sample_rate == 0 {
+        bail!("invalid WAV: sample_rate is 0");
+    }
+    if !(1..=64).contains(&spec.bits_per_sample) {
+        bail!("invalid WAV: bits_per_sample {} out of range", spec.bits_per_sample);
+    }
+    Ok(())
+}
 
 pub struct WavWriter {
     inner: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
@@ -50,6 +64,7 @@ pub fn read_wav_slice_ms(
 ) -> Result<(Vec<f32>, u32)> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
+    validate_wav_spec(spec)?;
     let rate = spec.sample_rate;
     let start_sample = (start_ms * rate as u64 / 1000) as u32;
     let len = (end_ms.saturating_sub(start_ms) * rate as u64 / 1000) as u32;
@@ -90,6 +105,7 @@ pub fn read_wav_slice_ms(
 pub fn read_wav_mono_16k(path: impl AsRef<Path>) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
+    validate_wav_spec(spec)?;
     let channels = spec.channels.max(1) as usize;
     let mut resampler = crate::MonoResampler::new(spec.sample_rate, spec.channels)?;
     let block_len = spec.sample_rate as usize * channels; // ~1 s interleaved
@@ -132,6 +148,7 @@ pub fn read_wav_mono_16k(path: impl AsRef<Path>) -> Result<Vec<f32>> {
 pub fn read_wav_mono_f32(path: impl AsRef<Path>) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
+    validate_wav_spec(spec)?;
     let channels = spec.channels.max(1) as usize;
     let interleaved: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().filter_map(|s| s.ok()).collect(),

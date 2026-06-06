@@ -424,6 +424,20 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("config.json"))
 }
 
+/// Tighten a file to owner-only read/write (`0600`) on Unix; no-op elsewhere.
+/// Best-effort — a failure here shouldn't fail the write that preceded it.
+pub fn restrict_to_owner(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 /// Directory where downloaded models live. Always under the app-data dir
 /// (independent of `storage_dir`) — matches `zord_transcribe::model_cache_dir`.
 pub fn models_dir() -> Result<PathBuf> {
@@ -452,13 +466,17 @@ impl Settings {
         }
     }
 
-    /// Persist settings to disk (creates the app data dir if needed).
+    /// Persist settings to disk (creates the app data dir if needed). The file
+    /// holds the external-LLM API key in plaintext, so it's written `0600` on
+    /// Unix (owner read/write only) — defense against same-machine readers,
+    /// sync/backup daemons, and sandboxed helpers.
     pub fn save(&self) -> Result<()> {
         let path = config_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        restrict_to_owner(&path);
         Ok(())
     }
 
