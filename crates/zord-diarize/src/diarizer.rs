@@ -243,7 +243,10 @@ fn ensure_segmentation(
     zord_net::download_to_file(&archive_url, &tarball, progress)?;
 
     let file = std::fs::File::open(&tarball)?;
-    let bz = bzip2::read::BzDecoder::new(file);
+    // Cap total decompressed bytes so a malicious/compromised mirror can't ship
+    // a high-ratio bzip2 bomb that fills the disk (segmentation models are ≤~50 MB).
+    const MAX_UNPACK_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+    let bz = std::io::Read::take(bzip2::read::BzDecoder::new(file), MAX_UNPACK_BYTES);
     tar::Archive::new(bz)
         .unpack(&dir)
         .context("unpacking segmentation archive")?;

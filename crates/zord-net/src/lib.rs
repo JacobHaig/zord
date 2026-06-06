@@ -14,10 +14,16 @@
 //! detected — the manual browser-download fallback still covers that case.
 
 use anyhow::{anyhow, Context, Result};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Hard ceiling for any single download (bytes). Generous enough for the
+/// largest GGUF/ONNX assets (a few GB) while bounding a malicious/compromised
+/// mirror that streams forever → disk-exhaustion DoS.
+const MAX_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
 /// Build an agent that trusts the OS cert store and uses an env proxy if set.
 fn agent() -> ureq::Agent {
@@ -134,7 +140,12 @@ pub fn post_sse(
     }
     match req.send_string(&body.to_string()) {
         Ok(resp) => {
-            let reader = std::io::BufReader::new(resp.into_reader());
+            // A streaming completion has no Content-Length, so ureq returns an
+            // unbounded reader; `lines()` would accumulate a single never-newline
+            // body until OOM. Cap the whole stream so a malicious/MITM'd server
+            // can't exhaust memory (chat replies are kilobytes; 64 MiB is ample).
+            const MAX_SSE_BYTES: u64 = 64 * 1024 * 1024;
+            let reader = std::io::BufReader::new(resp.into_reader().take(MAX_SSE_BYTES));
             for line in reader.lines() {
                 let line =
                     line.map_err(|e| ApiError::Connect(format!("reading stream: {e}")))?;
@@ -183,10 +194,22 @@ pub fn download_to_file(
     dest: &Path,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let agent = agent();
+    download_with(&agent(), url, dest, None, progress)
+}
+
+/// Shared download driver: 3 retries around [`try_download`]. `expected_sha256`
+/// (a `sha256:<hex>` or bare-hex digest) is verified against the bytes before
+/// the temp→dest rename when present.
+fn download_with(
+    agent: &ureq::Agent,
+    url: &str,
+    dest: &Path,
+    expected_sha256: Option<&str>,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<()> {
     let mut last_err = None;
     for attempt in 1..=3 {
-        match try_download(&agent, url, dest, progress) {
+        match try_download(agent, url, dest, expected_sha256, progress) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::warn!(%url, attempt, "download failed: {e}");
@@ -201,21 +224,26 @@ pub fn download_to_file(
 /// Download a GGUF model from the **Ollama registry** (used purely as a model
 /// CDN — no Ollama install/daemon/engine). Resolves the model manifest, picks
 /// the `application/vnd.ollama.image.model` layer, and downloads that blob (a
-/// standard GGUF) to `dest`. Reaches the registry via the same OS-cert-store +
-/// proxy agent as everything else.
+/// standard GGUF) to `dest`, **verifying its bytes against the layer's
+/// content-addressed digest** (the integrity guarantee that survives a trusted
+/// MITM CA / compromised mirror). Reaches the registry via the same
+/// OS-cert-store + proxy agent as everything else.
 pub fn download_ollama_model(
     repo: &str,
     tag: &str,
     dest: &Path,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let blob_url = ollama_blob_url(&agent(), repo, tag)?;
+    let agent = agent();
+    let (blob_url, digest) = ollama_blob_url(&agent, repo, tag)?;
     tracing::info!(%blob_url, "downloading GGUF from Ollama registry");
-    download_to_file(&blob_url, dest, progress)
+    download_with(&agent, &blob_url, dest, Some(&digest), progress)
 }
 
-/// Resolve an Ollama `repo:tag` to the direct blob URL of its GGUF model layer.
-fn ollama_blob_url(agent: &ureq::Agent, repo: &str, tag: &str) -> Result<String> {
+/// Resolve an Ollama `repo:tag` to `(blob URL, sha256 digest)` of its GGUF
+/// model layer. The digest is content-addressed (it *is* the URL path), so
+/// verifying the downloaded bytes against it detects substitution.
+fn ollama_blob_url(agent: &ureq::Agent, repo: &str, tag: &str) -> Result<(String, String)> {
     let base = format!("https://registry.ollama.ai/v2/library/{repo}");
     let manifest_url = format!("{base}/manifests/{tag}");
     let body = agent
@@ -236,20 +264,28 @@ fn ollama_blob_url(agent: &ureq::Agent, repo: &str, tag: &str) -> Result<String>
         })
         .and_then(|l| l["digest"].as_str())
         .ok_or_else(|| anyhow!("no model layer in Ollama manifest for {repo}:{tag}"))?;
-    Ok(format!("{base}/blobs/{digest}"))
+    Ok((format!("{base}/blobs/{digest}"), digest.to_string()))
 }
 
 fn try_download(
     agent: &ureq::Agent,
     url: &str,
     dest: &Path,
+    expected_sha256: Option<&str>,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
     let resp = agent.get(url).call().with_context(|| format!("requesting {url}"))?;
     let total = resp.header("Content-Length").and_then(|h| h.parse::<u64>().ok());
+    // Reject an oversized advertised length up front (cheap DoS guard).
+    if let Some(t) = total {
+        if t > MAX_DOWNLOAD_BYTES {
+            anyhow::bail!("{url}: refusing {t}-byte download (over {MAX_DOWNLOAD_BYTES}-byte cap)");
+        }
+    }
     let tmp = dest.with_extension("partial");
     let mut file = std::fs::File::create(&tmp)?;
     let mut reader = resp.into_reader();
+    let mut hasher = expected_sha256.map(|_| Sha256::new());
     let mut buf = vec![0u8; 1 << 20];
     let mut downloaded = 0u64;
     loop {
@@ -257,12 +293,31 @@ fn try_download(
         if n == 0 {
             break;
         }
-        file.write_all(&buf[..n])?;
         downloaded += n as u64;
+        // Enforce the cap mid-stream too: a chunked/close-delimited response can
+        // exceed (or omit) Content-Length. Abandon the partial file on overflow.
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!("{url}: download exceeded {MAX_DOWNLOAD_BYTES}-byte cap");
+        }
+        file.write_all(&buf[..n])?;
+        if let Some(h) = hasher.as_mut() {
+            h.update(&buf[..n]);
+        }
         progress(downloaded, total);
     }
     file.flush()?;
     drop(file);
+    // Verify the content digest (if known) before publishing the file.
+    if let (Some(h), Some(expected)) = (hasher, expected_sha256) {
+        let got = h.finalize();
+        let want = expected.strip_prefix("sha256:").unwrap_or(expected);
+        if !got.iter().map(|b| format!("{b:02x}")).collect::<String>().eq_ignore_ascii_case(want) {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!("{url}: sha256 mismatch (expected {want}) — refusing tampered download");
+        }
+    }
     std::fs::rename(&tmp, dest)?;
     Ok(())
 }
@@ -292,7 +347,45 @@ mod tests {
     #[test]
     #[ignore]
     fn resolves_ollama_blob_url() {
-        let url = ollama_blob_url(&agent(), "qwen2.5", "1.5b").unwrap();
+        let (url, digest) = ollama_blob_url(&agent(), "qwen2.5", "1.5b").unwrap();
         assert!(url.contains("/blobs/sha256:"), "unexpected blob url: {url}");
+        assert!(digest.starts_with("sha256:"), "unexpected digest: {digest}");
+        assert!(url.ends_with(&digest), "url must be content-addressed by the digest");
+    }
+
+    /// Offline unit test: a download whose bytes don't match the claimed digest
+    /// must be rejected and leave no file behind.
+    #[test]
+    fn rejects_sha256_mismatch() {
+        // Serve a tiny body from a local one-shot server, claim a bogus digest.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut b = [0u8; 1024];
+            let _ = s.read(&mut b);
+            let body = b"not the expected bytes";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            s.write_all(resp.as_bytes()).unwrap();
+            s.write_all(body).unwrap();
+        });
+        let dest = std::env::temp_dir().join(format!("zord-net-sha-{port}.bin"));
+        let _ = std::fs::remove_file(&dest);
+        let bogus = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let r = download_with(
+            &agent(),
+            &format!("http://127.0.0.1:{port}/blob"),
+            &dest,
+            Some(bogus),
+            &mut |_, _| {},
+        );
+        server.join().unwrap();
+        assert!(r.is_err(), "mismatched digest must fail");
+        assert!(!dest.exists(), "no file should be left on digest mismatch");
+        assert!(!dest.with_extension("partial").exists(), "partial must be cleaned up");
     }
 }

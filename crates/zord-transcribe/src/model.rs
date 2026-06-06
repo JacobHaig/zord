@@ -189,8 +189,11 @@ fn ensure_parakeet(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) -
 
     // Decompress .tar.bz2 and unpack into the cache dir. The archive's top
     // folder is the model name, so this yields dir/<filename>/...
+    // Cap total decompressed bytes so a malicious/compromised mirror can't ship
+    // a high-ratio bzip2 bomb that fills the disk (Parakeet models are ≤~1 GB).
+    const MAX_UNPACK_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
     let file = std::fs::File::open(&tarball)?;
-    let bz = bzip2::read::BzDecoder::new(file);
+    let bz = std::io::Read::take(bzip2::read::BzDecoder::new(file), MAX_UNPACK_BYTES);
     tar::Archive::new(bz).unpack(&dir).context("unpacking Parakeet archive")?;
     let _ = std::fs::remove_file(&tarball);
 

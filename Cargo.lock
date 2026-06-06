@@ -6922,6 +6922,7 @@ dependencies = [
  "anyhow",
  "native-tls",
  "serde_json",
+ "sha2",
  "tracing",
  "ureq",
 ]

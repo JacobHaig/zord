@@ -122,13 +122,17 @@ impl RemoteLlm {
         });
         let url = self.cfg.endpoint("chat/completions");
         tracing::info!(%url, model = %self.cfg.model, "remote LLM request (streaming)");
+        // Bound the accumulated reply so a server that drips content forever
+        // (within the timeout) can't grow this unbounded — pairs with the
+        // byte cap on the SSE reader itself. A chat answer is well under 4 MiB.
+        const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
         let mut full = String::new();
         zord_net::post_sse(&url, self.cfg.bearer(), &body, self.cfg.timeout(), &mut |data| {
             // Each SSE payload is a chunk object; content lives in
             // choices[0].delta.content (absent on role/finish chunks).
             if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
                 if let Some(piece) = chunk["choices"][0]["delta"]["content"].as_str() {
-                    if !piece.is_empty() {
+                    if !piece.is_empty() && full.len() < MAX_REPLY_BYTES {
                         full.push_str(piece);
                         on_delta(piece);
                     }
