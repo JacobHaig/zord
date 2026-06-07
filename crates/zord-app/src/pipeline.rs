@@ -42,6 +42,9 @@ pub fn run_record(
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let mut procs = Vec::new();
 
+    // Per-channel capture level control from settings (Phase 26).
+    let cfg = zord_config::Settings::load();
+
     // --- Microphone ("Me") ---
     let mic = if record_mic {
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
@@ -53,6 +56,7 @@ pub fn run_record(
             session_start,
             job_tx.clone(),
             keep_audio.as_deref().map(|p| derive_path(p, "me")),
+            zord_audio::LevelControl::new(zord_audio::LevelMode::parse(&cfg.mic_level_mode, cfg.mic_gain_db)),
         ));
         Some(mic)
     } else {
@@ -71,6 +75,7 @@ pub fn run_record(
                     session_start,
                     job_tx.clone(),
                     keep_audio.as_deref().map(|p| derive_path(p, "others")),
+                    zord_audio::LevelControl::new(zord_audio::LevelMode::parse(&cfg.others_level_mode, cfg.others_gain_db)),
                 ));
                 Some(s)
             }
@@ -142,6 +147,7 @@ fn spawn_proc(
     session_start: Instant,
     job_tx: mpsc::Sender<Job>,
     wav_path: Option<PathBuf>,
+    mut level_ctl: zord_audio::LevelControl,
 ) -> thread::JoinHandle<Result<()>> {
     thread::spawn(move || -> Result<()> {
         // Sources already emit mono, so channels = 1 (downmix is a no-op).
@@ -155,8 +161,10 @@ fn spawn_proc(
         };
         let mut base_ms: Option<u64> = None;
 
-        while let Ok(frame) = rx.recv() {
+        while let Ok(mut frame) = rx.recv() {
             let base = *base_ms.get_or_insert_with(|| session_start.elapsed().as_millis() as u64);
+            // Per-channel level control before WAV + model input (Phase 26).
+            level_ctl.process(&mut frame, sample_rate);
             if let Some(w) = wav.as_mut() {
                 w.write(&frame)?;
             }

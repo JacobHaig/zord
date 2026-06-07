@@ -128,6 +128,18 @@ pub struct Settings {
     /// bigger than the live model.
     #[serde(default = "default_retranscribe_model")]
     pub retranscribe_model: String,
+    /// Microphone ("Me") capture level mode: "off" | "manual" | "auto".
+    #[serde(default = "default_level_mode")]
+    pub mic_level_mode: String,
+    /// Fixed mic gain in dB, applied when `mic_level_mode == "manual"`.
+    #[serde(default)]
+    pub mic_gain_db: f32,
+    /// Desktop/system ("Others") capture level mode: "off" | "manual" | "auto".
+    #[serde(default = "default_level_mode")]
+    pub others_level_mode: String,
+    /// Fixed desktop gain in dB, applied when `others_level_mode == "manual"`.
+    #[serde(default)]
+    pub others_gain_db: f32,
     /// Run the re-transcription pass automatically when a recording stops
     /// (Phase 25 polish). With live transcription on, this *upgrades* the live
     /// transcript with the (usually bigger) re-transcription model; with live
@@ -135,6 +147,10 @@ pub struct Settings {
     /// the user presses 🔁 Re-transcribe.
     #[serde(default)]
     pub auto_transcribe: bool,
+}
+
+fn default_level_mode() -> String {
+    "off".to_string()
 }
 
 fn default_retranscribe_model() -> String {
@@ -356,6 +372,10 @@ impl Default for Settings {
             llm_api_key: String::new(),
             llm_model: String::new(),
             llm_timeout_secs: default_llm_timeout_secs(),
+            mic_level_mode: default_level_mode(),
+            mic_gain_db: 0.0,
+            others_level_mode: default_level_mode(),
+            others_gain_db: 0.0,
             live_transcription: true,
             retranscribe_model: default_retranscribe_model(),
             auto_transcribe: false,

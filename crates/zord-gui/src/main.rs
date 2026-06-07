@@ -1692,6 +1692,7 @@ fn MainApp() -> Element {
                                 }
                                 if *settings_tab.read() == "recording" {
                                 AudioInputSettings { settings, devices: devices.clone() }
+                                LevelSettings { settings }
                                 RetentionSettings { settings }
                                 }
                                 if *settings_tab.read() == "ai" {
@@ -2718,6 +2719,75 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                         }
                     },
                     "📋 Copy recent log"
+                }
+            }
+        }
+    }
+}
+
+/// Settings → Recording: per-channel capture level — Off / Auto-level / Manual
+/// gain. Applies to transcription input, the saved recording, and the meters;
+/// a soft limiter prevents clipping (Phase 26).
+#[component]
+fn LevelSettings(mut settings: Signal<Settings>) -> Element {
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Audio levels" }
+            p { class: "field-note", "Adjust each channel's volume into transcription, the saved recording, and the meters. Auto-level evens out a level that varies meeting-to-meeting; Manual applies a fixed gain. A soft limiter prevents clipping either way." }
+
+            div { class: "subhead", "Microphone (Me)" }
+            div { class: "field-row",
+                label { class: "field-label", "Level" }
+                select {
+                    onchange: move |e: FormEvent| { let mut s = settings.peek().clone(); s.mic_level_mode = e.value(); let _ = s.save(); settings.set(s); },
+                    option { value: "off", selected: settings.read().mic_level_mode == "off", "Off" }
+                    option { value: "auto", selected: settings.read().mic_level_mode == "auto", "Auto-level" }
+                    option { value: "manual", selected: settings.read().mic_level_mode == "manual", "Manual gain" }
+                }
+            }
+            if settings.read().mic_level_mode == "manual" {
+                div { class: "field-row",
+                    label { class: "field-label", "Gain: {settings.read().mic_gain_db:.0} dB" }
+                    input {
+                        r#type: "range", min: "-24", max: "24", step: "1", class: "slider",
+                        value: "{settings.read().mic_gain_db}",
+                        oninput: move |e: FormEvent| {
+                            if let Ok(v) = e.value().parse::<f32>() {
+                                let mut s = settings.peek().clone();
+                                s.mic_gain_db = v;
+                                let _ = s.save();
+                                settings.set(s);
+                            }
+                        },
+                    }
+                }
+            }
+
+            div { class: "subhead", "Desktop / system (Others)" }
+            div { class: "field-row",
+                label { class: "field-label", "Level" }
+                select {
+                    onchange: move |e: FormEvent| { let mut s = settings.peek().clone(); s.others_level_mode = e.value(); let _ = s.save(); settings.set(s); },
+                    option { value: "off", selected: settings.read().others_level_mode == "off", "Off" }
+                    option { value: "auto", selected: settings.read().others_level_mode == "auto", "Auto-level" }
+                    option { value: "manual", selected: settings.read().others_level_mode == "manual", "Manual gain" }
+                }
+            }
+            if settings.read().others_level_mode == "manual" {
+                div { class: "field-row",
+                    label { class: "field-label", "Gain: {settings.read().others_gain_db:.0} dB" }
+                    input {
+                        r#type: "range", min: "-24", max: "24", step: "1", class: "slider",
+                        value: "{settings.read().others_gain_db}",
+                        oninput: move |e: FormEvent| {
+                            if let Ok(v) = e.value().parse::<f32>() {
+                                let mut s = settings.peek().clone();
+                                s.others_gain_db = v;
+                                let _ = s.save();
+                                settings.set(s);
+                            }
+                        },
+                    }
                 }
             }
         }

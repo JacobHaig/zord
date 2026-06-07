@@ -1565,7 +1565,9 @@ fn run_session(
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
         match Microphone::start_with(mic_tx, input_device.as_deref()) {
             Ok(m) => {
-                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone()), stopping.clone()));
+                let mic_level = zord_audio::LevelControl::new(
+                    zord_audio::LevelMode::parse(&settings.mic_level_mode, settings.mic_gain_db));
+                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone()), mic_level, stopping.clone()));
                 Some(m)
             }
             Err(e) => {
@@ -1582,7 +1584,9 @@ fn run_session(
         let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
         match SystemAudio::start(sys_tx) {
             Ok(s) => {
-                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), None, stopping.clone()));
+                let sys_level = zord_audio::LevelControl::new(
+                    zord_audio::LevelMode::parse(&settings.others_level_mode, settings.others_gain_db));
+                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), None, sys_level, stopping.clone()));
                 Some(s)
             }
             Err(e) => {
@@ -1937,6 +1941,7 @@ fn spawn_proc(
     ev: UnboundedSender<Event>,
     wav_path: Option<PathBuf>,
     muted: Option<Arc<AtomicBool>>,
+    mut level_ctl: zord_audio::LevelControl,
     stopping: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -1977,10 +1982,13 @@ fn spawn_proc(
             // Muted mic: replace this buffer with silence so timing stays aligned
             // (segmenter/WAV keep advancing) but nothing is transcribed and the
             // meter naturally falls to zero.
-            let frame = match muted {
+            let mut frame = match muted {
                 Some(ref m) if m.load(Ordering::Relaxed) => vec![0.0f32; frame.len()],
                 _ => frame,
             };
+            // Per-channel level control (Phase 26) — before the meter, the WAV,
+            // and the model input, so all three see the same adjusted signal.
+            level_ctl.process(&mut frame, sample_rate);
             // RMS loudness of this buffer, gained, smoothed with time-based
             // exponential attack/release so both channels react at the same
             // real-world speed regardless of their buffer size/cadence.
