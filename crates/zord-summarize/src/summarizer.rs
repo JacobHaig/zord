@@ -12,6 +12,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 
 use crate::opts::{truncate_chars, ChatRole, GenOpts};
 
@@ -301,6 +302,19 @@ impl Summarizer {
         self.complete_with(messages, GenOpts::chat(n_ctx), on_delta)
     }
 
+    /// Apply the model's chat template to `messages` and tokenize the result into
+    /// the prompt token sequence (with a leading BOS).
+    fn build_prompt_tokens(&self, messages: Vec<LlamaChatMessage>) -> Result<Vec<LlamaToken>> {
+        let tmpl = self
+            .model
+            .chat_template(None)
+            .map_err(|e| anyhow!("model has no chat template: {e}"))?;
+        let prompt = self.model.apply_chat_template(&tmpl, &messages, true)?;
+
+        let tokens = self.model.str_to_token(&prompt, AddBos::Always)?;
+        Ok(tokens)
+    }
+
     /// Apply the model's chat template to `messages`, prefill, and greedily decode
     /// up to `opts.max_new_tokens`. The shared core under [`generate`]/[`chat`].
     fn complete(&self, messages: Vec<LlamaChatMessage>, opts: GenOpts) -> Result<String> {
@@ -315,13 +329,7 @@ impl Summarizer {
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String> {
         let backend = backend()?;
-        let tmpl = self
-            .model
-            .chat_template(None)
-            .map_err(|e| anyhow!("model has no chat template: {e}"))?;
-        let prompt = self.model.apply_chat_template(&tmpl, &messages, true)?;
-
-        let tokens = self.model.str_to_token(&prompt, AddBos::Always)?;
+        let tokens = self.build_prompt_tokens(messages)?;
         if tokens.len() as u32 >= opts.n_ctx {
             return Err(anyhow!("input too long for the model context window"));
         }

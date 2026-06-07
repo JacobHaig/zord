@@ -52,15 +52,7 @@ pub fn list_models(cfg: &RemoteConfig) -> Result<Vec<String>> {
     let url = cfg.endpoint("models");
     let resp = zord_net::get_json(&url, cfg.bearer(), Duration::from_secs(15))
         .map_err(|e| friendly(e, cfg))?;
-    let ids: Vec<String> = resp["data"]
-        .as_array()
-        .map(|models| {
-            models
-                .iter()
-                .filter_map(|m| m["id"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    let ids: Vec<String> = extract_model_ids(&resp);
     if ids.is_empty() {
         anyhow::bail!(
             "the server at {} answered but listed no models — load one in the server first",
@@ -68,6 +60,18 @@ pub fn list_models(cfg: &RemoteConfig) -> Result<Vec<String>> {
         );
     }
     Ok(ids)
+}
+
+fn extract_model_ids(resp: &serde_json::Value) -> Vec<String> {
+    resp["data"]
+        .as_array()
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A configured remote endpoint, exposing the same generation surface as the

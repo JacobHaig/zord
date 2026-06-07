@@ -795,13 +795,17 @@ fn row_to_segment(r: &rusqlite::Row) -> rusqlite::Result<Segment> {
     row_to_segment_offset(r, 0)
 }
 
+fn decode_words(words_json: Option<String>) -> Vec<Word> {
+    words_json
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
+}
+
 fn row_to_segment_offset(r: &rusqlite::Row, off: usize) -> rusqlite::Result<Segment> {
     let id: Option<i64> = r.get(off)?;
     let source_str: String = r.get(off + 1)?;
     let words_json: Option<String> = r.get(off + 5)?;
-    let words: Vec<Word> = words_json
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
+    let words: Vec<Word> = decode_words(words_json);
     let speaker: Option<i32> = r.get(off + 6)?;
     Ok(Segment {
         id,

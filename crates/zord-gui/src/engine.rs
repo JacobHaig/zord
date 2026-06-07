@@ -1697,6 +1697,28 @@ struct SessionOpts {
     live: bool,
 }
 
+/// Block until Stop / Shutdown, applying live mic mute toggles in the meantime.
+/// Returns `true` if it ended because of `Shutdown`.
+fn wait_for_stop(rx: &mpsc::Receiver<RecorderCmd>, mic_muted: &Arc<AtomicBool>) -> bool {
+    let mut shutdown = false;
+    loop {
+        match rx.recv() {
+            Ok(RecorderCmd::Stop) => {
+                tracing::info!("control: Stop received — tearing down recording");
+                break;
+            }
+            Err(_) => break,
+            Ok(RecorderCmd::Shutdown) => {
+                shutdown = true;
+                break;
+            }
+            Ok(RecorderCmd::SetMicMuted(m)) => mic_muted.store(m, Ordering::Relaxed),
+            Ok(RecorderCmd::Start { .. }) => {} // ignore double-start
+        }
+    }
+    shutdown
+}
+
 /// Run one recording session. Returns `true` if it ended because of `Shutdown`.
 fn run_session(
     opts: SessionOpts,
@@ -1915,22 +1937,7 @@ fn run_session(
     });
 
     // Wait for Stop / Shutdown (also handle live mic mute toggles).
-    let mut shutdown = false;
-    loop {
-        match rx.recv() {
-            Ok(RecorderCmd::Stop) => {
-                tracing::info!("control: Stop received — tearing down recording");
-                break;
-            }
-            Err(_) => break,
-            Ok(RecorderCmd::Shutdown) => {
-                shutdown = true;
-                break;
-            }
-            Ok(RecorderCmd::SetMicMuted(m)) => mic_muted.store(m, Ordering::Relaxed),
-            Ok(RecorderCmd::Start { .. }) => {} // ignore double-start
-        }
-    }
+    let shutdown = wait_for_stop(rx, &mic_muted);
 
     // Tell the worker threads to bail out of any queued backlog promptly.
     stopping.store(true, Ordering::Relaxed);
@@ -2170,6 +2177,20 @@ fn pad_to_wallclock(session_start: Instant, produced: u64, mono: Vec<f32>, rate:
     }
 }
 
+/// One time-based attack/release smoothing step for the level meter: map this
+/// buffer's `rms` to dBFS-normalized [0,1] and integrate it into the running
+/// `level` using the buffer's real duration (`n` mono samples at `sample_rate`).
+fn smooth_level(rms: f32, n: usize, sample_rate: u32, mut level: f32) -> f32 {
+    // RMS -> dBFS -> normalized [0,1] over [FLOOR_DB, 0 dB].
+    let db = 20.0 * rms.max(1e-6).log10();
+    let target = ((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB).clamp(0.0, 1.0);
+    let dt = n as f32 / sample_rate.max(1) as f32; // seconds this buffer spans (mono)
+    let tau = if target > level { LEVEL_ATTACK_S } else { LEVEL_RELEASE_S };
+    let alpha = 1.0 - (-dt / tau).exp();
+    level += (target - level) * alpha;
+    level
+}
+
 /// Per-channel resample + VAD stage that also emits live level meters.
 fn spawn_proc(
     rx: mpsc::Receiver<Vec<f32>>,
@@ -2233,13 +2254,7 @@ fn spawn_proc(
             // real-world speed regardless of their buffer size/cadence.
             let n = frame.len().max(1);
             let rms = (frame.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt();
-            // RMS -> dBFS -> normalized [0,1] over [FLOOR_DB, 0 dB].
-            let db = 20.0 * rms.max(1e-6).log10();
-            let target = ((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB).clamp(0.0, 1.0);
-            let dt = n as f32 / sample_rate.max(1) as f32; // seconds this buffer spans (mono)
-            let tau = if target > level { LEVEL_ATTACK_S } else { LEVEL_RELEASE_S };
-            let alpha = 1.0 - (-dt / tau).exp();
-            level += (target - level) * alpha;
+            level = smooth_level(rms, n, sample_rate, level);
             // Emit at most ~30×/s (see `level_send_interval` above). The meter
             // tracks moment-to-moment because `level` is integrated every buffer;
             // we just don't enqueue an event per buffer.

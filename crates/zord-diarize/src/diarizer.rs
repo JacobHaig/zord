@@ -242,6 +242,15 @@ fn ensure_segmentation(
     let tarball = dir.join(format!("{}.tar.bz2", seg.stem()));
     zord_net::download_to_file(&archive_url, &tarball, progress)?;
 
+    unpack_segmentation_tarball(&tarball, &dir)?;
+
+    if !path.exists() {
+        anyhow::bail!("segmentation archive did not produce {path:?}");
+    }
+    Ok(path)
+}
+
+fn unpack_segmentation_tarball(tarball: &std::path::Path, dir: &std::path::Path) -> Result<()> {
     let file = std::fs::File::open(&tarball)?;
     // Cap total decompressed bytes so a malicious/compromised mirror can't ship
     // a high-ratio bzip2 bomb that fills the disk (segmentation models are ≤~50 MB).
@@ -251,11 +260,7 @@ fn ensure_segmentation(
         .unpack(&dir)
         .context("unpacking segmentation archive")?;
     let _ = std::fs::remove_file(&tarball);
-
-    if !path.exists() {
-        anyhow::bail!("segmentation archive did not produce {path:?}");
-    }
-    Ok(path)
+    Ok(())
 }
 
 fn ensure_embedding(

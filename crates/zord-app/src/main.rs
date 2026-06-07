@@ -275,13 +275,26 @@ fn cmd_summarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     println!("{summary}");
 
     // Auto-title (best-effort) if enabled and the session isn't already named.
+    auto_title_session(&settings, &store, &llm, session_id, &summary)?;
+    Ok(())
+}
+
+/// Auto-title a session (best-effort) if enabled and the session isn't already named.
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+fn auto_title_session(
+    settings: &zord_config::Settings,
+    store: &Store,
+    llm: &zord_summarize::LlmBackend,
+    session_id: &str,
+    summary: &str,
+) -> Result<()> {
     if settings.auto_title {
         let unnamed = store
             .get_session(session_id)?
             .map(|s| s.title.as_deref().unwrap_or("").trim().is_empty())
             .unwrap_or(false);
         if unnamed {
-            if let Ok(raw) = llm.summarize(&summary, zord_config::title_prompt()) {
+            if let Ok(raw) = llm.summarize(summary, zord_config::title_prompt()) {
                 let title = zord_config::clean_title(&raw);
                 if !title.is_empty() {
                     store.set_session_title(session_id, &title)?;
@@ -391,25 +404,9 @@ fn compute_speaker_assignments(
     (assignments, speakers)
 }
 
+/// Prepare the diarization models and load the configured diarizer.
 #[cfg(feature = "diarization")]
-fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
-    let db_path = resolve_db(db)?;
-    let store = Store::open(&db_path)?;
-    let session = store
-        .get_session(session_id)?
-        .with_context(|| format!("no such session '{session_id}'"))?;
-    let prefix = session
-        .audio_path
-        .with_context(|| "this session didn't retain audio, so speakers can't be identified")?;
-    let wav = PathBuf::from(format!("{prefix}.others.wav"));
-    anyhow::ensure!(wav.exists(), "the 'Others' audio for this session is missing: {wav:?}");
-
-    // Streams + downsamples the (possibly native-rate) track to the 16 kHz the
-    // diarizer expects (Phase 25d).
-    let samples = zord_audio::read_wav_mono_16k(&wav)?;
-    anyhow::ensure!(!samples.is_empty(), "no 'Others' audio to diarize");
-
-    let settings = zord_config::Settings::load();
+fn load_diarizer(settings: &zord_config::Settings) -> Result<zord_diarize::Diarizer> {
     let model = zord_diarize::EmbeddingModel::parse_or_default(&settings.diarize_embedding_model);
     let seg =
         zord_diarize::SegmentationModel::parse_or_default(&settings.diarize_segmentation_model);
@@ -429,6 +426,29 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
         num_speakers,
         settings.diarize_threshold.clamp(0.1, 0.95),
     )?;
+    Ok(diarizer)
+}
+
+#[cfg(feature = "diarization")]
+fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
+    let db_path = resolve_db(db)?;
+    let store = Store::open(&db_path)?;
+    let session = store
+        .get_session(session_id)?
+        .with_context(|| format!("no such session '{session_id}'"))?;
+    let prefix = session
+        .audio_path
+        .with_context(|| "this session didn't retain audio, so speakers can't be identified")?;
+    let wav = PathBuf::from(format!("{prefix}.others.wav"));
+    anyhow::ensure!(wav.exists(), "the 'Others' audio for this session is missing: {wav:?}");
+
+    // Streams + downsamples the (possibly native-rate) track to the 16 kHz the
+    // diarizer expects (Phase 25d).
+    let samples = zord_audio::read_wav_mono_16k(&wav)?;
+    anyhow::ensure!(!samples.is_empty(), "no 'Others' audio to diarize");
+
+    let settings = zord_config::Settings::load();
+    let diarizer = load_diarizer(&settings)?;
     let spans = diarizer.diarize(&samples)?;
     if spans.is_empty() {
         eprintln!(

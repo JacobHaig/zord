@@ -36,6 +36,12 @@ fn agent() -> ureq::Agent {
         Err(e) => tracing::warn!("native-tls connector unavailable: {e}"),
     }
 
+    builder = apply_env_proxy(builder);
+    builder.build()
+}
+
+/// Apply an env-var proxy (if one is set) to an in-progress agent builder.
+fn apply_env_proxy(mut builder: ureq::AgentBuilder) -> ureq::AgentBuilder {
     if let Some(p) = proxy_from_env() {
         match ureq::Proxy::new(&p) {
             Ok(proxy) => {
@@ -45,7 +51,7 @@ fn agent() -> ureq::Agent {
             Err(e) => tracing::warn!("ignoring invalid proxy '{p}': {e}"),
         }
     }
-    builder.build()
+    builder
 }
 
 /// First non-empty proxy URL from the standard environment variables.
@@ -310,6 +316,19 @@ fn try_download(
     file.flush()?;
     drop(file);
     // Verify the content digest (if known) before publishing the file.
+    verify_digest(hasher, expected_sha256, &tmp, url)?;
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+/// Verify the streamed bytes' digest (when known) against `expected_sha256`,
+/// removing the partial `tmp` file and failing on mismatch.
+fn verify_digest(
+    hasher: Option<Sha256>,
+    expected_sha256: Option<&str>,
+    tmp: &Path,
+    url: &str,
+) -> Result<()> {
     if let (Some(h), Some(expected)) = (hasher, expected_sha256) {
         let got = h.finalize();
         let want = expected.strip_prefix("sha256:").unwrap_or(expected);
@@ -318,7 +337,6 @@ fn try_download(
             anyhow::bail!("{url}: sha256 mismatch (expected {want}) — refusing tampered download");
         }
     }
-    std::fs::rename(&tmp, dest)?;
     Ok(())
 }
 

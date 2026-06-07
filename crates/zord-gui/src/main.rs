@@ -1726,23 +1726,7 @@ fn MainApp() -> Element {
                                 }
                                 div { class: "settings-pane",
                                 if *settings_tab.read() == "theme" {
-                                section { class: "settings-section",
-                                    h3 { "Theme" }
-                                    div { class: "field-row",
-                                        label { class: "field-label", "Session badges: tint by meaning" }
-                                        button {
-                                            class: if settings.read().badge_tint { "toggle on" } else { "toggle" },
-                                            onclick: move |_| {
-                                                let mut s = settings.peek().clone();
-                                                s.badge_tint = !s.badge_tint;
-                                                let _ = s.save();
-                                                settings.set(s);
-                                            },
-                                            if settings.read().badge_tint { "Tinted" } else { "Mono" }
-                                        }
-                                    }
-                                    p { class: "field-note", "The summary / compressed / speakers badges in the sidebar are color-coded by meaning (cyan / amber / green) so you can read a session at a glance. Turn off for a calmer, monochrome look." }
-                                }
+                                ThemeSettings { settings }
                                 }
                                 if *settings_tab.read() == "transcription" {
                                 section { class: "settings-section",
@@ -2199,10 +2183,7 @@ fn MainApp() -> Element {
                                 FilesSettings { settings, notice }
                                 }
                                 if *settings_tab.read() == "about" {
-                                section { class: "settings-section",
-                                    h3 { "About" }
-                                    p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
-                                }
+                                AboutSettings {}
                                 }
                                 } // settings-pane
                                 } // settings-layout
@@ -2261,6 +2242,41 @@ fn SummaryPromptSettings(settings: Signal<Settings>) -> Element {
                 },
                 "Reset to preset"
             }
+        }
+    }
+}
+
+/// Settings → Theme: monochrome vs meaning-tinted session badges.
+#[component]
+fn ThemeSettings(settings: Signal<Settings>) -> Element {
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Theme" }
+            div { class: "field-row",
+                label { class: "field-label", "Session badges: tint by meaning" }
+                button {
+                    class: if settings.read().badge_tint { "toggle on" } else { "toggle" },
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.badge_tint = !s.badge_tint;
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    if settings.read().badge_tint { "Tinted" } else { "Mono" }
+                }
+            }
+            p { class: "field-note", "The summary / compressed / speakers badges in the sidebar are color-coded by meaning (cyan / amber / green) so you can read a session at a glance. Turn off for a calmer, monochrome look." }
+        }
+    }
+}
+
+/// Settings → About: a one-line local-only blurb.
+#[component]
+fn AboutSettings() -> Element {
+    rsx! {
+        section { class: "settings-section",
+            h3 { "About" }
+            p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
         }
     }
 }
