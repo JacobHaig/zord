@@ -8,7 +8,7 @@ license.workspace = true
 default = []
 # Local LLM via llama.cpp. Heavy build (compiles llama.cpp); the default build
 # leaves this crate empty so the workspace stays lean.
-llama = ["dep:llama-cpp-2", "dep:zord-net", "dep:directories", "dep:serde_json"]
+llama = ["dep:llama-cpp-2", "dep:zord-net", "dep:directories", "dep:serde_json", "dep:encoding_rs"]
 # Remote LLM via a user-provided OpenAI-compatible server (Phase 24). Pure
 # HTTP — no llama.cpp toolchain needed. Composes with `llama`.
 remote = ["dep:zord-net", "dep:serde_json"]
@@ -19,6 +19,9 @@ tracing = { workspace = true }
 zord-net = { workspace = true, optional = true }
 directories = { version = "5", optional = true }
 serde_json = { version = "1", optional = true }
+# Used to decode model token bytes (the non-deprecated token_to_piece path).
+# Already in the tree transitively via llama-cpp-2; pinned to its major here.
+encoding_rs = { version = "0.8", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 llama-cpp-2 = { version = "0.1", default-features = false, features = ["metal"], optional = true }

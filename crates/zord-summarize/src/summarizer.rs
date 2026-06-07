@@ -10,7 +10,7 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
@@ -377,7 +377,13 @@ impl Summarizer {
             if self.model.is_eog_token(token) {
                 break;
             }
-            let piece = self.model.token_to_str(token, Special::Plaintext).unwrap_or_default();
+            // `token_to_piece` (the non-deprecated path) with a fresh UTF-8
+            // decoder and `special=false` == the old `token_to_str(_, Plaintext)`.
+            let mut decoder = encoding_rs::UTF_8.new_decoder();
+            let piece = self
+                .model
+                .token_to_piece(token, &mut decoder, false, None)
+                .unwrap_or_default();
             if !piece.is_empty() {
                 on_delta(&piece);
             }

@@ -6958,6 +6958,7 @@ version = "0.2.15"
 dependencies = [
  "anyhow",
  "directories",
+ "encoding_rs",
  "llama-cpp-2",
  "serde_json",
  "tracing",
