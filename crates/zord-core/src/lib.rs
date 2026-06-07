@@ -103,3 +103,139 @@ pub struct Session {
     /// Which whisper model produced this transcript.
     pub model: String,
 }
+
+// ---------------------------------------------------------------------------
+// Phase 26: the rolling project ledger.
+//
+// The Overview is a durable set of `Project`s, each holding a running list of
+// `ProjectItem`s (action items / decisions / open questions). Each new meeting
+// is folded in as a delta: items get added, transitioned, or marked done. These
+// types are the shared shape the store, the merge engine, and the GUI agree on.
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of a project in the ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectStatus {
+    /// Actively tracked (shown first in the Overview).
+    Active,
+    /// Wound down / parked; hidden by default but kept for history.
+    Archived,
+}
+
+impl ProjectStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectStatus::Active => "active",
+            ProjectStatus::Archived => "archived",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "archived" => ProjectStatus::Archived,
+            _ => ProjectStatus::Active,
+        }
+    }
+}
+
+/// What kind of ledger entry a `ProjectItem` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemKind {
+    /// Something to be done (has an owner + a completion state).
+    Action,
+    /// An unresolved question raised in a meeting.
+    Question,
+    /// A decision the group made (kept as a record; usually `Done`).
+    Decision,
+}
+
+impl ItemKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ItemKind::Action => "action",
+            ItemKind::Question => "question",
+            ItemKind::Decision => "decision",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "question" => ItemKind::Question,
+            "decision" => ItemKind::Decision,
+            _ => ItemKind::Action,
+        }
+    }
+}
+
+/// Lifecycle of a `ProjectItem`. `Done` items are retained for history and
+/// shown only on demand; the rest are "active".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemStatus {
+    Open,
+    Blocked,
+    Waiting,
+    Done,
+}
+
+impl ItemStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ItemStatus::Open => "open",
+            ItemStatus::Blocked => "blocked",
+            ItemStatus::Waiting => "waiting",
+            ItemStatus::Done => "done",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "blocked" => ItemStatus::Blocked,
+            "waiting" => ItemStatus::Waiting,
+            "done" => ItemStatus::Done,
+            _ => ItemStatus::Open,
+        }
+    }
+    /// `Done` is history; everything else is currently active.
+    pub fn is_active(self) -> bool {
+        self != ItemStatus::Done
+    }
+}
+
+/// A tracked project in the Overview ledger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub status: ProjectStatus,
+    /// Short running description of where the project stands (LLM-maintained,
+    /// user-editable).
+    pub description: Option<String>,
+    /// Unix epoch ms.
+    pub created_at: u64,
+    pub updated_at: u64,
+    /// When a meeting last touched this project (drives Overview ordering).
+    pub last_activity_at: u64,
+}
+
+/// One entry under a project: an action item, open question, or decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectItem {
+    pub id: String,
+    pub project_id: String,
+    pub kind: ItemKind,
+    pub text: String,
+    /// Who owns it (for actions), if attributed.
+    pub owner: Option<String>,
+    pub status: ItemStatus,
+    /// Session that first introduced this item.
+    pub created_session: Option<String>,
+    /// Session that last changed it.
+    pub updated_session: Option<String>,
+    /// Session in which it was marked done (provenance for "why is this done?").
+    pub completed_session: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    /// Hand-edited by the user — protected from being overwritten by later
+    /// automatic folds (only an explicit rebuild-from-history clears it).
+    pub manual: bool,
+}

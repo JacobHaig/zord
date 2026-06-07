@@ -5,7 +5,9 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
-use zord_core::{Segment, Session, Source, Word};
+use zord_core::{
+    ItemKind, ItemStatus, Project, ProjectItem, ProjectStatus, Segment, Session, Source, Word,
+};
 
 /// Process-wide database passphrase. Set once at startup (after unlocking);
 /// every `Store::open` applies it as the SQLCipher key. `None` = no encryption.
@@ -177,6 +179,213 @@ impl Store {
             .prepare("SELECT compressed FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, Option<String>>(0))?;
         Ok(rows.next().transpose()?.flatten())
+    }
+
+    // ----- Phase 26: rolling project ledger -----------------------------------
+
+    /// Insert a project.
+    pub fn create_project(&self, p: &Project) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO projects (id, name, status, description, created_at, updated_at, last_activity_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![p.id, p.name, p.status.as_str(), p.description, p.created_at, p.updated_at, p.last_activity_at],
+        )?;
+        Ok(())
+    }
+
+    /// All projects, active first, then most-recently-active.
+    pub fn list_projects(&self) -> Result<Vec<Project>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, status, description, created_at, updated_at, last_activity_at
+             FROM projects
+             ORDER BY (status = 'active') DESC, last_activity_at DESC",
+        )?;
+        let rows = stmt.query_map([], row_to_project)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_project(&self, id: &str) -> Result<Option<Project>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, status, description, created_at, updated_at, last_activity_at
+             FROM projects WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], row_to_project)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn rename_project(&self, id: &str, name: &str, now: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET name = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, name, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_project_status(&self, id: &str, status: ProjectStatus, now: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, status.as_str(), now],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_project_description(&self, id: &str, desc: Option<&str>, now: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET description = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, desc, now],
+        )?;
+        Ok(())
+    }
+
+    /// Bump a project's activity clock when a meeting touches it.
+    pub fn touch_project(&self, id: &str, now: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE projects SET last_activity_at = ?2, updated_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_project(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Add an item under a project.
+    pub fn add_item(&self, it: &ProjectItem) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO project_items
+                (id, project_id, kind, text, owner, status, created_session,
+                 updated_session, completed_session, created_at, updated_at, manual)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                it.id, it.project_id, it.kind.as_str(), it.text, it.owner, it.status.as_str(),
+                it.created_session, it.updated_session, it.completed_session,
+                it.created_at, it.updated_at, it.manual as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_item(&self, id: &str) -> Result<Option<ProjectItem>> {
+        let mut stmt = self.conn.prepare(&item_select("WHERE id = ?1"))?;
+        let mut rows = stmt.query_map(params![id], row_to_item)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// All items for a project, active first, oldest within a group first.
+    pub fn list_items(&self, project_id: &str) -> Result<Vec<ProjectItem>> {
+        let mut stmt = self.conn.prepare(&item_select(
+            "WHERE project_id = ?1 ORDER BY (status = 'done'), created_at",
+        ))?;
+        let rows = stmt.query_map(params![project_id], row_to_item)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn update_item_status(
+        &self,
+        id: &str,
+        status: ItemStatus,
+        updated_session: Option<&str>,
+        completed_session: Option<&str>,
+        now: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE project_items
+             SET status = ?2, updated_session = ?3, completed_session = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![id, status.as_str(), updated_session, completed_session, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_item_text(&self, id: &str, text: &str, owner: Option<&str>, now: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE project_items SET text = ?2, owner = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, text, owner, now],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an item as hand-edited (protected from automatic folds).
+    pub fn set_item_manual(&self, id: &str, manual: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE project_items SET manual = ?2 WHERE id = ?1",
+            params![id, manual as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Reassign an item to another project (used by merge / manual move).
+    pub fn move_item(&self, item_id: &str, new_project: &str, now: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE project_items SET project_id = ?2, updated_at = ?3 WHERE id = ?1",
+            params![item_id, new_project, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_item(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM project_items WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Record that a session has been folded into the ledger (with its extract).
+    pub fn mark_session_applied(&self, session_id: &str, extract: Option<&str>, now: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_overview_state (session_id, applied_at, extract)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET applied_at = excluded.applied_at, extract = excluded.extract",
+            params![session_id, now, extract],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_session_applied(&self, session_id: &str) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM session_overview_state WHERE session_id = ?1")?;
+        Ok(stmt.exists(params![session_id])?)
+    }
+
+    /// Sessions not yet folded into the ledger, oldest first (fold order).
+    pub fn unapplied_sessions(&self) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_at, ended_at, title, audio_path, model FROM sessions
+             WHERE id NOT IN (SELECT session_id FROM session_overview_state)
+             ORDER BY started_at",
+        )?;
+        let rows = stmt.query_map([], row_to_session)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Wipe the entire ledger (projects, items, history, applied-state) — the
+    /// destructive reset behind "Build from history". Drops manual edits.
+    pub fn clear_ledger(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM project_history;
+             DELETE FROM project_items;
+             DELETE FROM projects;
+             DELETE FROM session_overview_state;",
+        )?;
+        Ok(())
+    }
+
+    /// Append an audit-log entry (e.g. "completed", "added", "reopened").
+    pub fn log_history(
+        &self,
+        project_id: &str,
+        item_id: Option<&str>,
+        change: &str,
+        session_id: Option<&str>,
+        now: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO project_history (project_id, item_id, change, session_id, at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project_id, item_id, change, session_id, now],
+        )?;
+        Ok(())
     }
 
     pub fn create_session(&self, session: &Session) -> Result<()> {
@@ -455,6 +664,55 @@ fn create_schema(conn: &Connection) -> Result<()> {
                 updated_at  INTEGER NOT NULL
             );
 
+            -- Phase 26: the rolling project ledger. `projects` + `project_items`
+            -- are the durable Overview state; `session_overview_state` tracks
+            -- which sessions have been folded in (idempotency + staleness); the
+            -- audit log records why each item changed (provenance).
+            CREATE TABLE IF NOT EXISTS projects (
+                id               TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'active',
+                description      TEXT,
+                created_at       INTEGER NOT NULL,
+                updated_at       INTEGER NOT NULL,
+                last_activity_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS project_items (
+                id                 TEXT PRIMARY KEY,
+                project_id         TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                kind               TEXT NOT NULL DEFAULT 'action',
+                text               TEXT NOT NULL,
+                owner              TEXT,
+                status             TEXT NOT NULL DEFAULT 'open',
+                created_session    TEXT,
+                updated_session    TEXT,
+                completed_session  TEXT,
+                created_at         INTEGER NOT NULL,
+                updated_at         INTEGER NOT NULL,
+                manual             INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_items_project ON project_items(project_id);
+
+            -- Which sessions have been folded into the ledger, and the structured
+            -- extract used (so a re-transcribed/edited session can be re-folded).
+            CREATE TABLE IF NOT EXISTS session_overview_state (
+                session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                applied_at  INTEGER NOT NULL,
+                extract     TEXT
+            );
+
+            -- Audit trail: one row per item change, naming the session that caused it.
+            CREATE TABLE IF NOT EXISTS project_history (
+                id          INTEGER PRIMARY KEY,
+                project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                item_id     TEXT,
+                change      TEXT NOT NULL,
+                session_id  TEXT,
+                at          INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_project ON project_history(project_id, at);
+
             CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
                 text,
                 content='segments',
@@ -479,6 +737,49 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
 /// Build a `Session` from a row selected as `(id, started_at, ended_at, title,
 /// audio_path, model)`.
+fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
+    let status: String = r.get(2)?;
+    Ok(Project {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        status: ProjectStatus::parse(&status),
+        description: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
+        last_activity_at: r.get(6)?,
+    })
+}
+
+/// Column list for `project_items`, shared by every item query so the indices
+/// `row_to_item` reads stay in sync. `clause` is the trailing WHERE/ORDER BY.
+fn item_select(clause: &str) -> String {
+    format!(
+        "SELECT id, project_id, kind, text, owner, status, created_session, \
+         updated_session, completed_session, created_at, updated_at, manual \
+         FROM project_items {clause}"
+    )
+}
+
+fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<ProjectItem> {
+    let kind: String = r.get(2)?;
+    let status: String = r.get(5)?;
+    let manual: i64 = r.get(11)?;
+    Ok(ProjectItem {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        kind: ItemKind::parse(&kind),
+        text: r.get(3)?,
+        owner: r.get(4)?,
+        status: ItemStatus::parse(&status),
+        created_session: r.get(6)?,
+        updated_session: r.get(7)?,
+        completed_session: r.get(8)?,
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
+        manual: manual != 0,
+    })
+}
+
 fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
         id: r.get(0)?,
@@ -646,5 +947,182 @@ mod enc_tests {
         assert!(Store::open(&db).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zord-ledger-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    #[test]
+    fn project_and_item_roundtrip() {
+        let db = tmp_db("roundtrip");
+        let s = Store::open(&db).unwrap();
+
+        s.create_project(&Project {
+            id: "p1".into(),
+            name: "Migration".into(),
+            status: ProjectStatus::Active,
+            description: Some("port to new API".into()),
+            created_at: 100,
+            updated_at: 100,
+            last_activity_at: 100,
+        })
+        .unwrap();
+
+        let got = s.get_project("p1").unwrap().unwrap();
+        assert_eq!(got.name, "Migration");
+        assert_eq!(got.status, ProjectStatus::Active);
+        assert_eq!(got.description.as_deref(), Some("port to new API"));
+
+        s.add_item(&ProjectItem {
+            id: "i1".into(),
+            project_id: "p1".into(),
+            kind: ItemKind::Action,
+            text: "Write the adapter".into(),
+            owner: Some("Alex".into()),
+            status: ItemStatus::Open,
+            created_session: Some("sess-a".into()),
+            updated_session: Some("sess-a".into()),
+            completed_session: None,
+            created_at: 110,
+            updated_at: 110,
+            manual: false,
+        })
+        .unwrap();
+
+        let items = s.list_items("p1").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, ItemKind::Action);
+        assert_eq!(items[0].owner.as_deref(), Some("Alex"));
+        assert!(items[0].status.is_active());
+
+        // Transition to done with provenance.
+        s.update_item_status(
+            "i1",
+            ItemStatus::Done,
+            Some("sess-b"),
+            Some("sess-b"),
+            200,
+        )
+        .unwrap();
+        let it = s.get_item("i1").unwrap().unwrap();
+        assert_eq!(it.status, ItemStatus::Done);
+        assert_eq!(it.completed_session.as_deref(), Some("sess-b"));
+        assert!(!it.status.is_active());
+
+        // Manual edit protection flag.
+        s.update_item_text("i1", "Write the adapter (done)", None, 210).unwrap();
+        s.set_item_manual("i1", true).unwrap();
+        assert!(s.get_item("i1").unwrap().unwrap().manual);
+
+        // Archiving + ordering: active sorts before archived.
+        s.create_project(&Project {
+            id: "p2".into(),
+            name: "Old thing".into(),
+            status: ProjectStatus::Archived,
+            description: None,
+            created_at: 90,
+            updated_at: 90,
+            last_activity_at: 300,
+        })
+        .unwrap();
+        let projects = s.list_projects().unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].id, "p1"); // active first despite older activity
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn applied_state_and_unapplied_sessions() {
+        let db = tmp_db("applied");
+        let s = Store::open(&db).unwrap();
+
+        for (id, t) in [("s1", 10u64), ("s2", 20), ("s3", 30)] {
+            s.create_session(&Session {
+                id: id.into(),
+                started_at: t,
+                ended_at: None,
+                title: None,
+                audio_path: None,
+                model: "m".into(),
+            })
+            .unwrap();
+        }
+
+        assert_eq!(s.unapplied_sessions().unwrap().len(), 3);
+        assert!(!s.is_session_applied("s2").unwrap());
+
+        s.mark_session_applied("s2", Some("{\"items\":[]}"), 25).unwrap();
+        assert!(s.is_session_applied("s2").unwrap());
+
+        let pending = s.unapplied_sessions().unwrap();
+        assert_eq!(
+            pending.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            vec!["s1", "s3"] // oldest-first, s2 folded out
+        );
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn clear_ledger_wipes_everything() {
+        let db = tmp_db("clear");
+        let s = Store::open(&db).unwrap();
+        s.create_session(&Session {
+            id: "s1".into(),
+            started_at: 1,
+            ended_at: None,
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+        })
+        .unwrap();
+        s.create_project(&Project {
+            id: "p1".into(),
+            name: "P".into(),
+            status: ProjectStatus::Active,
+            description: None,
+            created_at: 1,
+            updated_at: 1,
+            last_activity_at: 1,
+        })
+        .unwrap();
+        s.add_item(&ProjectItem {
+            id: "i1".into(),
+            project_id: "p1".into(),
+            kind: ItemKind::Decision,
+            text: "ship it".into(),
+            owner: None,
+            status: ItemStatus::Done,
+            created_session: Some("s1".into()),
+            updated_session: Some("s1".into()),
+            completed_session: Some("s1".into()),
+            created_at: 1,
+            updated_at: 1,
+            manual: false,
+        })
+        .unwrap();
+        s.log_history("p1", Some("i1"), "added", Some("s1"), 1).unwrap();
+        s.mark_session_applied("s1", None, 1).unwrap();
+
+        s.clear_ledger().unwrap();
+
+        assert!(s.list_projects().unwrap().is_empty());
+        assert!(s.get_item("i1").unwrap().is_none());
+        assert!(!s.is_session_applied("s1").unwrap());
+        // Sessions themselves are untouched by a ledger wipe.
+        assert_eq!(s.list_sessions().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }
