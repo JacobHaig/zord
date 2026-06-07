@@ -144,6 +144,8 @@ body {
 /* In the tabbed layout the active pane's first section needs no top padding. */
 .settings-pane .settings-section:first-child { padding-top: 0; }
 .settings-section { padding: 24px 0; border-bottom: 1px solid var(--line); }
+/* Group label within a section (e.g. Folders / Files / Logs). */
+.subhead { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 18px 0 8px; }
 .settings-section h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
 .field label { font-size: 13px; }

@@ -1585,6 +1585,7 @@ fn MainApp() -> Element {
                                     button { class: if *settings_tab.read() == "recording" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("recording".into()), "Recording" }
                                     button { class: if *settings_tab.read() == "files" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("files".into()), "Files" }
                                     button { class: if *settings_tab.read() == "security" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("security".into()), "Security" }
+                                    button { class: if *settings_tab.read() == "about" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("about".into()), "About" }
                                 }
                                 div { class: "settings-pane",
                                 if *settings_tab.read() == "transcription" {
@@ -2039,6 +2040,8 @@ fn MainApp() -> Element {
                                 }
                                 if *settings_tab.read() == "files" {
                                 FilesSettings { settings, notice }
+                                }
+                                if *settings_tab.read() == "about" {
                                 section { class: "settings-section",
                                     h3 { "About" }
                                     p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
@@ -2596,13 +2599,18 @@ fn reset_chat(
     scope.set(None);
 }
 
-/// Settings → Files & folders: jump-to-disk shortcuts + log helpers.
+/// Settings → Files & folders: jump-to-disk shortcuts, grouped — folders to
+/// open, individual files to reveal, and log helpers — kept distinct so the
+/// folders aren't mixed in with the database/config files.
 #[component]
 fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
     rsx! {
         section { class: "settings-section",
             h3 { "Files & folders" }
             p { class: "field-note", "Jump to Zord's files on disk — handy for dropping in a manually-downloaded model, or grabbing logs when something fails." }
+
+            // --- Folders (open in the file manager) ---
+            div { class: "subhead", "Folders" }
             div { class: "btn-row",
                 button {
                     class: "mbtn",
@@ -2616,7 +2624,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                 }
                 button {
                     class: "mbtn",
-                    title: "Database, recordings, and exports",
+                    title: "Database, recordings, and exports (the storage root)",
                     onclick: move |_| {
                         if let Ok(d) = settings.peek().storage_dir() {
                             osutil::open_folder(&d.display().to_string());
@@ -2626,6 +2634,27 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                 }
                 button {
                     class: "mbtn",
+                    title: "Retained per-channel recordings (.wav)",
+                    onclick: move |_| {
+                        if let Ok(d) = settings.peek().audio_dir() {
+                            osutil::open_folder(&d.display().to_string());
+                        }
+                    },
+                    "📁 Recordings"
+                }
+                button {
+                    class: "mbtn",
+                    title: "Transcripts exported to Markdown / SRT / JSON",
+                    onclick: move |_| {
+                        if let Ok(d) = settings.peek().exports_dir() {
+                            osutil::open_folder(&d.display().to_string());
+                        }
+                    },
+                    "📁 Exports"
+                }
+                button {
+                    class: "mbtn",
+                    title: "Application logs",
                     onclick: move |_| {
                         if let Ok(d) = zord_config::logs_dir() {
                             osutil::open_folder(&d.display().to_string());
@@ -2633,8 +2662,14 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                     },
                     "📁 Logs"
                 }
+            }
+
+            // --- Individual files (reveal in the file manager) ---
+            div { class: "subhead", "Files" }
+            div { class: "btn-row",
                 button {
                     class: "mbtn ghost",
+                    title: "settings (config.json)",
                     onclick: move |_| {
                         if let Ok(p) = zord_config::config_path() {
                             osutil::reveal_in_file_manager(&p.display().to_string());
@@ -2644,6 +2679,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                 }
                 button {
                     class: "mbtn ghost",
+                    title: "the SQLite database (sessions + transcripts)",
                     onclick: move |_| {
                         if let Ok(p) = settings.peek().db_path() {
                             osutil::reveal_in_file_manager(&p.display().to_string());
@@ -2652,6 +2688,9 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                     "📄 Database"
                 }
             }
+
+            // --- Logs (read / share for bug reports) ---
+            div { class: "subhead", "Logs" }
             div { class: "btn-row",
                 button {
                     class: "mbtn ghost",
