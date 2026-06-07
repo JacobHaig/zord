@@ -24,6 +24,57 @@ const CSS: &str = include_str!("style.css");
 /// subtracted from the pointer x when dragging the sidebar splitter.
 const RAIL_W: u32 = 56;
 
+/// **The single source of truth for every icon in the app.** Returns the inner
+/// SVG markup for a named icon (24px viewBox, `currentColor` so it inherits its
+/// control's text color). Clean line style, pixel-identical on every platform —
+/// the emoji this replaces were drawn by the OS font and looked different
+/// everywhere. To change an icon everywhere it's used, edit it here.
+fn icon_paths(name: &str) -> &'static str {
+    match name {
+        // Navigation / chrome
+        "overview" => "<line x1='6' y1='20' x2='6' y2='13'/><line x1='12' y1='20' x2='12' y2='8'/><line x1='18' y1='20' x2='18' y2='4'/>",
+        "search" => "<circle cx='11' cy='11' r='7'/><line x1='21' y1='21' x2='16.5' y2='16.5'/>",
+        "settings" => "<line x1='4' y1='8' x2='20' y2='8'/><line x1='4' y1='16' x2='20' y2='16'/><circle cx='9' cy='8' r='2.6'/><circle cx='15' cy='16' r='2.6'/>",
+        "close" => "<line x1='6' y1='6' x2='18' y2='18'/><line x1='18' y1='6' x2='6' y2='18'/>",
+        "check" => "<polyline points='4 12 10 18 20 6'/>",
+        // Recording controls
+        "record" => "<circle cx='12' cy='12' r='6' fill='currentColor' stroke='none'/>",
+        "stop" => "<rect x='6' y='6' width='12' height='12' rx='2'/>",
+        "mic" => "<rect x='9' y='3' width='6' height='11' rx='3'/><path d='M5 11a7 7 0 0 0 14 0'/><line x1='12' y1='18' x2='12' y2='21'/>",
+        "mic-off" => "<path d='M15 9.3V6a3 3 0 0 0-5.7-1.3'/><path d='M9 9v2a3 3 0 0 0 4.6 2.5'/><path d='M5 11a7 7 0 0 0 11 5.3'/><line x1='12' y1='18' x2='12' y2='21'/><line x1='3' y1='3' x2='21' y2='21'/>",
+        "play" => "<path d='M7 5v14l11-7z'/>",
+        // AI / speaker actions
+        "sparkles" => "<path d='M12 3l1.7 5.3a2 2 0 0 0 1.3 1.3L20.3 11l-5.3 1.7a2 2 0 0 0-1.3 1.3L12 19.3l-1.7-5.3a2 2 0 0 0-1.3-1.3L3.7 11l5.3-1.7a2 2 0 0 0 1.3-1.3z'/>",
+        "archive" => "<rect x='3' y='4' width='18' height='4' rx='1'/><path d='M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8'/><line x1='10' y1='12' x2='14' y2='12'/>",
+        "users" => "<circle cx='9' cy='8' r='3.5'/><path d='M3 20v-1a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v1'/><path d='M16 5.5a3.5 3.5 0 0 1 0 6.8'/><path d='M21 20v-1a5 5 0 0 0-3.5-4.8'/>",
+        "refresh" => "<path d='M3 12a9 9 0 0 1 15-6.7L21 8'/><path d='M21 3v5h-5'/><path d='M21 12a9 9 0 0 1-15 6.7L3 16'/><path d='M3 21v-5h5'/>",
+        "chat" => "<path d='M21 12a8 8 0 0 1-11.3 7.3L3 21l1.7-6.7A8 8 0 1 1 21 12z'/>",
+        "headphones" => "<path d='M4 14v-1a8 8 0 0 1 16 0v1'/><rect x='2.5' y='13' width='4.5' height='7' rx='1.6'/><rect x='17' y='13' width='4.5' height='7' rx='1.6'/>",
+        // Output / files
+        "copy" => "<rect x='9' y='9' width='11' height='11' rx='2'/><path d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'/>",
+        "export" | "download" => "<path d='M12 3v12'/><path d='M7 11l5 4 5-4'/><path d='M4 21h16'/>",
+        "folder" => "<path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/>",
+        "file" => "<path d='M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z'/><path d='M14 3v6h6'/>",
+        "file-text" => "<path d='M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z'/><path d='M14 3v6h6'/><line x1='8' y1='13' x2='16' y2='13'/><line x1='8' y1='17' x2='13' y2='17'/>",
+        "database" => "<ellipse cx='12' cy='6' rx='8' ry='3'/><path d='M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6'/><path d='M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3'/>",
+        "external" => "<path d='M14 4h6v6'/><path d='M20 4l-9 9'/><path d='M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5'/>",
+        // Row actions
+        "pen" => "<path d='M12 20h9'/><path d='M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z'/>",
+        "trash" => "<path d='M4 7h16'/><path d='M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'/><path d='M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13'/><line x1='10' y1='11' x2='10' y2='17'/><line x1='14' y1='11' x2='14' y2='17'/>",
+        _ => "<circle cx='12' cy='12' r='8'/>",
+    }
+}
+
+/// Render a named icon as an inline element (see [`icon_paths`]).
+fn icon(name: &str) -> Element {
+    let svg = format!(
+        "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.9' \
+         stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
+        icon_paths(name)
+    );
+    rsx! { span { class: "ic", dangerous_inner_html: svg } }
+}
+
 fn main() {
     // Logging: always to stderr, plus a rotating file at <app-data>/logs/zord.log
     // so a bundled GUI leaves a copy/pasteable trail when something fails. The
@@ -665,6 +716,8 @@ fn MainApp() -> Element {
 
     // Whether the mic is part of the current capture mode (system-only = no mic).
     let mic_in_capture = settings.read().capture_mode != "system";
+    // Appearance: tint session badges by meaning vs monochrome (Settings → Theme).
+    let tint_badges = settings.read().badge_tint;
 
     let on_mute = {
         let engine = engine.clone();
@@ -810,13 +863,13 @@ fn MainApp() -> Element {
                         class: if matches!(&*view.read(), View::Overview) { "rail-btn active" } else { "rail-btn" },
                         title: "Overview — a project-grouped rollup across recent meetings",
                         onclick: on_open_overview,
-                        "📊"
+                        {icon("overview")}
                     }
                     button {
                         class: if matches!(&*view.read(), View::Search) { "rail-btn active" } else { "rail-btn" },
                         title: "Search across every meeting's transcript",
                         onclick: on_open_search,
-                        "🔎"
+                        {icon("search")}
                     }
                 }
                 div { class: "rail-bottom",
@@ -832,7 +885,7 @@ fn MainApp() -> Element {
                         class: "rail-btn",
                         title: "Settings",
                         onclick: on_toggle_settings,
-                        "⚙"
+                        {icon("settings")}
                     }
                 }
             }
@@ -958,10 +1011,10 @@ fn MainApp() -> Element {
                                             div { class: "session-meta",
                                                 span { "{meta}" }
                                                 span { class: "badges",
-                                                    if b_sum { span { class: "badge", title: "Has summary", "✨" } }
-                                                    if b_comp { span { class: "badge", title: "Compressed", "🗜" } }
-                                                    if b_spk { span { class: "badge", title: "Speakers identified", "🗣" } }
-                                                    if b_audio { span { class: "badge", title: "Audio kept", "🎧" } }
+                                                    if b_sum { span { class: if tint_badges { "badge tint-sum" } else { "badge" }, title: "Has summary", {icon("sparkles")} } }
+                                                    if b_comp { span { class: if tint_badges { "badge tint-comp" } else { "badge" }, title: "Compressed", {icon("archive")} } }
+                                                    if b_spk { span { class: if tint_badges { "badge tint-spk" } else { "badge" }, title: "Speakers identified", {icon("users")} } }
+                                                    if b_audio { span { class: if tint_badges { "badge tint-audio" } else { "badge" }, title: "Audio kept", {icon("headphones")} } }
                                                 }
                                             }
                                         }
@@ -973,13 +1026,13 @@ fn MainApp() -> Element {
                                                     edit_text.set(title_edit.clone());
                                                     editing.set(Some(id_edit.clone()));
                                                 },
-                                                "✏"
+                                                {icon("pen")}
                                             }
                                             button {
                                                 class: "row-btn",
                                                 title: "Delete",
                                                 onclick: move |_| confirm_delete.set(Some(id_del.clone())),
-                                                "🗑"
+                                                {icon("trash")}
                                             }
                                         }
                                     }
@@ -998,13 +1051,15 @@ fn MainApp() -> Element {
                             class: if *mic_muted.read() { "record muted" } else { "record mute" },
                             title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
                             onclick: on_mute,
-                            if *mic_muted.read() { "🔇 Unmute" } else { "🎤 Mute" }
+                            {icon(if *mic_muted.read() { "mic-off" } else { "mic" })}
+                            if *mic_muted.read() { "Unmute" } else { "Mute" }
                         }
                     }
                     button {
                         class: if recording { "record stop" } else { "record" },
                         onclick: on_record,
-                        if recording { "■ Stop" } else { "● Record" }
+                        {icon(if recording { "stop" } else { "record" })}
+                        if recording { "Stop" } else { "Record" }
                     }
                 }
             }
@@ -1078,7 +1133,8 @@ fn MainApp() -> Element {
                                         class: if gen_busy { "tbtn busy" } else { "tbtn" },
                                         title: "Run AI / speaker actions on this meeting",
                                         onclick: move |_| { let v = *show_generate_menu.peek(); show_generate_menu.set(!v); },
-                                        if gen_busy { "✨ Working… ▾" } else { "✨ Generate ▾" }
+                                        {icon("sparkles")}
+                                        if gen_busy { "Working… ▾" } else { "Generate ▾" }
                                     }
                                     if *show_generate_menu.read() {
                                         div { class: "dd-backdrop", onclick: move |_| show_generate_menu.set(false) }
@@ -1098,7 +1154,7 @@ fn MainApp() -> Element {
                                                     }));
                                                     let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
                                                 },
-                                                span { "✨ " { if has_summary { "Re-summarize" } else { "Summarize" } } }
+                                                span { {icon("sparkles")}  { if has_summary { "Re-summarize" } else { "Summarize" } } }
                                                 if summarizing() { span { class: "gen-state", "running…" } }
                                                 else if has_summary { span { class: "gen-state ok", "✓" } }
                                             }
@@ -1118,7 +1174,7 @@ fn MainApp() -> Element {
                                                     }));
                                                     let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
                                                 },
-                                                span { "🗜 " { if has_compressed { "Re-compress" } else { "Compress" } } }
+                                                span { {icon("archive")}  { if has_compressed { "Re-compress" } else { "Compress" } } }
                                                 if compressing() { span { class: "gen-state", "running…" } }
                                                 else if has_compressed { span { class: "gen-state ok", "✓" } }
                                             }
@@ -1142,7 +1198,7 @@ fn MainApp() -> Element {
                                                         let n = diar_speakers.peek().trim().parse::<u32>().unwrap_or(0);
                                                         let _ = eng_diar.db_tx.send(DbCmd::Diarize { id: sid_diar.clone(), num_speakers: n });
                                                     },
-                                                    span { "🗣 " { if diarizing() { "Identifying…" } else { "Identify speakers" } } }
+                                                    span { {icon("users")}  { if diarizing() { "Identifying…" } else { "Identify speakers" } } }
                                                     if !has_others_audio { span { class: "gen-state", "no audio" } }
                                                 }
                                                 input {
@@ -1165,7 +1221,7 @@ fn MainApp() -> Element {
                                                     if *retranscribing.peek() || !has_any_audio { return; }
                                                     confirm_retranscribe.set(Some(sid_rt.clone()));
                                                 },
-                                                span { "🔁 " { if retranscribing() { "Re-transcribing…" } else { "Re-transcribe" } } }
+                                                span { {icon("refresh")}  { if retranscribing() { "Re-transcribing…" } else { "Re-transcribe" } } }
                                                 if !has_any_audio { span { class: "gen-state", "no audio" } }
                                             }
                                         }
@@ -1188,14 +1244,16 @@ fn MainApp() -> Element {
                                         osutil::copy_to_clipboard(&text);
                                         notice.set(Some("Transcript copied to clipboard".to_string()));
                                     },
-                                    "📋 Copy"
+                                    {icon("copy")}
+                                    "Copy"
                                 }
                                 div { class: "export-dd",
                                     button {
                                         class: "tbtn",
                                         title: "Export this transcript to a file",
                                         onclick: move |_| { let v = *show_export_menu.peek(); show_export_menu.set(!v); },
-                                        "⤓ Export ▾"
+                                        {icon("export")}
+                                        "Export ▾"
                                     }
                                     if *show_export_menu.read() {
                                         div { class: "dd-backdrop", onclick: move |_| show_export_menu.set(false) }
@@ -1213,12 +1271,12 @@ fn MainApp() -> Element {
                                             let p = path.clone();
                                             move |_| osutil::reveal_in_file_manager(&p)
                                         },
-                                        "📂 Reveal"
+                                        {icon("folder")} "Reveal"
                                     }
                                     button {
                                         class: "tbtn ghost",
                                         onclick: move |_| osutil::open_in_editor(&path),
-                                        "📝 Open"
+                                        {icon("external")} "Open"
                                     }
                                 }
                             }
@@ -1265,7 +1323,7 @@ fn MainApp() -> Element {
                                                     let _ = eng_del.db_tx.send(DbCmd::ClearSummary(did.clone()));
                                                     notice.set(Some("Summary deleted".to_string()));
                                                 },
-                                                "🗑"
+                                                {icon("trash")}
                                             }
                                         }
                                     }
@@ -1321,7 +1379,7 @@ fn MainApp() -> Element {
                                                     let _ = eng_del.db_tx.send(DbCmd::ClearCompressed(did.clone()));
                                                     notice.set(Some("Compressed text deleted".to_string()));
                                                 },
-                                                "🗑"
+                                                {icon("trash")}
                                             }
                                         }
                                     }
@@ -1570,7 +1628,7 @@ fn MainApp() -> Element {
                                                                 osutil::open_folder(&d.display().to_string());
                                                             }
                                                         },
-                                                        "📁 Open models folder"
+                                                        {icon("folder")} "Open models folder"
                                                     }
                                                 }
                                             }
@@ -1579,6 +1637,7 @@ fn MainApp() -> Element {
                                 }
                                 div { class: "settings-layout",
                                 div { class: "settings-nav",
+                                    button { class: if *settings_tab.read() == "theme" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("theme".into()), "Theme" }
                                     button { class: if *settings_tab.read() == "transcription" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("transcription".into()), "Transcription" }
                                     button { class: if *settings_tab.read() == "ai" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("ai".into()), "AI" }
                                     button { class: if *settings_tab.read() == "speakers" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("speakers".into()), "Speakers" }
@@ -1588,6 +1647,25 @@ fn MainApp() -> Element {
                                     button { class: if *settings_tab.read() == "about" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("about".into()), "About" }
                                 }
                                 div { class: "settings-pane",
+                                if *settings_tab.read() == "theme" {
+                                section { class: "settings-section",
+                                    h3 { "Theme" }
+                                    div { class: "field-row",
+                                        label { class: "field-label", "Session badges: tint by meaning" }
+                                        button {
+                                            class: if settings.read().badge_tint { "toggle on" } else { "toggle" },
+                                            onclick: move |_| {
+                                                let mut s = settings.peek().clone();
+                                                s.badge_tint = !s.badge_tint;
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            if settings.read().badge_tint { "Tinted" } else { "Mono" }
+                                        }
+                                    }
+                                    p { class: "field-note", "The summary / compressed / speakers badges in the sidebar are color-coded by meaning (cyan / amber / green) so you can read a session at a glance. Turn off for a calmer, monochrome look." }
+                                }
+                                }
                                 if *settings_tab.read() == "transcription" {
                                 section { class: "settings-section",
                                     h3 { "Transcription" }
@@ -2285,7 +2363,7 @@ fn TranscriptView(
                                         on_play.call(Some((wav_play.clone(), sid.unwrap_or_default(), t0, t1)));
                                     }
                                 },
-                                if is_playing { "⏹" } else { "▶" }
+                                {icon(if is_playing { "stop" } else { "play" })}
                             }
                         }
                     }
@@ -2408,7 +2486,7 @@ fn OverviewView(
     rsx! {
         div { class: "overview",
             div { class: "overview-head",
-                h2 { "📊 Overview" }
+                h2 { "Overview" }
                 div { class: "overview-actions",
                     if let Some(d) = &data {
                         span { class: "overview-meta",
@@ -2621,7 +2699,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             osutil::open_folder(&d.display().to_string());
                         }
                     },
-                    "📁 Models"
+                    {icon("folder")} "Models"
                 }
                 button {
                     class: "mbtn",
@@ -2631,7 +2709,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             osutil::open_folder(&d.display().to_string());
                         }
                     },
-                    "📁 Data"
+                    {icon("folder")} "Data"
                 }
                 button {
                     class: "mbtn",
@@ -2641,7 +2719,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             osutil::open_folder(&d.display().to_string());
                         }
                     },
-                    "📁 Recordings"
+                    {icon("folder")} "Recordings"
                 }
                 button {
                     class: "mbtn",
@@ -2651,7 +2729,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             osutil::open_folder(&d.display().to_string());
                         }
                     },
-                    "📁 Exports"
+                    {icon("folder")} "Exports"
                 }
                 button {
                     class: "mbtn",
@@ -2661,7 +2739,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             osutil::open_folder(&d.display().to_string());
                         }
                     },
-                    "📁 Logs"
+                    {icon("folder")} "Logs"
                 }
             }
 
@@ -2676,7 +2754,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             osutil::reveal_in_file_manager(&p.display().to_string());
                         }
                     },
-                    "📄 Config"
+                    {icon("file-text")} "Config"
                 }
                 button {
                     class: "mbtn ghost",
@@ -2686,7 +2764,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             osutil::reveal_in_file_manager(&p.display().to_string());
                         }
                     },
-                    "📄 Database"
+                    {icon("database")} "Database"
                 }
             }
 
@@ -2701,7 +2779,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             _ => notice.set(Some("No log file yet — it appears after the next launch.".to_string())),
                         }
                     },
-                    "📝 Open log"
+                    {icon("external")} "Open log"
                 }
                 button {
                     class: "mbtn ghost",
@@ -2718,7 +2796,7 @@ fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
                             Err(_) => notice.set(Some("No log file to copy yet.".to_string())),
                         }
                     },
-                    "📋 Copy recent log"
+                    {icon("copy")} "Copy recent log"
                 }
             }
         }
@@ -2899,13 +2977,13 @@ fn JobsPanel(
                 for (key, start) in rows {
                     {
                         let elapsed = now.saturating_sub(start) / 1000;
-                        let (icon, title) = job_label(&key);
+                        let (ic_name, title) = job_label(&key);
                         // Per-job detail, optional progress %, and ETA.
                         let (detail, pct): (String, Option<u8>) =
                             job_detail(key.as_str(), &mp, est, elapsed);
                         rsx! {
                             div { key: "{key}", class: "job-row",
-                                span { class: "job-icon", "{icon}" }
+                                span { class: "job-icon", {icon(ic_name)} }
                                 div { class: "job-main",
                                     div { class: "job-title", "{title}" }
                                     div { class: "job-detail", "{detail}" }
@@ -2935,18 +3013,18 @@ fn status_label(st: &Status) -> String {
     }
 }
 
-/// Icon + label for a background-job key.
+/// Icon name (registry key) + label for a background-job key.
 fn job_label(key: &str) -> (&'static str, &'static str) {
     match key {
-        "record" => ("🔴", "Recording"),
-        "transcribe" => ("🔁", "Transcribing"),
-        "download" => ("⬇", "Downloading model"),
-        "summarize" => ("✨", "Summarizing"),
-        "compress" => ("🗜", "Compressing"),
-        "overview" => ("📊", "Building overview"),
-        "chat" => ("💬", "Answering chat"),
-        "diarize" => ("🗣", "Identifying speakers"),
-        _ => ("•", "Working"),
+        "record" => ("record", "Recording"),
+        "transcribe" => ("refresh", "Transcribing"),
+        "download" => ("download", "Downloading model"),
+        "summarize" => ("sparkles", "Summarizing"),
+        "compress" => ("archive", "Compressing"),
+        "overview" => ("overview", "Building overview"),
+        "chat" => ("chat", "Answering chat"),
+        "diarize" => ("users", "Identifying speakers"),
+        _ => ("", "Working"),
     }
 }
 
