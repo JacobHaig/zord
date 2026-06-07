@@ -97,7 +97,9 @@ body {
 /* Icon sizing inside the various buttons that now lead with an icon. */
 .record .ic { width: 15px; height: 15px; }
 .row-btn .ic, .play-btn .ic { width: 15px; height: 15px; }
-.gen-item .ic { width: 16px; height: 16px; flex-shrink: 0; }
+.gen-item .ic { width: 16px; height: 16px; flex-shrink: 0; margin-right: 10px; }
+/* The trailing "done" check sits flush; only the leading action icon is spaced. */
+.gen-state .ic { margin-right: 0; }
 .mbtn .ic { width: 15px; height: 15px; }
 .record:hover { filter: brightness(1.08); }
 .record.stop { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); }
