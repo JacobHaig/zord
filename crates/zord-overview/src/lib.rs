@@ -10,6 +10,9 @@
 //! them → if they fit the configured context, synthesize in one pass; otherwise
 //! condense in groups first (hierarchical fallback) → store + return the rollup.
 
+pub mod extract;
+pub use extract::{ExtractedItem, ExtractedProject, ResolvedMention, SessionExtract};
+
 use anyhow::Result;
 #[cfg(any(feature = "llama", feature = "remote"))]
 use std::path::Path;

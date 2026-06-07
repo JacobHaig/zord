@@ -246,6 +246,39 @@ pub fn compress_prompt() -> &'static str {
      Be as short as the facts allow."
 }
 
+/// System prompt for the Phase 26 **structured extract**: read ONE meeting and
+/// emit a machine-readable JSON delta (projects touched + action items, open
+/// questions, and decisions, plus which prior threads this meeting resolved).
+/// Stateless — it sees only this meeting; the merge engine reconciles the
+/// output against the running ledger. The strict JSON shape is what
+/// `zord-overview`'s parser expects; any prose around it is tolerated but the
+/// object must be valid.
+pub fn extract_prompt() -> &'static str {
+    "You read the transcript (or dense summary) of ONE meeting and extract its \
+     concrete, trackable content as JSON. The user is \"Me\"; other speakers \
+     appear by name or as \"Speaker N\". Output ONLY a single JSON object — no \
+     markdown, no commentary, no code fences — with this exact shape:\n\
+     {\n\
+       \"projects\": [{\"name\": string, \"summary\": string}],\n\
+       \"items\": [{\"project\": string, \"kind\": \"action\"|\"question\"|\"decision\", \"text\": string, \"owner\": string|null, \"done\": boolean}],\n\
+       \"resolved\": [{\"project\": string, \"text\": string}]\n\
+     }\n\
+     Rules: \"projects\" lists every distinct project/topic/workstream this \
+     meeting touched, each with a one-line state \"summary\". Use a short, stable, \
+     human \"name\" you'd reuse across meetings (e.g. \"Billing migration\"), not a \
+     date or generic word like \"Meeting\". Every item's \"project\" MUST be one of \
+     those names. \"items\": \"action\" = a task someone will do (set \"owner\" to the \
+     responsible person, or null if unclear; \"done\":true only if it was reported \
+     completed IN THIS meeting). \"question\" = an unresolved/open question raised. \
+     \"decision\" = a choice the group made (owner usually null, done usually true). \
+     \"resolved\": things described as now finished, answered, or closed that were \
+     likely started in an EARLIER meeting — short descriptions the reconciler can \
+     match to existing open items (do NOT also list these as items). Attribute to \
+     real names from the transcript; never invent owners, tasks, decisions, or \
+     completions. If the meeting has no trackable content, return empty arrays. \
+     Keep every \"text\" to one concise sentence."
+}
+
 /// System prompt for auto-titling a recorded session from its summary/transcript.
 pub fn title_prompt() -> &'static str {
     "You write a short, specific title for a meeting from its notes. Reply with \
