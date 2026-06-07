@@ -1,9 +1,18 @@
 # Zord
 
 A fast, fully-local desktop app that records your microphone **and** desktop/system
-audio and transcribes it (Whisper / optional Parakeet), with local AI summaries,
-search, export, and at-rest encryption. Rust workspace + Dioxus 0.7 desktop GUI.
-See `README.md` (usage) and `docs/PLAN.md` (design + phase roadmap).
+audio and transcribes it (Whisper / optional Parakeet), labeled Me vs Others on one
+timeline. Optional, all-local: AI summaries / compression / cross-meeting overview /
+chat (built-in llama.cpp **or** any OpenAI-compatible server), per-speaker
+diarization, full-text search, export, per-channel audio levels, deferred &
+re-transcription, per-line audio replay, and at-rest encryption. Rust workspace +
+Dioxus 0.7 desktop GUI (icon-rail shell) + a `zord` CLI + a localhost web dashboard.
+See `README.md` (usage), `docs/PLAN.md` (design + phase roadmap), and
+`docs/SECURITY.md` (security posture).
+
+Optional capabilities are Cargo features so the default build stays lean: `parakeet`,
+`llm-local` / `llm-remote` (AI features), `diarization`, `encryption`. Releases ship
+all of them. Never add `Co-Authored-By` trailers to commits.
 
 ## Repo Memory
 
