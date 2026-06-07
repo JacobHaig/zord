@@ -16,10 +16,10 @@ parakeet = ["zord-transcribe/parakeet"]
 encryption = ["zord-store/encryption", "zord-config/encryption", "dep:rpassword"]
 # AI features (summarize/compress/overview) with the built-in local LLM
 # (llama.cpp — heavy build).
-llm-local = ["dep:zord-summarize", "zord-summarize/llama", "dep:zord-overview", "zord-overview/llama"]
+llm-local = ["dep:zord-summarize", "zord-summarize/llama", "zord-overview/llama"]
 # Same AI features against a user-provided OpenAI-compatible server. Pure
 # HTTP — no llama.cpp toolchain. Composes with llm-local.
-llm-remote = ["dep:zord-summarize", "zord-summarize/remote", "dep:zord-overview", "zord-overview/remote"]
+llm-remote = ["dep:zord-summarize", "zord-summarize/remote", "zord-overview/remote"]
 # Enable per-speaker diarization (sherpa-onnx).
 diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 
@@ -39,5 +39,8 @@ clap = { version = "4", features = ["derive"] }
 hound = "3.5"
 rpassword = { version = "7", optional = true }
 zord-summarize = { workspace = true, optional = true }
-zord-overview = { workspace = true, optional = true }
+# Always present: its ledger types + ledger_context printer are AI-free (the
+# fold/rebuild fns are feature-gated inside the crate). The llm-* features turn
+# on its backend-bearing code.
+zord-overview = { workspace = true }
 zord-diarize = { workspace = true, optional = true }

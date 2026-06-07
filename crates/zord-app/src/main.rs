@@ -114,12 +114,17 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
-    /// Synthesize a cross-meeting Overview across recent sessions (lazily
-    /// compressing any that aren't yet). Requires `--features llm-local` or `llm-remote`.
+    /// Print the rolling project ledger. `--refresh` folds in new meetings
+    /// first; `--rebuild` wipes and replays every meeting (destructive — drops
+    /// manual edits). Fold/rebuild need `--features llm-local` or `llm-remote`;
+    /// plain printing does not.
     Overview {
-        /// How many recent meetings to include (default: config setting).
+        /// Fold not-yet-applied meetings into the ledger before printing.
         #[arg(long)]
-        max: Option<u32>,
+        refresh: bool,
+        /// Wipe the ledger and replay every meeting (DESTRUCTIVE).
+        #[arg(long)]
+        rebuild: bool,
         #[arg(long)]
         db: Option<PathBuf>,
     },
@@ -172,7 +177,7 @@ fn main() -> Result<()> {
         Cmd::Decrypt { db } => cmd_decrypt(db),
         Cmd::Summarize { session_id, db } => cmd_summarize(&session_id, db),
         Cmd::Compress { session_id, db } => cmd_compress(&session_id, db),
-        Cmd::Overview { max, db } => cmd_overview(max, db),
+        Cmd::Overview { refresh, rebuild, db } => cmd_overview(refresh, rebuild, db),
         Cmd::Diarize { session_id, db } => cmd_diarize(&session_id, db),
     }
 }
@@ -319,29 +324,43 @@ fn cmd_compress(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote`")
 }
 
-#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn cmd_overview(max: Option<u32>, db: Option<PathBuf>) -> Result<()> {
+/// Print the project ledger (Phase 26). Optionally fold pending meetings or
+/// rebuild from scratch first (both need an AI build). Printing itself is
+/// LLM-free, so it works in any build once the ledger has been folded.
+fn cmd_overview(refresh: bool, rebuild: bool, db: Option<PathBuf>) -> Result<()> {
     let db_path = resolve_db(db)?;
-    let mut settings = zord_config::Settings::load();
-    if let Some(m) = max {
-        settings.overview_max_meetings = m;
+    if rebuild || refresh {
+        fold_ledger(&db_path, rebuild)?;
     }
-    eprintln!(
-        "Synthesizing overview across up to {} recent meeting(s) (ctx {} tokens)…",
-        settings.overview_max_meetings, settings.overview_ctx
-    );
+    let store = Store::open(&db_path)?;
+    match zord_overview::ledger_context(&store)? {
+        Some(text) => println!("{text}"),
+        None => eprintln!(
+            "The project ledger is empty. Run `zord overview --refresh` to fold your meetings in (needs an AI build: --features llm-local and/or llm-remote)."
+        ),
+    }
+    Ok(())
+}
+
+/// Fold pending meetings into the ledger, or rebuild it from scratch.
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+fn fold_ledger(db_path: &std::path::Path, rebuild: bool) -> Result<()> {
+    let settings = zord_config::Settings::load();
     let llm = build_llm_backend(&settings)?;
-    let result = zord_overview::synthesize(&db_path, &settings, &llm, &mut |note| {
-        eprintln!("  {note}");
-    })?;
-    println!("{}", result.text);
-    eprintln!("\nOverview covers {} meeting(s); stored in the database.", result.meetings);
+    let mut progress = |note: &str| eprintln!("  {note}");
+    if rebuild {
+        eprintln!("Rebuilding the ledger from every meeting (discards manual edits)…");
+        zord_overview::rebuild_from_history(db_path, &settings, &llm, &mut progress)?;
+    } else {
+        eprintln!("Folding new meetings into the ledger…");
+        zord_overview::fold_pending(db_path, &settings, &llm, &mut progress)?;
+    }
     Ok(())
 }
 
 #[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
-fn cmd_overview(_max: Option<u32>, _db: Option<PathBuf>) -> Result<()> {
-    anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote`")
+fn fold_ledger(_db_path: &std::path::Path, _rebuild: bool) -> Result<()> {
+    anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote` to fold/rebuild the ledger")
 }
 
 /// Align "Others" transcript segments to diarized speaker spans by max overlap,

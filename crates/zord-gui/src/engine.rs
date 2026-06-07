@@ -780,20 +780,27 @@ fn chat_one(
             None => return,
         },
         ChatScope::CrossMeeting => {
-            let mut progress = |note: &str| {
-                let _ = ev.send(Event::Notice(note.to_string()));
-            };
-            match zord_overview::cross_meeting_context(
-                &store,
-                llm,
-                &settings,
-                settings.overview_ctx,
-                &mut progress,
-            ) {
-                Ok((c, _)) => (c, settings.overview_ctx),
-                Err(e) => {
-                    let _ = ev.send(Event::Notice(format!("chat: {e}")));
-                    return;
+            // Phase 26f: ground on the structured ledger when it exists; fall back
+            // to the older per-meeting compressions until it's first folded.
+            match zord_overview::ledger_context(&store) {
+                Ok(Some(c)) => (c, settings.overview_ctx),
+                _ => {
+                    let mut progress = |note: &str| {
+                        let _ = ev.send(Event::Notice(note.to_string()));
+                    };
+                    match zord_overview::cross_meeting_context(
+                        &store,
+                        llm,
+                        &settings,
+                        settings.overview_ctx,
+                        &mut progress,
+                    ) {
+                        Ok((c, _)) => (c, settings.overview_ctx),
+                        Err(e) => {
+                            let _ = ev.send(Event::Notice(format!("chat: {e}")));
+                            return;
+                        }
+                    }
                 }
             }
         }

@@ -50,6 +50,62 @@ pub fn load(store: &Store) -> Result<Option<Overview>> {
     Ok(Some(Overview { text, meetings, generated_at_ms }))
 }
 
+/// Render the current ledger as plain-text grounding for cross-meeting chat and
+/// the CLI (Phase 26f). Active projects first, each with its open items (kind +
+/// owner) and a short tail of recently-completed items / decisions. Returns
+/// `None` when the ledger is empty so callers can fall back to the older
+/// compression-based context. No LLM needed.
+pub fn ledger_context(store: &Store) -> Result<Option<String>> {
+    use std::fmt::Write as _;
+    let projects = store.list_projects()?;
+    if projects.is_empty() {
+        return Ok(None);
+    }
+    const MAX_DONE_PER_PROJECT: usize = 8;
+    let mut out = String::new();
+    for p in &projects {
+        let archived = matches!(p.status, zord_core::ProjectStatus::Archived);
+        let _ = write!(out, "## {}", p.name);
+        if archived {
+            out.push_str(" (archived)");
+        }
+        if let Some(d) = p.description.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let _ = write!(out, " — {d}");
+        }
+        out.push('\n');
+
+        let items = store.list_items(&p.id)?;
+        let open: Vec<_> = items.iter().filter(|i| i.status.is_active()).collect();
+        let done: Vec<_> = items.iter().filter(|i| !i.status.is_active()).collect();
+
+        if open.is_empty() && done.is_empty() {
+            out.push_str("(no items yet)\n");
+        }
+        for it in &open {
+            let owner = it
+                .owner
+                .as_deref()
+                .map(|o| format!(", owner: {o}"))
+                .unwrap_or_default();
+            let status = if it.status == zord_core::ItemStatus::Open {
+                String::new()
+            } else {
+                format!(", {}", it.status.as_str())
+            };
+            let _ = writeln!(out, "- [{}{owner}{status}] {}", it.kind.as_str(), it.text);
+        }
+        if !done.is_empty() {
+            out.push_str("Recently completed / decided:\n");
+            // `done` are the trailing items (oldest→newest); show the last few.
+            for it in done.iter().rev().take(MAX_DONE_PER_PROJECT) {
+                let _ = writeln!(out, "- [{}, done] {}", it.kind.as_str(), it.text);
+            }
+        }
+        out.push('\n');
+    }
+    Ok(Some(out.trim_end().to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Synthesis (needs the local LLM)
 // ---------------------------------------------------------------------------
@@ -451,4 +507,71 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
     (y + if m <= 2 { 1 } else { 0 }, m, d)
+}
+
+#[cfg(test)]
+mod ledger_context_tests {
+    use super::*;
+    use zord_core::{ItemKind, ItemStatus, Project, ProjectItem, ProjectStatus};
+
+    #[test]
+    fn renders_projects_open_and_done() {
+        let dir = std::env::temp_dir().join(format!("zord-ctx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        let s = Store::open(&db).unwrap();
+
+        // Empty ledger -> None.
+        assert!(ledger_context(&s).unwrap().is_none());
+
+        s.create_project(&Project {
+            id: "p1".into(),
+            name: "Billing migration".into(),
+            status: ProjectStatus::Active,
+            description: Some("porting to v2".into()),
+            created_at: 1,
+            updated_at: 1,
+            last_activity_at: 1,
+        })
+        .unwrap();
+        s.add_item(&ProjectItem {
+            id: "i1".into(),
+            project_id: "p1".into(),
+            kind: ItemKind::Action,
+            text: "Write the adapter".into(),
+            owner: Some("Sarah".into()),
+            status: ItemStatus::Open,
+            created_session: None,
+            updated_session: None,
+            completed_session: None,
+            created_at: 1,
+            updated_at: 1,
+            manual: false,
+        })
+        .unwrap();
+        s.add_item(&ProjectItem {
+            id: "i2".into(),
+            project_id: "p1".into(),
+            kind: ItemKind::Decision,
+            text: "Drop legacy endpoint".into(),
+            owner: None,
+            status: ItemStatus::Done,
+            created_session: None,
+            updated_session: None,
+            completed_session: Some("sess-1".into()),
+            created_at: 2,
+            updated_at: 2,
+            manual: false,
+        })
+        .unwrap();
+
+        let ctx = ledger_context(&s).unwrap().unwrap();
+        assert!(ctx.contains("## Billing migration — porting to v2"));
+        assert!(ctx.contains("[action, owner: Sarah] Write the adapter"));
+        assert!(ctx.contains("Recently completed / decided:"));
+        assert!(ctx.contains("[decision, done] Drop legacy endpoint"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
