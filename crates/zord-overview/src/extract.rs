@@ -142,8 +142,8 @@ fn normalize_kind(kind: &str) -> String {
 
 /// Return the slice of `s` covering the first complete, brace-balanced JSON
 /// object (string-aware, so braces inside string literals don't count). `None`
-/// if there's no balanced object.
-fn first_json_object(s: &str) -> Option<&str> {
+/// if there's no balanced object. Shared with the reconcile parser.
+pub(crate) fn first_json_object(s: &str) -> Option<&str> {
     let bytes = s.as_bytes();
     let start = bytes.iter().position(|&b| b == b'{')?;
     let mut depth = 0i32;

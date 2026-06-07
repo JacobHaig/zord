@@ -11,7 +11,9 @@
 //! condense in groups first (hierarchical fallback) → store + return the rollup.
 
 pub mod extract;
+pub mod reconcile;
 pub use extract::{ExtractedItem, ExtractedProject, ResolvedMention, SessionExtract};
+pub use reconcile::{FoldStats, LedgerSnapshot, ReconcilePlan};
 
 use anyhow::Result;
 #[cfg(any(feature = "llama", feature = "remote"))]
@@ -106,6 +108,130 @@ pub fn cross_meeting_context(
     let meetings = digests.len();
     let context = fit_to_budget(llm, &digests, n_ctx.clamp(8192, 131_072), 768, settings, progress)?;
     Ok((context, meetings))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 26 — the rolling ledger fold (extract → reconcile → apply)
+// ---------------------------------------------------------------------------
+
+/// Fold one meeting into the ledger: extract its structured content, reconcile
+/// it against the current ledger, and apply the plan. Idempotent at the call
+/// site (callers fold only `unapplied_sessions`); on success the session is
+/// marked applied with its extract cached for later re-folds. A meeting with no
+/// transcript or nothing trackable is still marked applied (so it isn't retried)
+/// and contributes no changes.
+///
+/// `now` is taken from the meeting's own time, not wall-clock, so an incremental
+/// fold and a from-scratch rebuild produce identical activity ordering.
+#[cfg(any(feature = "llama", feature = "remote"))]
+pub fn fold_session(
+    store: &Store,
+    llm: &zord_summarize::LlmBackend,
+    settings: &Settings,
+    session: &zord_core::Session,
+    progress: &mut dyn FnMut(&str),
+) -> Result<reconcile::FoldStats> {
+    let now = session.ended_at.unwrap_or(session.started_at);
+    let n_ctx = settings.overview_ctx.clamp(8192, 131_072);
+
+    // Reuse the meeting's dense compression as extract input (lazily building it):
+    // it already preserves owners/decisions/questions and is guaranteed to fit.
+    let Some(input) = compressed_for(store, llm, session, settings, progress)? else {
+        store.mark_session_applied(&session.id, None, now)?; // nothing recorded
+        return Ok(reconcile::FoldStats::default());
+    };
+
+    let extract = extract::extract_session(llm, &input, n_ctx)?;
+    let extract_json = serde_json::to_string(&extract).ok();
+    if extract.is_empty() {
+        store.mark_session_applied(&session.id, extract_json.as_deref(), now)?;
+        return Ok(reconcile::FoldStats::default());
+    }
+
+    let snap = reconcile::snapshot(store)?;
+    let plan = reconcile::plan_fold(llm, &snap, &extract, n_ctx)?;
+    let stats = reconcile::apply_plan(store, &session.id, now, &plan)?;
+    store.mark_session_applied(&session.id, extract_json.as_deref(), now)?;
+    Ok(stats)
+}
+
+/// Fold every not-yet-applied meeting into the ledger, oldest first (the lazy
+/// "refresh" path). Already-folded meetings are skipped via
+/// [`Store::unapplied_sessions`], so this is cheap to call repeatedly.
+#[cfg(any(feature = "llama", feature = "remote"))]
+pub fn fold_pending(
+    db_path: &Path,
+    settings: &Settings,
+    llm: &zord_summarize::LlmBackend,
+    progress: &mut dyn FnMut(&str),
+) -> Result<reconcile::FoldStats> {
+    let store = Store::open(db_path)?;
+    let pending = store.unapplied_sessions()?;
+    if pending.is_empty() {
+        progress("Overview is up to date — no new meetings to fold.");
+        return Ok(reconcile::FoldStats::default());
+    }
+    let mut total = reconcile::FoldStats::default();
+    for (i, s) in pending.iter().enumerate() {
+        progress(&format!(
+            "Folding meeting {}/{} — {}…",
+            i + 1,
+            pending.len(),
+            meeting_title(s)
+        ));
+        total.merge(fold_session(&store, llm, settings, s, progress)?);
+    }
+    progress(&format!(
+        "Overview updated — {} meeting(s) folded ({} new items, {} completed).",
+        pending.len(),
+        total.items_added,
+        total.items_completed
+    ));
+    Ok(total)
+}
+
+/// Wipe the ledger and rebuild it from every meeting in chronological order.
+/// **Destructive**: this clears all projects, items, and any manual edits the
+/// user made — callers must confirm first. Because [`Store::clear_ledger`] also
+/// clears applied-state, the rebuild is just a clear followed by a full fold.
+#[cfg(any(feature = "llama", feature = "remote"))]
+pub fn rebuild_from_history(
+    db_path: &Path,
+    settings: &Settings,
+    llm: &zord_summarize::LlmBackend,
+    progress: &mut dyn FnMut(&str),
+) -> Result<reconcile::FoldStats> {
+    progress("Clearing the existing ledger (manual edits will be lost)…");
+    Store::open(db_path)?.clear_ledger()?;
+    fold_pending(db_path, settings, llm, progress)
+}
+
+/// The dense compression to feed the extractor for one session: reuse the stored
+/// one, else build it from the transcript and persist it. `None` if the session
+/// has no recorded segments.
+#[cfg(any(feature = "llama", feature = "remote"))]
+fn compressed_for(
+    store: &Store,
+    llm: &zord_summarize::LlmBackend,
+    session: &zord_core::Session,
+    settings: &Settings,
+    progress: &mut dyn FnMut(&str),
+) -> Result<Option<String>> {
+    if let Some(c) = store.get_compressed(&session.id)? {
+        if !c.trim().is_empty() {
+            return Ok(Some(c));
+        }
+    }
+    let segs = store.segments(&session.id)?;
+    if segs.is_empty() {
+        return Ok(None);
+    }
+    progress(&format!("Compressing {}…", meeting_title(session)));
+    let names = store.speaker_names(&session.id).unwrap_or_default();
+    let transcript = build_transcript(&segs, &names);
+    let c = llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+    store.set_compressed(&session.id, &c)?;
+    Ok(Some(c))
 }
 
 /// Gather up to `overview_max_meetings` recent meetings as `(header, compressed)`

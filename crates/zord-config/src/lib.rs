@@ -279,6 +279,44 @@ pub fn extract_prompt() -> &'static str {
      Keep every \"text\" to one concise sentence."
 }
 
+/// System prompt for the Phase 26 **reconcile** pass: fold one meeting's
+/// structured extract into the running ledger. The model is given the existing
+/// ledger (projects + their still-open items, each with a stable id) and the new
+/// extract, and must decide — *referencing only real ids* — which existing
+/// projects/items the meeting maps to, which open items it closed, and what is
+/// genuinely new. The strict JSON shape is what `zord-overview`'s reconciler
+/// parses; every id it returns is validated against the real ledger afterward,
+/// so inventing an id simply drops that operation.
+pub fn reconcile_prompt() -> &'static str {
+    "You maintain a running project ledger by folding in ONE new meeting. You are \
+     given EXISTING LEDGER (projects, each with an id and its still-open items, \
+     each item with an id) and a NEW EXTRACT from the latest meeting. Decide how \
+     the meeting updates the ledger and output ONLY a single JSON object — no \
+     markdown, no commentary, no code fences — with this exact shape:\n\
+     {\n\
+       \"projects\": [{\"match_id\": string|null, \"name\": string, \"summary\": string}],\n\
+       \"complete\": [{\"id\": string, \"why\": string}],\n\
+       \"add\": [{\"project\": string, \"kind\": \"action\"|\"question\"|\"decision\", \"text\": string, \"owner\": string|null, \"done\": boolean}]\n\
+     }\n\
+     Rules. \"projects\": one entry per project the meeting touched. If it is the \
+     SAME project as an existing one (same work, even if named slightly \
+     differently), set \"match_id\" to that project's id and reuse its existing \
+     \"name\"; otherwise set \"match_id\" to null to create it. \"summary\" is the \
+     updated one-line state. \"complete\": existing open items (BY THEIR id) that \
+     this meeting reports finished, answered, or closed. Work through EACH \
+     resolved mention in the extract, EACH task it says got done, and EACH open \
+     question it answered; find the EXISTING LEDGER item that matches it by \
+     meaning (the wording will differ) and put that item's id here. This is how \
+     finished work leaves the ledger — do not skip it. Only ever cite an id that \
+     appears in EXISTING LEDGER; never invent one, and never mark something done \
+     unless the meeting actually says so. \"add\": genuinely NEW items not already \
+     in the ledger — do NOT re-add an existing open item, and do NOT add an item \
+     you also listed in \"complete\". Each add's \"project\" MUST equal one of the \
+     \"name\" values above. Set \"done\":true only for items completed in this very \
+     meeting (e.g. a decision). Attribute owners only to real names; null if \
+     unclear. If the meeting changes nothing, return empty arrays."
+}
+
 /// System prompt for auto-titling a recorded session from its summary/transcript.
 pub fn title_prompt() -> &'static str {
     "You write a short, specific title for a meeting from its notes. Reply with \
