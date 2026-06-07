@@ -130,7 +130,8 @@ pub struct Settings {
     pub retranscribe_model: String,
     /// Tint the sidebar session badges by meaning (summary/compressed/speakers)
     /// vs render them monochrome. Appearance preference (Settings → Theme).
-    #[serde(default = "default_true")]
+    /// Default monochrome (`false`).
+    #[serde(default)]
     pub badge_tint: bool,
     /// Microphone ("Me") capture level mode: "off" | "manual" | "auto".
     #[serde(default = "default_level_mode")]
@@ -376,7 +377,7 @@ impl Default for Settings {
             llm_api_key: String::new(),
             llm_model: String::new(),
             llm_timeout_secs: default_llm_timeout_secs(),
-            badge_tint: true,
+            badge_tint: false,
             mic_level_mode: default_level_mode(),
             mic_gain_db: 0.0,
             others_level_mode: default_level_mode(),

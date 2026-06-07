@@ -370,7 +370,8 @@ fn MainApp() -> Element {
     let mut chat_busy = use_signal(|| false);
     let chat_scope = use_signal(|| Option::<ChatScope>::None);
     // Collapse state for the chat panel (sticky, like the Summary/Compressed ones).
-    let show_chat = use_signal(|| true);
+    // Chat panels start collapsed — expand on demand.
+    let show_chat = use_signal(|| false);
     // Custom names for diarized speakers in the viewed session (index → name).
     let mut speaker_names = use_signal(std::collections::HashMap::<i32, String>::new);
     // Session id currently being renamed (+ its edit buffer); pending delete.
@@ -1638,13 +1639,13 @@ fn MainApp() -> Element {
                                 }
                                 div { class: "settings-layout",
                                 div { class: "settings-nav",
-                                    button { class: if *settings_tab.read() == "theme" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("theme".into()), "Theme" }
                                     button { class: if *settings_tab.read() == "transcription" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("transcription".into()), "Transcription" }
                                     button { class: if *settings_tab.read() == "ai" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("ai".into()), "AI" }
                                     button { class: if *settings_tab.read() == "speakers" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("speakers".into()), "Speakers" }
                                     button { class: if *settings_tab.read() == "recording" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("recording".into()), "Recording" }
                                     button { class: if *settings_tab.read() == "files" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("files".into()), "Files" }
                                     button { class: if *settings_tab.read() == "security" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("security".into()), "Security" }
+                                    button { class: if *settings_tab.read() == "theme" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("theme".into()), "Theme" }
                                     button { class: if *settings_tab.read() == "about" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("about".into()), "About" }
                                 }
                                 div { class: "settings-pane",
