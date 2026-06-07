@@ -355,7 +355,8 @@ body {
 .jobs-spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--me); border-top-color: transparent; display: inline-block; animation: jobspin 0.9s linear infinite; }
 @keyframes jobspin { to { transform: rotate(360deg); } }
 .jobs-overlay { position: fixed; inset: 0; z-index: 50; }
-.jobs-card { position: absolute; top: 60px; right: 24px; width: 340px; max-height: 70vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); padding: 12px 14px; }
+/* Anchored to the jobs button at the bottom of the icon rail (RAIL_W = 56). */
+.jobs-card { position: absolute; bottom: 16px; left: 64px; width: 340px; max-height: 70vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); padding: 12px 14px; }
 .jobs-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 8px; }
 .job-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
 .job-icon { font-size: 15px; flex-shrink: 0; }
