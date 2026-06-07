@@ -933,6 +933,93 @@ Sub-phases:
     1 h meeting both channels) vs ~1.9 MB/min at 16 kHz — 3×, bounded by the
     30-day default.
 
+### Phase 26 — Rolling project ledger (stateful Overview) ⭐ next — major, direction change
+
+Replace the stateless from-scratch Overview with a **durable, incrementally
+maintained per-project ledger**. Today `synthesize` recompresses recent
+meetings and re-derives one Markdown blob every refresh (`collect_digests →
+fit_to_budget → one pass`, stored in `app_meta["overview"]`); the token
+ceiling is the whole reason for compression. The new model keeps a persistent
+set of **projects**, each with a running record (status, active action items,
+completed items, open questions, decisions, history), and folds each new
+meeting in as a **delta**: route it to the right project(s), mark resolved
+items done, add new ones, transition statuses.
+
+**Why it also fixes the token problem:** each update reasons over only
+*(one project's current state) + (one meeting's delta)* — bounded regardless
+of how many meetings accumulate. The ledger is the memory; the LLM never sees
+the whole corpus at once.
+
+```
+TODAY:  [all compressions] → fit to budget → one blob   (recomputed each refresh)
+NEW:    meeting → extract delta → route to project(s) → merge into ledger
+                                                            │
+                          persistent projects ◄────────────┘
+                          (name · status · active items · done items · history)
+```
+
+**Decisions (June 2026):**
+- **Fold lazily, on Overview open/refresh** — apply not-yet-folded sessions in
+  chronological order, with progress; no surprise LLM work mid-recording.
+- **Auto-assign project routing** — LLM best guess (match existing / create
+  new); **low-confidence → an "Unfiled" bucket** for the user to assign/name.
+- **Full manual editing** — rename / merge / split / archive projects; add /
+  edit / complete / reopen items by hand. The ledger is the user's; the LLM
+  maintains it but never has the last word.
+- **Opt-in "Build from history"** replays all past sessions in order to seed
+  the initial ledger. ⚠ **Rebuild is DESTRUCTIVE to manual edits** — it
+  regenerates from the transcripts and discards hand corrections, so it warns +
+  confirms. Normal incremental folding **preserves** manual edits; only the
+  explicit full rebuild wipes.
+- **Provenance, no hallucinated completion** — an item is only marked done when
+  the transcript says so, and each status change records the session that
+  caused it (auditable "why is this done?").
+
+Sub-phases:
+- **26a — schema + store API.** New tables: `projects` (id, name, status,
+  description, created/updated, last-activity), `project_items` (id,
+  project_id, kind action|question|decision, text, owner, status
+  open|blocked|waiting|done, created/updated/completed-session, `manual` flag
+  so folding doesn't clobber hand-edited rows), `session_overview_state`
+  (session_id → applied_at + stored extract JSON, for idempotency + staleness
+  when a session is later re-transcribed/edited), and a `project_history`
+  audit log (item/status change → session, at). Migrations; no LLM yet.
+- **26b — per-meeting structured extract.** An LLM pass turns a session
+  (transcript, or its compression when long) into a schema'd delta: projects
+  touched + action items (with which prior items they resolve) + decisions +
+  open questions. Supersedes the free-prose compress for the ledger (compress
+  may stay as a chat-context fallback).
+- **26c — routing + merge engine** (rewrites `zord-overview`). `apply_session`:
+  extract → route each project (match-or-create against the existing
+  project-name list, with a confidence threshold → Unfiled) → merge the delta
+  into the matched project's state (mark done, add new, transition; never
+  delete history; stamp provenance). Idempotent + chronological. `fold_pending`
+  (apply unapplied sessions) and `rebuild_from_history` (destructive replay).
+- **26d — ledger Overview UI.** The Overview view becomes a project list
+  (active first), each expandable to status · active items · "show completed /
+  history" · open questions · decisions · source sessions. Refresh (fold
+  pending, with progress) + Build-from-history (with the destructive-rebuild
+  confirm). Unfiled bucket → assign to a project.
+- **26e — full editing.** Rename / merge / split / archive projects; item
+  add / edit / complete / reopen; the `manual` flag protects edited rows from
+  being overwritten by later folds.
+- **26f — chat + CLI.** Cross-meeting chat grounds on the structured ledger
+  (not the old compressions). CLI: `zord overview` prints the ledger;
+  `zord overview --rebuild` for the destructive replay.
+
+**Gaps / risks to watch:**
+- Entity resolution (project routing + item matching) is the error-prone core;
+  a small local model will misroute/duplicate. Mitigations: confidence →
+  Unfiled, easy correction, provenance, and the external-LLM option for users
+  who want a stronger model.
+- Idempotency + staleness: re-transcribing or editing an already-folded session
+  must mark it stale and offer a re-fold; never double-count.
+- Merge drift over many sessions → "Build from history" is the reset button
+  (destructive, by design).
+- Migration cost: replay is many LLM calls — progress + cancellable + opt-in.
+- The legacy `app_meta["overview"]` blob becomes vestigial; keep reading it for
+  one release so an upgrade isn't jarring, then drop.
+
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
 - ~~Multilingual UX~~ / ~~CUDA release builds~~ — **declined** (not wanted).
