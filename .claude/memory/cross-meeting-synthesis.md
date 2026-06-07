@@ -1,10 +1,16 @@
 ---
 name: cross-meeting-synthesis
-description: Phase 23 "Overview" — synthesize 30-50 meetings into per-project rollups via map-reduce, not one giant context
+description: Phase 23 Overview infra (compress per meeting + map-reduce) — the Overview OUTPUT is now the Phase 26 ledger; this records the still-used compression/chat infra
 metadata:
   node_type: memory
   type: project
 ---
+
+> **SUPERSEDED for the Overview output:** Phase 26 ([[project-ledger]]) replaced the
+> from-scratch markdown rollup with a durable per-project ledger. The **compression**
+> layer below (per-meeting dense prose) is STILL USED — as the extract input and the
+> chat fallback — so this stays relevant; but `synthesize()`/the markdown Overview is
+> legacy (kept read-only one release as an upgrade fallback). Read [[project-ledger]] first.
 
 Phase 23 is the headline feature: a holistic **cross-meeting Overview** — across
 the user's last ~30–50 recordings, a per-project picture of state / pending /
