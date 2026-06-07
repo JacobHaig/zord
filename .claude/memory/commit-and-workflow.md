@@ -19,6 +19,13 @@ Working conventions for this repo:
   Be explicit about what could NOT be verified ([[verification-limits]]).
 - **Keep docs in sync**: update `docs/PLAN.md` (phase status), `README.md`, and
   `docs/RELEASE.md` as part of the phase that changes behavior.
+- **Versioning — bump the PATCH only by default** (0.2.13 → 0.2.14 → …), even for
+  large/visible changes (the icon-rail UI overhaul shipped as a patch). **Never**
+  bump minor or major on your own — **ask first** if something seems to warrant
+  it. Release = edit `version` in `[workspace.package]` of `Cargo.toml`, `cargo
+  check` to refresh the lock, commit `chore: release vX.Y.Z` (body becomes the
+  GitHub release Highlights via the `notes` CI job) + tag `vX.Y.Z` + push both.
 
-**Why:** the user values diligence, honest reporting, and a clean history.
+**Why:** the user values diligence, honest reporting, a clean history, and a
+steady incremental version scheme (minor/major bumps are an owner decision).
 Related: [[docs-canonical]].
