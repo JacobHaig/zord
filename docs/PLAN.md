@@ -933,7 +933,7 @@ Sub-phases:
     1 h meeting both channels) vs ~1.9 MB/min at 16 kHz — 3×, bounded by the
     30-day default.
 
-### Phase 26 — Rolling project ledger (stateful Overview) ⭐ next — major, direction change
+### Phase 26 — Rolling project ledger (stateful Overview) ✅ DONE — major, direction change
 
 Replace the stateless from-scratch Overview with a **durable, incrementally
 maintained per-project ledger**. Today `synthesize` recompresses recent
@@ -975,8 +975,8 @@ NEW:    meeting → extract delta → route to project(s) → merge into ledger
   the transcript says so, and each status change records the session that
   caused it (auditable "why is this done?").
 
-Sub-phases:
-- **26a — schema + store API.** New tables: `projects` (id, name, status,
+Sub-phases (all shipped):
+- ✅ **26a — schema + store API.** New tables: `projects` (id, name, status,
   description, created/updated, last-activity), `project_items` (id,
   project_id, kind action|question|decision, text, owner, status
   open|blocked|waiting|done, created/updated/completed-session, `manual` flag
@@ -984,28 +984,41 @@ Sub-phases:
   (session_id → applied_at + stored extract JSON, for idempotency + staleness
   when a session is later re-transcribed/edited), and a `project_history`
   audit log (item/status change → session, at). Migrations; no LLM yet.
-- **26b — per-meeting structured extract.** An LLM pass turns a session
+- ✅ **26b — per-meeting structured extract.** An LLM pass turns a session
   (transcript, or its compression when long) into a schema'd delta: projects
   touched + action items (with which prior items they resolve) + decisions +
   open questions. Supersedes the free-prose compress for the ledger (compress
   may stay as a chat-context fallback).
-- **26c — routing + merge engine** (rewrites `zord-overview`). `apply_session`:
+- ✅ **26c — routing + merge engine** (in `zord-overview`). Split into
+  `plan_fold` (LLM) + `apply_plan` (backend-free, id-validated):
   extract → route each project (match-or-create against the existing
   project-name list, with a confidence threshold → Unfiled) → merge the delta
   into the matched project's state (mark done, add new, transition; never
   delete history; stamp provenance). Idempotent + chronological. `fold_pending`
   (apply unapplied sessions) and `rebuild_from_history` (destructive replay).
-- **26d — ledger Overview UI.** The Overview view becomes a project list
+- ✅ **26d — ledger Overview UI.** The Overview view becomes a project list
   (active first), each expandable to status · active items · "show completed /
   history" · open questions · decisions · source sessions. Refresh (fold
   pending, with progress) + Build-from-history (with the destructive-rebuild
   confirm). Unfiled bucket → assign to a project.
-- **26e — full editing.** Rename / merge / split / archive projects; item
+- ✅ **26e — full editing.** Rename / archive / delete projects; item
   add / edit / complete / reopen; the `manual` flag protects edited rows from
   being overwritten by later folds.
-- **26f — chat + CLI.** Cross-meeting chat grounds on the structured ledger
-  (not the old compressions). CLI: `zord overview` prints the ledger;
-  `zord overview --rebuild` for the destructive replay.
+- ✅ **26f — chat + CLI.** Cross-meeting chat grounds on the structured ledger
+  (falling back to the old compressions until first folded). CLI:
+  `zord overview` prints the ledger; `--refresh` folds pending, `--rebuild`
+  for the destructive replay.
+
+**Shipped notes / deviations from the sketch:**
+- Project routing uses match-by-id or null→create, with a normalized-name
+  merge guard; an explicit confidence *threshold* wasn't needed — the
+  reconcile model picks, and `apply_plan` validates every id (a bad/invented
+  id drops that op, so no phantom completions). Unroutable items → `Unfiled`.
+- 26e shipped rename/describe/archive/delete + item add/edit/complete/reopen/
+  move/delete. Project **merge/split** deferred (move-item covers the common
+  case; full merge/split is a later nicety).
+- Legacy `app_meta["overview"]` is still shown as a read-only fallback until
+  the ledger is first folded (graceful upgrade), then superseded.
 
 **Gaps / risks to watch:**
 - Entity resolution (project routing + item matching) is the error-prone core;
