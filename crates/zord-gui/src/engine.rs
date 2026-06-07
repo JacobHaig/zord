@@ -1720,7 +1720,7 @@ fn run_session(
     } else if !live {
         let _ = ev.send(Event::Notice(
             "Recording saved — transcription deferred. Open the session and press \
-             🔁 Re-transcribe (or turn on 'Transcribe automatically after recording' \
+             Re-transcribe (or turn on 'Transcribe automatically after recording' \
              in Settings)."
                 .to_string(),
         ));

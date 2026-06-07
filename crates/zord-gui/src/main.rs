@@ -37,6 +37,7 @@ fn icon_paths(name: &str) -> &'static str {
         "settings" => "<line x1='4' y1='8' x2='20' y2='8'/><line x1='4' y1='16' x2='20' y2='16'/><circle cx='9' cy='8' r='2.6'/><circle cx='15' cy='16' r='2.6'/>",
         "close" => "<line x1='6' y1='6' x2='18' y2='18'/><line x1='18' y1='6' x2='6' y2='18'/>",
         "check" => "<polyline points='4 12 10 18 20 6'/>",
+        "alert" => "<path d='M12 3l9 16H3z'/><line x1='12' y1='9' x2='12' y2='14'/><circle cx='12' cy='17' r='0.7' fill='currentColor' stroke='none'/>",
         // Recording controls
         "record" => "<circle cx='12' cy='12' r='6' fill='currentColor' stroke='none'/>",
         "stop" => "<rect x='6' y='6' width='12' height='12' rx='2'/>",
@@ -1095,7 +1096,7 @@ fn MainApp() -> Element {
                 if let Some(n) = notice.read().clone() {
                     div { class: "notice",
                         span { "{n}" }
-                        button { class: "notice-x", onclick: move |_| notice.set(None), "✕" }
+                        button { class: "notice-x", onclick: move |_| notice.set(None), {icon("close")} }
                     }
                 }
 
@@ -1156,7 +1157,7 @@ fn MainApp() -> Element {
                                                 },
                                                 span { {icon("sparkles")}  { if has_summary { "Re-summarize" } else { "Summarize" } } }
                                                 if summarizing() { span { class: "gen-state", "running…" } }
-                                                else if has_summary { span { class: "gen-state ok", "✓" } }
+                                                else if has_summary { span { class: "gen-state ok", {icon("check")} } }
                                             }
                                             // Compress
                                             button {
@@ -1176,7 +1177,7 @@ fn MainApp() -> Element {
                                                 },
                                                 span { {icon("archive")}  { if has_compressed { "Re-compress" } else { "Compress" } } }
                                                 if compressing() { span { class: "gen-state", "running…" } }
-                                                else if has_compressed { span { class: "gen-state ok", "✓" } }
+                                                else if has_compressed { span { class: "gen-state ok", {icon("check")} } }
                                             }
                                             // Identify speakers (+ expected-count input) — needs the Others track.
                                             div { class: "gen-item-row",
@@ -1457,7 +1458,7 @@ fn MainApp() -> Element {
                                     if settings.read().auto_transcribe {
                                         "Recording (capture only) — the transcript will be generated when you stop. Live transcription can be turned back on in Settings → Transcription."
                                     } else {
-                                        "Recording (capture only) — transcription is deferred. Press 🔁 Re-transcribe on the session afterwards, or turn on 'Transcribe automatically after recording' in Settings → Transcription."
+                                        "Recording (capture only) — transcription is deferred. Press Re-transcribe on the session afterwards, or turn on 'Transcribe automatically after recording' in Settings → Transcription."
                                     }
                                 }
                             } else {
@@ -1478,7 +1479,7 @@ fn MainApp() -> Element {
                         let engine = engine.clone();
                         rsx! {
                             ChatPanel {
-                                title: "💬 Ask this meeting".to_string(),
+                                title: "Ask this meeting".to_string(),
                                 placeholder: "Ask about this meeting — decisions, action items, who said what…".to_string(),
                                 chat, input: chat_input, busy: chat_busy, show: show_chat,
                                 on_send: move |_| submit_chat(&engine, ChatScope::Meeting(id.clone()), chat, chat_input, chat_scope, chat_busy),
@@ -1491,7 +1492,7 @@ fn MainApp() -> Element {
                         let engine = engine.clone();
                         rsx! {
                             ChatPanel {
-                                title: "💬 Ask across your meetings".to_string(),
+                                title: "Ask across your meetings".to_string(),
                                 placeholder: "Ask across recent meetings — where's project X, what do I owe, open questions…".to_string(),
                                 chat, input: chat_input, busy: chat_busy, show: show_chat,
                                 on_send: move |_| submit_chat(&engine, ChatScope::CrossMeeting, chat, chat_input, chat_scope, chat_busy),
@@ -1580,7 +1581,7 @@ fn MainApp() -> Element {
                         div { class: "overlay-card",
                             div { class: "overlay-head",
                                 h2 { "Settings" }
-                                button { class: "close-btn", onclick: move |_| show_settings.set(false), "✕" }
+                                button { class: "close-btn", onclick: move |_| show_settings.set(false), {icon("close")} }
                             }
                             div { class: "overlay-body",
                                 // Manual-download fallback when an in-app fetch fails
@@ -1595,8 +1596,8 @@ fn MainApp() -> Element {
                                         rsx! {
                                             div { class: "dl-help",
                                                 div { class: "dl-help-head",
-                                                    span { "⚠ Couldn't download \"{failed}\"" }
-                                                    button { class: "notice-x", onclick: move |_| download_help.set(None), "✕" }
+                                                    span { class: "dl-help-title", {icon("alert")} span { "Couldn't download \"{failed}\"" } }
+                                                    button { class: "notice-x", onclick: move |_| download_help.set(None), {icon("close")} }
                                                 }
                                                 p { class: "field-note", "Often a proxy / network block. Fetch it in your browser (which uses your proxy), then drop it in the models folder. If HuggingFace is blocked, use the modelscope.cn link below. Archives (.tar.bz2) must be extracted there first." }
                                                 for u in urls.iter() {
@@ -1669,7 +1670,7 @@ fn MainApp() -> Element {
                                 if *settings_tab.read() == "transcription" {
                                 section { class: "settings-section",
                                     h3 { "Transcription" }
-                                    p { class: "field-note", "One model catalog, two jobs: the Live model transcribes while you record (small = fewer CPU spikes); the Re model runs afterwards — 🔁 Re-transcribe and automatic post-passes — where bigger is usually worth it. Models download on first use." }
+                                    p { class: "field-note", "One model catalog, two jobs: the Live model transcribes while you record (small = fewer CPU spikes); the Re model runs afterwards — Re-transcribe and automatic post-passes — where bigger is usually worth it. Models download on first use." }
                                     div { class: "field-row",
                                         label { class: "field-label", "Live transcription (transcribe while recording)" }
                                         button {
@@ -1697,7 +1698,7 @@ fn MainApp() -> Element {
                                             if settings.read().auto_transcribe { "On" } else { "Off" }
                                         }
                                     }
-                                    p { class: "field-note", "Runs the Re model when you stop. With live transcription on, this upgrades the live transcript; with live off, this is when the transcript is generated (otherwise it waits for 🔁 Re-transcribe on the session)." }
+                                    p { class: "field-note", "Runs the Re model when you stop. With live transcription on, this upgrades the live transcript; with live off, this is when the transcript is generated (otherwise it waits for Re-transcribe on the session)." }
                                     for m in models.read().iter().filter(|m| m.kind == "transcription") {
                                         {
                                             let name = m.name.clone();
@@ -1732,7 +1733,7 @@ fn MainApp() -> Element {
                                                         }
                                                         button {
                                                             class: if is_re { "chip on" } else { "chip" },
-                                                            title: "Use this model for 🔁 Re-transcribe and automatic post-passes",
+                                                            title: "Use this model for Re-transcribe and automatic post-passes",
                                                             onclick: move |_| {
                                                                 let mut s = settings.peek().clone();
                                                                 s.retranscribe_model = n_re.clone();
@@ -2600,6 +2601,7 @@ fn ChatPanel(
                     class: "panel-toggle",
                     onclick: move |_| { let v = *show.peek(); show.set(!v); },
                     span { class: "chev", if open { "▾" } else { "▸" } }
+                    {icon("chat")}
                     span { "{title}" }
                 }
             }
@@ -2972,7 +2974,7 @@ fn JobsPanel(
                 onclick: move |e| e.stop_propagation(),
                 div { class: "jobs-head",
                     span { "Background jobs" }
-                    button { class: "close-btn", onclick: move |_| show_jobs.set(false), "✕" }
+                    button { class: "close-btn", onclick: move |_| show_jobs.set(false), {icon("close")} }
                 }
                 for (key, start) in rows {
                     {
