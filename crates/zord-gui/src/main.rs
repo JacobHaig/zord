@@ -20,6 +20,10 @@ use zord_transcribe::ModelId;
 
 const CSS: &str = include_str!("style.css");
 
+/// Width of the left icon rail in px (kept in sync with `.rail` in style.css);
+/// subtracted from the pointer x when dragging the sidebar splitter.
+const RAIL_W: u32 = 56;
+
 fn main() {
     // Logging: always to stderr, plus a rotating file at <app-data>/logs/zord.log
     // so a bundled GUI leaves a copy/pasteable trail when something fails. The
@@ -770,8 +774,9 @@ fn MainApp() -> Element {
             // handle is held; persist the final width when released.
             onmousemove: move |e| {
                 if *dragging_split.peek() {
-                    let x = e.client_coordinates().x;
-                    sidebar_w.set((x as u32).clamp(160, 480));
+                    // Subtract the icon rail's width — the sidebar starts to its right.
+                    let x = (e.client_coordinates().x as u32).saturating_sub(RAIL_W);
+                    sidebar_w.set(x.clamp(160, 480));
                 }
             },
             onmouseup: move |_| {
@@ -793,21 +798,42 @@ fn MainApp() -> Element {
                     settings.set(s);
                 }
             },
-            // ---- Sidebar: session history ----
+            // ---- Icon rail: global nav (top) + utilities (bottom) ----
+            nav { class: "rail",
+                div { class: "rail-top",
+                    div { class: "rail-brand", "Z" }
+                    button {
+                        class: if matches!(&*view.read(), View::Overview) { "rail-btn active" } else { "rail-btn" },
+                        title: "Overview — a project-grouped rollup across recent meetings",
+                        onclick: on_open_overview,
+                        "📊"
+                    }
+                    button {
+                        class: if matches!(&*view.read(), View::Search) { "rail-btn active" } else { "rail-btn" },
+                        title: "Search across every meeting's transcript",
+                        onclick: on_open_search,
+                        "🔎"
+                    }
+                }
+                div { class: "rail-bottom",
+                    if job_starts.read().len() > 0 {
+                        button {
+                            class: "rail-btn jobs",
+                            title: "Background jobs",
+                            onclick: move |_| { let v = *show_jobs.peek(); show_jobs.set(!v); },
+                            span { class: "jobs-spin" }
+                        }
+                    }
+                    button {
+                        class: "rail-btn",
+                        title: "Settings",
+                        onclick: on_toggle_settings,
+                        "⚙"
+                    }
+                }
+            }
+            // ---- Sidebar: session history + Record ----
             aside { class: "sidebar", style: "width: {sidebar_w}px;",
-                div { class: "brand", "ZORD" }
-                button {
-                    class: if matches!(&*view.read(), View::Overview) { "overview-btn active" } else { "overview-btn" },
-                    title: "A holistic, project-grouped rollup across your recent meetings",
-                    onclick: on_open_overview,
-                    "📊 Overview"
-                }
-                button {
-                    class: if matches!(&*view.read(), View::Search) { "overview-btn active" } else { "overview-btn" },
-                    title: "Search across every meeting's transcript",
-                    onclick: on_open_search,
-                    "🔎 Search"
-                }
                 div { class: "side-label", "Sessions" }
                 if sessions.read().len() > 6 {
                     input {
@@ -961,6 +987,22 @@ fn MainApp() -> Element {
                         }
                     }
                 }
+                // ---- Record: permanent primary at the sidebar foot ----
+                div { class: "sidebar-foot",
+                    if recording && mic_in_capture {
+                        button {
+                            class: if *mic_muted.read() { "record muted" } else { "record mute" },
+                            title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
+                            onclick: on_mute,
+                            if *mic_muted.read() { "🔇 Unmute" } else { "🎤 Mute" }
+                        }
+                    }
+                    button {
+                        class: if recording { "record stop" } else { "record" },
+                        onclick: on_record,
+                        if recording { "■ Stop" } else { "● Record" }
+                    }
+                }
             }
 
             // ---- Sidebar / main divider (drag to resize) ----
@@ -980,43 +1022,6 @@ fn MainApp() -> Element {
                         span { "{status_text}" }
                         if matches!(st, Status::Recording) {
                             span { class: "rec-timer", "{fmt_dur(rec_secs())}" }
-                        }
-                    }
-                    div { class: "topbar-actions",
-                        {
-                            let n = job_starts.read().len();
-                            if n > 0 {
-                                rsx! {
-                                    button {
-                                        class: "jobs-btn",
-                                        title: "Background jobs",
-                                        onclick: move |_| { let v = *show_jobs.peek(); show_jobs.set(!v); },
-                                        span { class: "jobs-spin" }
-                                        span { "{n} running" }
-                                    }
-                                }
-                            } else {
-                                rsx! {}
-                            }
-                        }
-                        button {
-                            class: "gear",
-                            title: "Settings",
-                            onclick: on_toggle_settings,
-                            "⚙"
-                        }
-                        if recording && mic_in_capture {
-                            button {
-                                class: if *mic_muted.read() { "record muted" } else { "record mute" },
-                                title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
-                                onclick: on_mute,
-                                if *mic_muted.read() { "🔇 Unmute" } else { "🎤 Mute" }
-                            }
-                        }
-                        button {
-                            class: if recording { "record stop" } else { "record" },
-                            onclick: on_record,
-                            if recording { "■ Stop" } else { "● Record" }
                         }
                     }
                 }

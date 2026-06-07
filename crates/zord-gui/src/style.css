@@ -19,6 +19,24 @@ body {
 }
 .app { display: flex; height: 100vh; }
 
+/* Icon rail — global nav (top) + utilities (bottom). 56px == RAIL_W in main.rs. */
+.rail {
+  width: 56px; flex-shrink: 0; background: var(--bg);
+  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; justify-content: space-between;
+  align-items: center; padding: 12px 0; gap: 12px;
+}
+.rail-top, .rail-bottom { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.rail-brand { font-weight: 800; color: var(--accent); font-size: 20px; letter-spacing: 1px; margin-bottom: 8px; }
+.rail-btn {
+  width: 38px; height: 38px; border-radius: 10px; cursor: pointer; font-size: 17px;
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+}
+.rail-btn:hover { background: var(--panel-2); color: var(--text); }
+.rail-btn.active { background: var(--panel-2); border-color: var(--me); color: var(--me); }
+.rail-btn.jobs { border-color: var(--me); }
+
 /* Sidebar */
 .sidebar {
   width: 240px; /* default; the splitter sets an inline width */
@@ -30,12 +48,15 @@ body {
   padding: 16px 12px;
   gap: 8px;
 }
+/* Record lives permanently at the sidebar foot; pushed down, never moves. */
+.sidebar-foot { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.sidebar-foot .record { width: 100%; }
 /* Draggable divider between the sidebar and the main column. */
 .splitter { width: 5px; margin-left: -3px; flex-shrink: 0; cursor: col-resize; user-select: none; background: transparent; }
 .splitter:hover, .splitter.active { background: var(--me); opacity: 0.5; }
 .brand { font-weight: 800; letter-spacing: 3px; color: var(--accent); font-size: 18px; padding: 4px 6px 12px; }
 .side-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 0 6px; }
-.session-list { overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.session-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 .session {
   padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent;
 }
