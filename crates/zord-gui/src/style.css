@@ -218,9 +218,36 @@ body {
 }
 .search:focus { border-color: var(--me); }
 
-/* Export bar */
-.export-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* Pushes the Export dropdown (and Reveal/Open) to the right of the actions. */
+/* Contextual toolbar: Generate ▾ (left) · output cluster (right). */
+.toolbar { display: flex; align-items: center; gap: 8px; }
+/* Toolbar buttons — one shared look for Generate / Copy / Export / Reveal / Open. */
+.tbtn {
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 12px;
+}
+.tbtn:hover { background: var(--panel-2); border-color: var(--me); }
+.tbtn.busy { border-color: var(--me); animation: pulse 1.2s ease-in-out infinite; }
+.tbtn.ghost { color: var(--muted); }
+.tbtn.ghost:hover { color: var(--text); }
+/* Generate ▾ dropdown — stable surface; the rows adapt to session state. */
+.gen-dd { position: relative; }
+.gen-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 41; min-width: 260px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 4px; display: flex; flex-direction: column; gap: 2px;
+}
+.gen-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  text-align: left; background: none; border: none; color: var(--text);
+  padding: 8px 10px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+.gen-item:hover:not(:disabled) { background: var(--panel-2); }
+.gen-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.gen-item.grow { flex: 1; }
+.gen-item-row { display: flex; align-items: center; gap: 6px; }
+.gen-state { font-size: 11px; color: var(--muted); }
+.gen-state.ok { color: var(--me); }
+/* Pushes the output cluster to the right of Generate. */
 .export-spacer { flex: 1; }
 /* Export format dropdown */
 .export-dd { position: relative; }

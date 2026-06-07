@@ -353,6 +353,8 @@ fn MainApp() -> Element {
     let mut show_jobs = use_signal(|| false);
     // Whether the Export format dropdown is open.
     let mut show_export_menu = use_signal(|| false);
+    // The contextual "Generate ▾" menu (Summarize/Compress/Identify/Re-transcribe).
+    let mut show_generate_menu = use_signal(|| false);
     let mut job_starts = use_signal(std::collections::HashMap::<String, u64>::new);
     let mut job_tick = use_signal(|| 0u64);
     let mut diarize_est_secs = use_signal(|| Option::<u64>::None);
@@ -1060,86 +1062,118 @@ fn MainApp() -> Element {
                                 show_export_menu.set(false);
                             }
                         };
+                        // Contextual state for the Generate menu rows.
+                        let has_summary = summary.read().is_some();
+                        let has_compressed = compressed.read().is_some();
+                        let has_others_audio = audio_files.read().1.is_some();
+                        let has_any_audio = audio_files.read().0.is_some() || audio_files.read().1.is_some();
+                        let gen_busy = summarizing() || compressing() || diarizing() || retranscribing();
                         rsx! {
-                            div { class: "export-bar",
-                                // --- Actions (left) ---
-                                button {
-                                    class: "export-btn",
-                                    disabled: summarizing(),
-                                    onclick: move |_| {
-                                        if *summarizing.peek() { return; }
-                                        summarizing.set(true);
-                                        notice.set(Some(if settings.peek().llm_backend == "external" {
-                                            "Summarizing via the external LLM server…".to_string()
-                                        } else {
-                                            "Summarizing… (first run downloads the model)".to_string()
-                                        }));
-                                        let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
-                                    },
-                                    if summarizing() { "✨ Summarizing…" } else { "✨ Summarize" }
-                                }
-                                button {
-                                    class: "export-btn",
-                                    title: "Condense this meeting into token-minimal dense prose for cross-meeting synthesis",
-                                    disabled: compressing(),
-                                    onclick: move |_| {
-                                        if *compressing.peek() { return; }
-                                        compressing.set(true);
-                                        notice.set(Some(if settings.peek().llm_backend == "external" {
-                                            "Compressing via the external LLM server…".to_string()
-                                        } else {
-                                            "Compressing… (first run downloads the model)".to_string()
-                                        }));
-                                        let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
-                                    },
-                                    if compressing() { "🗜 Compressing…" } else { "🗜 Compress" }
-                                }
-                                button {
-                                    class: "export-btn",
-                                    title: "Group the 'Others' channel into individual speakers (needs retained audio)",
-                                    disabled: diarizing(),
-                                    onclick: move |_| {
-                                        if *diarizing.peek() { return; }
-                                        diarizing.set(true);
-                                        // Rough ETA: diarization runs at very roughly ~6x faster than
-                                        // real time on CPU, so scale to this meeting's length.
-                                        let est = sessions.peek().iter()
-                                            .find(|s| s.id == sid_diar)
-                                            .and_then(|s| s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000))
-                                            .map(|secs| (secs / 6).max(15));
-                                        diarize_est_secs.set(est);
-                                        notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
-                                        let n = diar_speakers.peek().trim().parse::<u32>().unwrap_or(0);
-                                        let _ = eng_diar.db_tx.send(DbCmd::Diarize { id: sid_diar.clone(), num_speakers: n });
-                                    },
-                                    if diarizing() { "🗣 Identifying…" } else { "🗣 Identify speakers" }
-                                }
-                                input {
-                                    class: "spk-count",
-                                    r#type: "number",
-                                    min: "0",
-                                    placeholder: "auto",
-                                    title: "How many people spoke in this meeting (blank = auto-detect). \
-                                            Remembered for this session; auto-clustering can over-split a \
-                                            noisy mix, so set it when you know the headcount.",
-                                    value: "{diar_speakers}",
-                                    oninput: move |e| diar_speakers.set(e.value()),
-                                }
-                                // Re-transcribe (Phase 25c): only when kept audio exists.
-                                if audio_files.read().0.is_some() || audio_files.read().1.is_some() {
+                            div { class: "toolbar",
+                                // --- Generate ▾ : stable surface, contents adapt ---
+                                div { class: "gen-dd",
                                     button {
-                                        class: "export-btn",
-                                        title: "Regenerate the transcript from the kept audio with the re-transcription model (Settings → Transcription)",
-                                        disabled: retranscribing(),
-                                        onclick: move |_| {
-                                            if *retranscribing.peek() { return; }
-                                            confirm_retranscribe.set(Some(sid_rt.clone()));
-                                        },
-                                        if retranscribing() { "🔁 Re-transcribing…" } else { "🔁 Re-transcribe" }
+                                        class: if gen_busy { "tbtn busy" } else { "tbtn" },
+                                        title: "Run AI / speaker actions on this meeting",
+                                        onclick: move |_| { let v = *show_generate_menu.peek(); show_generate_menu.set(!v); },
+                                        if gen_busy { "✨ Working… ▾" } else { "✨ Generate ▾" }
+                                    }
+                                    if *show_generate_menu.read() {
+                                        div { class: "dd-backdrop", onclick: move |_| show_generate_menu.set(false) }
+                                        div { class: "gen-menu",
+                                            // Summarize
+                                            button {
+                                                class: "gen-item",
+                                                disabled: summarizing(),
+                                                onclick: move |_| {
+                                                    show_generate_menu.set(false);
+                                                    if *summarizing.peek() { return; }
+                                                    summarizing.set(true);
+                                                    notice.set(Some(if settings.peek().llm_backend == "external" {
+                                                        "Summarizing via the external LLM server…".to_string()
+                                                    } else {
+                                                        "Summarizing… (first run downloads the model)".to_string()
+                                                    }));
+                                                    let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
+                                                },
+                                                span { "✨ " { if has_summary { "Re-summarize" } else { "Summarize" } } }
+                                                if summarizing() { span { class: "gen-state", "running…" } }
+                                                else if has_summary { span { class: "gen-state ok", "✓" } }
+                                            }
+                                            // Compress
+                                            button {
+                                                class: "gen-item",
+                                                title: "Condense this meeting into token-minimal dense prose for cross-meeting synthesis",
+                                                disabled: compressing(),
+                                                onclick: move |_| {
+                                                    show_generate_menu.set(false);
+                                                    if *compressing.peek() { return; }
+                                                    compressing.set(true);
+                                                    notice.set(Some(if settings.peek().llm_backend == "external" {
+                                                        "Compressing via the external LLM server…".to_string()
+                                                    } else {
+                                                        "Compressing… (first run downloads the model)".to_string()
+                                                    }));
+                                                    let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
+                                                },
+                                                span { "🗜 " { if has_compressed { "Re-compress" } else { "Compress" } } }
+                                                if compressing() { span { class: "gen-state", "running…" } }
+                                                else if has_compressed { span { class: "gen-state ok", "✓" } }
+                                            }
+                                            // Identify speakers (+ expected-count input) — needs the Others track.
+                                            div { class: "gen-item-row",
+                                                button {
+                                                    class: "gen-item grow",
+                                                    disabled: diarizing() || !has_others_audio,
+                                                    title: if has_others_audio { "Group the 'Others' channel into individual speakers" } else { "Needs the kept 'Others' audio" },
+                                                    onclick: move |_| {
+                                                        show_generate_menu.set(false);
+                                                        if *diarizing.peek() { return; }
+                                                        diarizing.set(true);
+                                                        // Rough ETA: diarization runs ~6x faster than real time on CPU.
+                                                        let est = sessions.peek().iter()
+                                                            .find(|s| s.id == sid_diar)
+                                                            .and_then(|s| s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000))
+                                                            .map(|secs| (secs / 6).max(15));
+                                                        diarize_est_secs.set(est);
+                                                        notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
+                                                        let n = diar_speakers.peek().trim().parse::<u32>().unwrap_or(0);
+                                                        let _ = eng_diar.db_tx.send(DbCmd::Diarize { id: sid_diar.clone(), num_speakers: n });
+                                                    },
+                                                    span { "🗣 " { if diarizing() { "Identifying…" } else { "Identify speakers" } } }
+                                                    if !has_others_audio { span { class: "gen-state", "no audio" } }
+                                                }
+                                                input {
+                                                    class: "spk-count",
+                                                    r#type: "number",
+                                                    min: "0",
+                                                    placeholder: "auto",
+                                                    title: "How many people spoke (blank = auto-detect). Remembered per session.",
+                                                    value: "{diar_speakers}",
+                                                    oninput: move |e| diar_speakers.set(e.value()),
+                                                }
+                                            }
+                                            // Re-transcribe — needs kept audio.
+                                            button {
+                                                class: "gen-item",
+                                                disabled: retranscribing() || !has_any_audio,
+                                                title: if has_any_audio { "Regenerate the transcript from kept audio with the re-transcription model" } else { "Needs kept audio" },
+                                                onclick: move |_| {
+                                                    show_generate_menu.set(false);
+                                                    if *retranscribing.peek() || !has_any_audio { return; }
+                                                    confirm_retranscribe.set(Some(sid_rt.clone()));
+                                                },
+                                                span { "🔁 " { if retranscribing() { "Re-transcribing…" } else { "Re-transcribe" } } }
+                                                if !has_any_audio { span { class: "gen-state", "no audio" } }
+                                            }
+                                        }
                                     }
                                 }
+
+                                // --- Output cluster (right) ---
+                                div { class: "export-spacer" }
                                 button {
-                                    class: "export-btn",
+                                    class: "tbtn",
                                     title: "Copy the transcript to the clipboard",
                                     onclick: move |_| {
                                         let names = speaker_names.peek().clone();
@@ -1154,12 +1188,9 @@ fn MainApp() -> Element {
                                     },
                                     "📋 Copy"
                                 }
-
-                                // --- Export (right) ---
-                                div { class: "export-spacer" }
                                 div { class: "export-dd",
                                     button {
-                                        class: "export-btn",
+                                        class: "tbtn",
                                         title: "Export this transcript to a file",
                                         onclick: move |_| { let v = *show_export_menu.peek(); show_export_menu.set(!v); },
                                         "⤓ Export ▾"
@@ -1175,7 +1206,7 @@ fn MainApp() -> Element {
                                 }
                                 if let Some(path) = last_export.read().clone() {
                                     button {
-                                        class: "export-btn ghost",
+                                        class: "tbtn ghost",
                                         onclick: {
                                             let p = path.clone();
                                             move |_| osutil::reveal_in_file_manager(&p)
@@ -1183,7 +1214,7 @@ fn MainApp() -> Element {
                                         "📂 Reveal"
                                     }
                                     button {
-                                        class: "export-btn ghost",
+                                        class: "tbtn ghost",
                                         onclick: move |_| osutil::open_in_editor(&path),
                                         "📝 Open"
                                     }
