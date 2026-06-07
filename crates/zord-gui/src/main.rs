@@ -355,6 +355,8 @@ fn MainApp() -> Element {
     let mut show_export_menu = use_signal(|| false);
     // The contextual "Generate ▾" menu (Summarize/Compress/Identify/Re-transcribe).
     let mut show_generate_menu = use_signal(|| false);
+    // Active tab in the settings overlay's left nav (Phase 3).
+    let mut settings_tab = use_signal(|| "transcription".to_string());
     let mut job_starts = use_signal(std::collections::HashMap::<String, u64>::new);
     let mut job_tick = use_signal(|| 0u64);
     let mut diarize_est_secs = use_signal(|| Option::<u64>::None);
@@ -1575,6 +1577,17 @@ fn MainApp() -> Element {
                                         }
                                     }
                                 }
+                                div { class: "settings-layout",
+                                div { class: "settings-nav",
+                                    button { class: if *settings_tab.read() == "transcription" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("transcription".into()), "Transcription" }
+                                    button { class: if *settings_tab.read() == "ai" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("ai".into()), "AI" }
+                                    button { class: if *settings_tab.read() == "speakers" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("speakers".into()), "Speakers" }
+                                    button { class: if *settings_tab.read() == "recording" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("recording".into()), "Recording" }
+                                    button { class: if *settings_tab.read() == "files" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("files".into()), "Files" }
+                                    button { class: if *settings_tab.read() == "security" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("security".into()), "Security" }
+                                }
+                                div { class: "settings-pane",
+                                if *settings_tab.read() == "transcription" {
                                 section { class: "settings-section",
                                     h3 { "Transcription" }
                                     p { class: "field-note", "One model catalog, two jobs: the Live model transcribes while you record (small = fewer CPU spikes); the Re model runs afterwards — 🔁 Re-transcribe and automatic post-passes — where bigger is usually worth it. Models download on first use." }
@@ -1675,10 +1688,12 @@ fn MainApp() -> Element {
                                     }
                                 }
 
+                                }
+                                if *settings_tab.read() == "recording" {
                                 AudioInputSettings { settings, devices: devices.clone() }
-
                                 RetentionSettings { settings }
-
+                                }
+                                if *settings_tab.read() == "ai" {
                                 section { class: "settings-section",
                                     h3 { "AI" }
                                     {
@@ -1879,6 +1894,8 @@ fn MainApp() -> Element {
                                     }
                                 }
 
+                                }
+                                if *settings_tab.read() == "speakers" {
                                 section { class: "settings-section",
                                     h3 { "Speakers" }
                                     {
@@ -2016,14 +2033,19 @@ fn MainApp() -> Element {
                                     }
                                 }
 
+                                }
+                                if *settings_tab.read() == "security" {
                                 EncryptionSettings { settings, notice }
-
+                                }
+                                if *settings_tab.read() == "files" {
                                 FilesSettings { settings, notice }
-
                                 section { class: "settings-section",
                                     h3 { "About" }
                                     p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
                                 }
+                                }
+                                } // settings-pane
+                                } // settings-layout
                             }
                         }
                     }

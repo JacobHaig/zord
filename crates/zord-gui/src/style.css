@@ -138,6 +138,18 @@ body {
 }
 .close-btn:hover { background: var(--panel-2); }
 .overlay-body { overflow-y: auto; padding: 8px 24px 32px; }
+/* Settings: left-nav tabs + a single active pane (Phase 3). */
+.settings-layout { display: flex; gap: 24px; align-items: flex-start; }
+.settings-nav { flex-shrink: 0; width: 150px; display: flex; flex-direction: column; gap: 4px; position: sticky; top: 8px; }
+.stab {
+  text-align: left; background: none; border: 1px solid transparent; color: var(--muted);
+  padding: 9px 12px; border-radius: 9px; cursor: pointer; font-size: 13px;
+}
+.stab:hover { background: var(--panel-2); color: var(--text); }
+.stab.active { background: var(--panel-2); border-color: var(--me); color: var(--me); }
+.settings-pane { flex: 1; min-width: 0; }
+/* In the tabbed layout the active pane's first section needs no top padding. */
+.settings-pane .settings-section:first-child { padding-top: 0; }
 .settings-section { padding: 24px 0; border-bottom: 1px solid var(--line); }
 .settings-section h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
