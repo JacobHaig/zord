@@ -4,7 +4,7 @@
 //! Routes:
 //! - `GET /`                  → the dashboard HTML/JS page
 //! - `GET /api/sessions`      → `[Session]`
-//! - `GET /api/session/:id`   → `[Segment]`
+//! - `GET /api/session/{id}`   → `[Segment]`
 //! - `GET /api/search?q=...`  → `[{ session_id, segment }]`
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -38,7 +38,7 @@ pub fn app(db_path: PathBuf) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/sessions", get(sessions))
-        .route("/api/session/:id", get(session))
+        .route("/api/session/{id}", get(session))
         .route("/api/search", get(search))
         .with_state(state)
 }
