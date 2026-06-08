@@ -373,11 +373,29 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            // Drain the request headers + body (single small read is enough to
-            // unblock; we respond regardless).
+            // Read until headers + Content-Length body are fully in. A single
+            // read can capture only the headers (ureq may flush the body in a
+            // separate TCP segment), which would race the `"stream":true` check.
+            let mut raw = Vec::new();
             let mut buf = [0u8; 8192];
-            let n = stream.read(&mut buf).unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw);
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let need: usize = text
+                        .lines()
+                        .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                        .unwrap_or(0);
+                    if raw.len() >= head_end + 4 + need {
+                        break;
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&raw).to_string();
             let chunks = [
                 r#"{"choices":[{"delta":{"role":"assistant"}}]}"#, // role chunk: no content
                 r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
