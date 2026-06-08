@@ -92,7 +92,16 @@ pub enum Event {
     #[allow(dead_code)]
     ChatDelta { scope: ChatScope, delta: String },
     /// Custom names for diarized speakers in the viewed session (index → name).
+    /// Emitted on session load; do NOT use it to clear diarization busy state.
     Speakers(std::collections::HashMap<i32, String>),
+    /// Terminal signal of an on-demand diarization run (Phase 16), tagged with
+    /// the session it ran on so the GUI clears the right busy state and only
+    /// applies the labels if that session is still the one being viewed. Sent
+    /// whether the run succeeded, found nothing, errored, or panicked.
+    Diarized {
+        id: String,
+        speakers: std::collections::HashMap<i32, String>,
+    },
     /// The viewed session's saved expected-speaker count (0 = auto-detect).
     DiarizeSpeakers(u32),
     /// Which retained per-channel WAVs exist on disk for the viewed session
@@ -1410,9 +1419,12 @@ fn diarize_session_ondemand(
     {
         use std::panic::{catch_unwind, AssertUnwindSafe};
         // Run the work catching any Rust panic, then ALWAYS emit a terminal
-        // Event::Speakers so the GUI's "Identifying…" busy state clears no matter
+        // Event::Diarized so the GUI's "Identifying…" busy state clears no matter
         // how this exits (success, no-result, error, or panic) — otherwise a
         // failed run leaves the button stuck and the user sees nothing happen.
+        // It's tagged with `session_id` (not the overloaded Event::Speakers, which
+        // also fires on every session load) so navigating away / recording can't
+        // clear it, and the labels apply only if that session is still in view.
         let ran = catch_unwind(AssertUnwindSafe(|| {
             diarize_session_inner(db_path, session_id, num_speakers, ev)
         }));
@@ -1423,9 +1435,14 @@ fn diarize_session_ondemand(
                     .to_string(),
             ));
         }
-        if let Ok(store) = Store::open(db_path) {
-            let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
-        }
+        let speakers = Store::open(db_path)
+            .ok()
+            .and_then(|s| s.speaker_names(session_id).ok())
+            .unwrap_or_default();
+        let _ = ev.send(Event::Diarized {
+            id: session_id.to_string(),
+            speakers,
+        });
     }
 }
 

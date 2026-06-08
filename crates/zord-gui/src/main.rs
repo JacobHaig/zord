@@ -520,9 +520,20 @@ fn MainApp() -> Element {
                     }
                 }
                 Event::Speakers(v) => {
+                    // Load-only (fires on every session open) — must NOT touch
+                    // diarization busy state; that's Event::Diarized's job.
                     speaker_names.set(v);
+                }
+                Event::Diarized { id, speakers } => {
+                    // Terminal signal from the background diarization worker.
+                    // Clear the busy/ETA state and apply the labels only if that
+                    // session is still the one on screen (the job ran detached, so
+                    // the user may have navigated elsewhere meanwhile).
                     diarizing.set(false);
                     diarize_est_secs.set(None);
+                    if matches!(&*view.read(), View::Session(cur) if *cur == id) {
+                        speaker_names.set(speakers);
+                    }
                 }
                 Event::DiarizeSpeakers(n) => {
                     diar_speakers.set(if n > 0 { n.to_string() } else { String::new() });
@@ -719,7 +730,9 @@ fn MainApp() -> Element {
                 compressed.set(None);
                 summarizing.set(false);
                 compressing.set(false);
-                diarizing.set(false);
+                // NOTE: diarization is a detached background job keyed by session
+                // (cleared by Event::Diarized) — starting a recording must not
+                // clear its in-progress indicator.
                 retranscribing.set(false);
                 audio_files.set((None, None));
                 let _ = engine.play_tx.send(PlayCmd::Stop);
@@ -874,7 +887,8 @@ fn MainApp() -> Element {
             compressed.set(None);
             summarizing.set(false);
             compressing.set(false);
-            diarizing.set(false);
+            // diarization is a detached per-session background job — don't clear
+            // its indicator just because we opened a different session.
             reset_chat(chat, chat_input, chat_busy, chat_scope);
             scroll_to_seg.set(seg_id);
             let _ = engine.db_tx.send(DbCmd::Load(sid));
@@ -1084,7 +1098,7 @@ fn MainApp() -> Element {
                                                 compressed.set(None);
                                                 summarizing.set(false);
                                                 compressing.set(false);
-                                                diarizing.set(false);
+                                                // detached per-session job — see Event::Diarized
                                                 retranscribing.set(false);
                                                 diar_speakers.set(String::new());
                                                 audio_files.set((None, None));
