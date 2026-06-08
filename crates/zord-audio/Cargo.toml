@@ -8,5 +8,5 @@ license.workspace = true
 zord-core = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-rubato = "0.16"
+rubato = "3.0"
 hound = "3.5"
