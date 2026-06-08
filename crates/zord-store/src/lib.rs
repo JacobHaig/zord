@@ -138,7 +138,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO app_meta (key, value, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            params![key, value, now],
+            params![key, value, i64v(now)],
         )?;
         Ok(())
     }
@@ -149,7 +149,7 @@ impl Store {
             .conn
             .prepare("SELECT value, updated_at FROM app_meta WHERE key = ?1")?;
         let mut rows = stmt.query_map(params![key], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+            Ok((r.get::<_, String>(0)?, get_u64(r, 1)?))
         })?;
         Ok(rows.next().transpose()?)
     }
@@ -188,7 +188,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO projects (id, name, status, description, created_at, updated_at, last_activity_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![p.id, p.name, p.status.as_str(), p.description, p.created_at, p.updated_at, p.last_activity_at],
+            params![p.id, p.name, p.status.as_str(), p.description, i64v(p.created_at), i64v(p.updated_at), i64v(p.last_activity_at)],
         )?;
         Ok(())
     }
@@ -216,7 +216,7 @@ impl Store {
     pub fn rename_project(&self, id: &str, name: &str, now: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE projects SET name = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, name, now],
+            params![id, name, i64v(now)],
         )?;
         Ok(())
     }
@@ -224,7 +224,7 @@ impl Store {
     pub fn set_project_status(&self, id: &str, status: ProjectStatus, now: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE projects SET status = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, status.as_str(), now],
+            params![id, status.as_str(), i64v(now)],
         )?;
         Ok(())
     }
@@ -232,7 +232,7 @@ impl Store {
     pub fn set_project_description(&self, id: &str, desc: Option<&str>, now: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE projects SET description = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, desc, now],
+            params![id, desc, i64v(now)],
         )?;
         Ok(())
     }
@@ -241,7 +241,7 @@ impl Store {
     pub fn touch_project(&self, id: &str, now: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE projects SET last_activity_at = ?2, updated_at = ?2 WHERE id = ?1",
-            params![id, now],
+            params![id, i64v(now)],
         )?;
         Ok(())
     }
@@ -261,7 +261,7 @@ impl Store {
             params![
                 it.id, it.project_id, it.kind.as_str(), it.text, it.owner, it.status.as_str(),
                 it.created_session, it.updated_session, it.completed_session,
-                it.created_at, it.updated_at, it.manual as i64,
+                i64v(it.created_at), i64v(it.updated_at), it.manual as i64,
             ],
         )?;
         Ok(())
@@ -294,7 +294,7 @@ impl Store {
             "UPDATE project_items
              SET status = ?2, updated_session = ?3, completed_session = ?4, updated_at = ?5
              WHERE id = ?1",
-            params![id, status.as_str(), updated_session, completed_session, now],
+            params![id, status.as_str(), updated_session, completed_session, i64v(now)],
         )?;
         Ok(())
     }
@@ -302,7 +302,7 @@ impl Store {
     pub fn update_item_text(&self, id: &str, text: &str, owner: Option<&str>, now: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE project_items SET text = ?2, owner = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, text, owner, now],
+            params![id, text, owner, i64v(now)],
         )?;
         Ok(())
     }
@@ -320,7 +320,7 @@ impl Store {
     pub fn move_item(&self, item_id: &str, new_project: &str, now: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE project_items SET project_id = ?2, updated_at = ?3 WHERE id = ?1",
-            params![item_id, new_project, now],
+            params![item_id, new_project, i64v(now)],
         )?;
         Ok(())
     }
@@ -336,7 +336,7 @@ impl Store {
             "INSERT INTO session_overview_state (session_id, applied_at, extract)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(session_id) DO UPDATE SET applied_at = excluded.applied_at, extract = excluded.extract",
-            params![session_id, now, extract],
+            params![session_id, i64v(now), extract],
         )?;
         Ok(())
     }
@@ -383,7 +383,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO project_history (project_id, item_id, change, session_id, at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![project_id, item_id, change, session_id, now],
+            params![project_id, item_id, change, session_id, i64v(now)],
         )?;
         Ok(())
     }
@@ -394,8 +394,8 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 session.id,
-                session.started_at,
-                session.ended_at,
+                i64v(session.started_at),
+                opt_i64v(session.ended_at),
                 session.title,
                 session.audio_path,
                 session.model,
@@ -451,7 +451,7 @@ impl Store {
     pub fn end_session(&self, id: &str, ended_at: u64) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET ended_at = ?2 WHERE id = ?1",
-            params![id, ended_at],
+            params![id, i64v(ended_at)],
         )?;
         Ok(())
     }
@@ -468,8 +468,8 @@ impl Store {
             params![
                 session_id,
                 seg.source.as_str(),
-                seg.t_start_ms,
-                seg.t_end_ms,
+                i64v(seg.t_start_ms),
+                i64v(seg.t_end_ms),
                 seg.text,
                 words_json,
                 seg.speaker,
@@ -735,6 +735,26 @@ fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// rusqlite 0.40 dropped the u64 <-> SQL impls (u64 can exceed SQLite's i64).
+// Our domain u64s are epoch-ms timestamps and small counts, always within i64
+// range, so we cast losslessly at the SQL boundary with these helpers.
+#[inline]
+fn i64v(v: u64) -> i64 {
+    v as i64
+}
+#[inline]
+fn opt_i64v(v: Option<u64>) -> Option<i64> {
+    v.map(|x| x as i64)
+}
+#[inline]
+fn get_u64(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<u64> {
+    Ok(r.get::<_, i64>(idx)? as u64)
+}
+#[inline]
+fn get_opt_u64(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<Option<u64>> {
+    Ok(r.get::<_, Option<i64>>(idx)?.map(|x| x as u64))
+}
+
 /// Build a `Session` from a row selected as `(id, started_at, ended_at, title,
 /// audio_path, model)`.
 fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
@@ -744,9 +764,9 @@ fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         name: r.get(1)?,
         status: ProjectStatus::parse(&status),
         description: r.get(3)?,
-        created_at: r.get(4)?,
-        updated_at: r.get(5)?,
-        last_activity_at: r.get(6)?,
+        created_at: get_u64(r, 4)?,
+        updated_at: get_u64(r, 5)?,
+        last_activity_at: get_u64(r, 6)?,
     })
 }
 
@@ -774,8 +794,8 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<ProjectItem> {
         created_session: r.get(6)?,
         updated_session: r.get(7)?,
         completed_session: r.get(8)?,
-        created_at: r.get(9)?,
-        updated_at: r.get(10)?,
+        created_at: get_u64(r, 9)?,
+        updated_at: get_u64(r, 10)?,
         manual: manual != 0,
     })
 }
@@ -783,8 +803,8 @@ fn row_to_item(r: &rusqlite::Row) -> rusqlite::Result<ProjectItem> {
 fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
         id: r.get(0)?,
-        started_at: r.get(1)?,
-        ended_at: r.get(2)?,
+        started_at: get_u64(r, 1)?,
+        ended_at: get_opt_u64(r, 2)?,
         title: r.get(3)?,
         audio_path: r.get(4)?,
         model: r.get(5)?,
@@ -813,8 +833,8 @@ fn row_to_segment_offset(r: &rusqlite::Row, off: usize) -> rusqlite::Result<Segm
             "me" => Source::Me,
             _ => Source::Others,
         },
-        t_start_ms: r.get(off + 2)?,
-        t_end_ms: r.get(off + 3)?,
+        t_start_ms: get_u64(r, off + 2)?,
+        t_end_ms: get_u64(r, off + 3)?,
         text: r.get(off + 4)?,
         words,
         speaker,
