@@ -40,7 +40,7 @@ fn icon_paths(name: &str) -> &'static str {
         "alert" => "<path d='M12 3l9 16H3z'/><line x1='12' y1='9' x2='12' y2='14'/><circle cx='12' cy='17' r='0.7' fill='currentColor' stroke='none'/>",
         // Recording controls
         "record" => "<circle cx='12' cy='12' r='6' fill='currentColor' stroke='none'/>",
-        "stop" => "<rect x='6' y='6' width='12' height='12' rx='2'/>",
+        "stop" => "<rect x='7' y='7' width='10' height='10' rx='2' fill='currentColor' stroke='none'/>",
         "mic" => "<rect x='9' y='3' width='6' height='11' rx='3'/><path d='M5 11a7 7 0 0 0 14 0'/><line x1='12' y1='18' x2='12' y2='21'/>",
         "mic-off" => "<path d='M15 9.3V6a3 3 0 0 0-5.7-1.3'/><path d='M9 9v2a3 3 0 0 0 4.6 2.5'/><path d='M5 11a7 7 0 0 0 11 5.3'/><line x1='12' y1='18' x2='12' y2='21'/><line x1='3' y1='3' x2='21' y2='21'/>",
         "speaker" => "<path d='M11 5L6 9H3v6h3l5 4z'/><path d='M15.5 8.5a5 5 0 0 1 0 7'/><path d='M18.5 5.5a9 9 0 0 1 0 13'/>",
