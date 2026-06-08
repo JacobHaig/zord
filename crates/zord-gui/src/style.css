@@ -433,9 +433,12 @@ body {
 
 /* Per-session host notes — right-side slide-out drawer (editable, searchable,
    AI-visible). Available while recording and when reviewing a saved session. */
-.notes-tab { position: fixed; top: 50%; right: 0; transform: translateY(-50%); z-index: 50; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 8px; border: 1px solid var(--line); border-right: none; border-radius: 10px 0 0 10px; background: var(--panel-2); color: var(--muted); cursor: pointer; transition: right 0.2s ease, color 0.15s ease; }
+/* Slide the tab with `transform` (compositor) to match the drawer's transform
+   animation exactly — animating `right` instead would repaint each frame on a
+   different pipeline and drift out of sync (jitter). */
+.notes-tab { position: fixed; top: 50%; right: 0; transform: translateY(-50%); z-index: 50; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 8px; border: 1px solid var(--line); border-right: none; border-radius: 10px 0 0 10px; background: var(--panel-2); color: var(--muted); cursor: pointer; transition: transform 0.2s ease, color 0.15s ease; }
 .notes-tab:hover { color: var(--text); border-color: var(--others); }
-.notes-tab.open { right: 360px; }
+.notes-tab.open { transform: translateY(-50%) translateX(-360px); }
 .notes-tab .ic { width: 16px; height: 16px; }
 .notes-tab-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; writing-mode: vertical-rl; }
 .notes-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--others); }
