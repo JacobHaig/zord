@@ -1315,8 +1315,8 @@ fn session_audio_files(store: &Store, session_id: &str) -> (Option<String>, Opti
 /// clip at a time: a new `Play` replaces the current clip, `Stop` silences.
 /// Emits [`Event::Playing`] transitions so the UI can mark the active line.
 fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
-    let mut output: Option<(rodio::OutputStream, rodio::OutputStreamHandle)> = None;
-    let mut sink: Option<rodio::Sink> = None;
+    let mut output: Option<rodio::MixerDeviceSink> = None;
+    let mut sink: Option<rodio::Player> = None;
     let mut current: Option<i64> = None;
     loop {
         // Block when idle; poll while playing so we can report "finished".
@@ -1339,9 +1339,9 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 }
                 current = None;
                 if output.is_none() {
-                    output = rodio::OutputStream::try_default().ok();
+                    output = rodio::DeviceSinkBuilder::open_default_sink().ok();
                 }
-                let Some((_, handle)) = output.as_ref() else {
+                let Some(device) = output.as_ref() else {
                     let _ = ev.send(Event::Notice("No audio output device available.".to_string()));
                     let _ = ev.send(Event::Playing(None));
                     continue;
@@ -1358,18 +1358,17 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                     let _ = ev.send(Event::Playing(None));
                     continue;
                 }
-                match rodio::Sink::try_new(handle) {
-                    Ok(s) => {
-                        s.append(rodio::buffer::SamplesBuffer::new(1, rate.max(1), samples));
-                        sink = Some(s);
-                        current = Some(segment_id);
-                        let _ = ev.send(Event::Playing(Some(segment_id)));
-                    }
-                    Err(e) => {
-                        let _ = ev.send(Event::Notice(format!("audio output: {e}")));
-                        let _ = ev.send(Event::Playing(None));
-                    }
-                }
+                // rodio 0.22: Sink → Player (connect_new is infallible); rate +
+                // channel count are NonZero. We play raw, wall-clock-aligned PCM.
+                let player = rodio::Player::connect_new(device.mixer());
+                player.append(rodio::buffer::SamplesBuffer::new(
+                    std::num::NonZeroU16::new(1).unwrap(),
+                    std::num::NonZeroU32::new(rate.max(1)).unwrap(),
+                    samples,
+                ));
+                sink = Some(player);
+                current = Some(segment_id);
+                let _ = ev.send(Event::Playing(Some(segment_id)));
             }
             Some(PlayCmd::Stop) => {
                 if let Some(s) = sink.take() {

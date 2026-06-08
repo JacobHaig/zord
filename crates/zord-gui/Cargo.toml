@@ -43,6 +43,6 @@ zord-diarize = { workspace = true, optional = true }
 arboard = "3"
 # Per-line transcript playback (Sink + SamplesBuffer only — we read WAVs with
 # hound ourselves, so no decoder features needed).
-rodio = { version = "0.20", default-features = false }
+rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # Local-timezone date display in the session list.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
