@@ -4702,9 +4702,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screencapturekit"
-version = "6.1.0"
+version = "7.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d826cde3e3238feab5cd87fc73f9d0d9d1132e31d02db37e1a510401882392e9"
+checksum = "7fe7bf65216382fdf28fc515df5b864aac0a2abe2475d7da44e7d6ad5804b2ce"
 dependencies = [
  "apple-cf",
  "apple-metal",
