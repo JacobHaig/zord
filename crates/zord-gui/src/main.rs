@@ -383,6 +383,10 @@ fn MainApp() -> Element {
     let mut notes_draft = use_signal(String::new);
     let mut show_notes = use_signal(|| false);
     let mut note_results = use_signal(Vec::<(String, String)>::new);
+    // Id of the session currently recording (from Event::SessionStarted), so the
+    // notes drawer can attach notes live — the row exists in the DB from the
+    // start of capture. Cleared when recording stops.
+    let mut live_session_id = use_signal(|| Option::<String>::None);
     // Per-action busy flags for the session toolbar (set on click, cleared when
     // the corresponding result event lands) so buttons show progress + can't be
     // double-fired.
@@ -508,11 +512,15 @@ fn MainApp() -> Element {
                     compressed.set(v);
                     compressing.set(false);
                 }
+                Event::SessionStarted(id) => {
+                    // New recording → fresh, empty notes attached to its id.
+                    live_session_id.set(Some(id));
+                    notes_draft.set(String::new());
+                    notes.set(None);
+                }
                 Event::Notes(v) => {
                     notes_draft.set(v.clone().unwrap_or_default());
-                    // Open the panel automatically when the session already has notes.
-                    show_notes.set(v.as_ref().is_some_and(|n| !n.trim().is_empty()));
-                    notes.set(v);
+                    notes.set(v); // the drawer tab shows a dot when present
                 }
                 Event::NoteResults(v) => note_results.set(v),
                 Event::Overview(v) => {
@@ -752,6 +760,7 @@ fn MainApp() -> Element {
                 tracing::info!("record button: Stop clicked");
                 let _ = engine.rec_tx.send(RecorderCmd::Stop);
                 let _ = engine.db_tx.send(DbCmd::ListSessions);
+                live_session_id.set(None); // recording's over; notes stay saved on the session
             } else {
                 tracing::info!("record button: Record clicked");
                 segments.write().clear();
@@ -1529,43 +1538,9 @@ fn MainApp() -> Element {
                     }
                 }
 
-                // Host notes (links / action items / reminders) — editable,
-                // searchable, and fed to the AI. Available for any saved session.
-                if let View::Session(id) = &*view.read() {
-                    {
-                        let id = id.clone();
-                        let open = *show_notes.read();
-                        let eng = engine.clone();
-                        rsx! {
-                            div { class: "summary notes-panel",
-                                div { class: "summary-head",
-                                    button {
-                                        class: "panel-toggle",
-                                        onclick: move |_| { let v = *show_notes.peek(); show_notes.set(!v); },
-                                        span { class: "chev", if open { "▾" } else { "▸" } }
-                                        span { "Notes" }
-                                    }
-                                    if notes.read().is_some() {
-                                        span { class: "notes-badge", title: "These notes are searchable and visible to your AI summary + chat", "saved" }
-                                    }
-                                }
-                                if open {
-                                    textarea {
-                                        class: "notes-input",
-                                        placeholder: "Links, action items, reminders to revisit in later sessions… (searchable; your AI summary and \"ask this meeting\" chat can see these)",
-                                        value: "{notes_draft}",
-                                        oninput: move |e| notes_draft.set(e.value()),
-                                        onfocusout: move |_| {
-                                            let text = notes_draft.peek().clone();
-                                            let _ = eng.db_tx.send(DbCmd::SetNotes { id: id.clone(), notes: text.clone() });
-                                            notes.set((!text.trim().is_empty()).then_some(text));
-                                        },
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // Host notes now live in a right-side drawer (see below), so they
+                // sit beside the transcript during recording + review rather than
+                // stacking on top.
 
                 // Speaker legend (rename diarized speakers) — only for a saved
                 // session that has speaker labels.
@@ -1689,6 +1664,51 @@ fn MainApp() -> Element {
         // ---- Background jobs panel ----
         if *show_jobs.read() && !jobs.read().is_empty() {
             JobsPanel { show_jobs, jobs, job_tick, diarize_est_secs, on_cancel: on_cancel_job }
+        }
+
+        // ---- Session notes drawer (right side) ----
+        // Targets the viewed session, or the live one while recording (its row
+        // exists from the start of capture, so notes save immediately).
+        {
+            let notes_target = match &*view.read() {
+                View::Session(id) => Some(id.clone()),
+                _ if recording => live_session_id.read().clone(),
+                _ => None,
+            };
+            notes_target.map(|target| {
+                let open = *show_notes.read();
+                let has_notes = notes.read().is_some();
+                let eng = engine.clone();
+                let save_id = target.clone();
+                rsx! {
+                    button {
+                        class: if open { "notes-tab open" } else { "notes-tab" },
+                        title: "Session notes — links, action items, reminders",
+                        onclick: move |_| { let v = *show_notes.peek(); show_notes.set(!v); },
+                        {icon("file-text")}
+                        span { class: "notes-tab-label", "Notes" }
+                        if has_notes && !open { span { class: "notes-dot" } }
+                    }
+                    div { class: if open { "notes-drawer open" } else { "notes-drawer" },
+                        div { class: "notes-drawer-head",
+                            span { class: "notes-drawer-title", {icon("file-text")} span { "Notes" } }
+                            button { class: "close-btn", onclick: move |_| show_notes.set(false), {icon("close")} }
+                        }
+                        textarea {
+                            class: "notes-drawer-input",
+                            placeholder: "Links, action items, reminders to revisit later… (searchable; your AI summary and \"ask this meeting\" chat can see these)",
+                            value: "{notes_draft}",
+                            oninput: move |e| notes_draft.set(e.value()),
+                            onfocusout: move |_| {
+                                let text = notes_draft.peek().clone();
+                                let _ = eng.db_tx.send(DbCmd::SetNotes { id: save_id.clone(), notes: text.clone() });
+                                notes.set((!text.trim().is_empty()).then_some(text));
+                            },
+                        }
+                        div { class: "notes-drawer-foot", "Saved to this session · searchable · visible to your AI" }
+                    }
+                }
+            })
         }
 
         // ---- Confirm-delete dialog ----

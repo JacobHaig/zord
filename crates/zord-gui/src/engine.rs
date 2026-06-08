@@ -78,6 +78,9 @@ pub enum Event {
     /// A session's dense-prose compression (loaded or freshly generated)
     /// (Phase 23). `None` = none yet.
     Compressed(Option<String>),
+    /// The id of the session that just started recording — so the GUI can attach
+    /// live notes to it (the row exists in the DB from the start of capture).
+    SessionStarted(String),
     /// A session's host notes (loaded). `None` = none.
     Notes(Option<String>),
     /// Sessions whose notes matched a search: `(session_id, notes)`.
@@ -102,6 +105,7 @@ pub enum Event {
     /// the session it ran on so the GUI clears the right busy state and only
     /// applies the labels if that session is still the one being viewed. Sent
     /// whether the run succeeded, found nothing, errored, or panicked.
+    #[allow(dead_code)] // only constructed under the `diarization` feature
     Diarized {
         id: String,
         speakers: std::collections::HashMap<i32, String>,
@@ -1966,6 +1970,8 @@ fn run_session(
         },
         model: model.name().to_string(),
     });
+    // Tell the GUI which session is live so it can attach notes during capture.
+    let _ = ev.send(Event::SessionStarted(session_id.clone()));
     let wav_path = |src: &str| -> Option<PathBuf> {
         // Capture-only always writes — the WAV is the transcription input.
         if keep_audio || !live {

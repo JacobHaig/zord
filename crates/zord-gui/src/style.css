@@ -431,11 +431,23 @@ body {
 .sg-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--others); border: 1px solid var(--others); border-radius: 4px; padding: 1px 5px; margin-right: 4px; }
 .note-hit { padding: 9px 14px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
 
-/* Per-session host notes panel (editable, searchable, AI-visible). */
-.notes-panel .notes-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--others); border: 1px solid var(--others); border-radius: 4px; padding: 1px 5px; }
-.notes-input { width: 100%; min-height: 90px; resize: vertical; margin-top: 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font: inherit; font-size: 13px; line-height: 1.5; outline: none; }
-.notes-input:focus { border-color: var(--me); }
-.notes-input::placeholder { color: var(--muted); }
+/* Per-session host notes — right-side slide-out drawer (editable, searchable,
+   AI-visible). Available while recording and when reviewing a saved session. */
+.notes-tab { position: fixed; top: 50%; right: 0; transform: translateY(-50%); z-index: 50; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 8px; border: 1px solid var(--line); border-right: none; border-radius: 10px 0 0 10px; background: var(--panel-2); color: var(--muted); cursor: pointer; transition: right 0.2s ease, color 0.15s ease; }
+.notes-tab:hover { color: var(--text); border-color: var(--others); }
+.notes-tab.open { right: 360px; }
+.notes-tab .ic { width: 16px; height: 16px; }
+.notes-tab-label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; writing-mode: vertical-rl; }
+.notes-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--others); }
+
+.notes-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 360px; z-index: 49; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,0.28); transform: translateX(100%); transition: transform 0.2s ease; }
+.notes-drawer.open { transform: translateX(0); }
+.notes-drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.notes-drawer-title { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+.notes-drawer-title .ic { width: 16px; height: 16px; color: var(--others); }
+.notes-drawer-input { flex: 1; width: 100%; resize: none; padding: 14px 16px; background: transparent; color: var(--text); border: none; font: inherit; font-size: 14px; line-height: 1.6; outline: none; }
+.notes-drawer-input::placeholder { color: var(--muted); }
+.notes-drawer-foot { padding: 10px 16px; border-top: 1px solid var(--line); font-size: 10px; color: var(--muted); }
 
 /* Flash-highlight a transcript line jumped to from search. */
 .line.hit { background: rgba(94,166,255,0.18); border-radius: 6px; transition: background 0.4s ease; }
