@@ -8,7 +8,7 @@ license.workspace = true
 zord-core = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-cpal = "0.15"
+cpal = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = "6.1"

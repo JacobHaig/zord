@@ -17,7 +17,9 @@ pub struct Microphone {
 pub fn input_devices() -> Vec<String> {
     let host = cpal::default_host();
     match host.input_devices() {
-        Ok(devs) => devs.filter_map(|d| d.name().ok()).collect(),
+        Ok(devs) => devs
+            .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -38,7 +40,7 @@ impl Microphone {
         let sample_format = supported.sample_format();
         let config: cpal::StreamConfig = supported.into();
         let channels = config.channels as usize;
-        let sample_rate = config.sample_rate.0;
+        let sample_rate = config.sample_rate;
 
         tracing::info!(sample_rate, channels, ?sample_format, "microphone capture starting");
 
@@ -66,7 +68,9 @@ fn resolve_input_device(name: Option<&str>) -> Result<cpal::Device> {
         Some(want) => host
             .input_devices()
             .ok()
-            .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == want).unwrap_or(false)))
+            .and_then(|mut devs| {
+                devs.find(|d| d.description().map(|desc| desc.name() == want).unwrap_or(false))
+            })
             .or_else(|| host.default_input_device())
             .context("no input (microphone) device")?,
         None => host
@@ -87,7 +91,7 @@ where
     f32: FromSample<T>,
 {
     let stream = device.build_input_stream(
-        config,
+        config.clone(),
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             let mono = downmix_to_mono(data, channels);
             let _ = sink.send(mono);
