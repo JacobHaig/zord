@@ -17,7 +17,7 @@ remote = ["dep:zord-net", "dep:serde_json"]
 anyhow = { workspace = true }
 tracing = { workspace = true }
 zord-net = { workspace = true, optional = true }
-directories = { version = "5", optional = true }
+directories = { version = "6", optional = true }
 serde_json = { version = "1", optional = true }
 # Used to decode model token bytes (the non-deprecated token_to_piece path).
 # Already in the tree transitively via llama-cpp-2; pinned to its major here.

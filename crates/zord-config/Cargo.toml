@@ -14,5 +14,5 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-directories = "5"
+directories = "6"
 keyring = { version = "3", optional = true }

@@ -16,7 +16,7 @@ zord-audio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 hound = "3"
-directories = "5"
+directories = "6"
 zord-net = { workspace = true }
 sherpa-onnx = { version = "1.13", optional = true }
 tar = { version = "0.4", optional = true }
