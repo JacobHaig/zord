@@ -215,7 +215,7 @@ fn catalog() -> Vec<ModelInfo> {
             description: m.label().to_string(),
             downloaded: zord_summarize::summary_model_present(m),
             kind: "summary".to_string(),
-            // HuggingFace first, then a non-HF mirror (ModelScope) for blocked nets.
+            // HuggingFace first, then the hf-mirror.com mirror for blocked nets.
             urls: vec![m.url().to_string(), m.mirror_url().to_string()],
         });
     }

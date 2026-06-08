@@ -16,23 +16,41 @@ use llama_cpp_2::token::LlamaToken;
 
 use crate::opts::{truncate_chars, ChatRole, GenOpts};
 
-/// Selectable summary LLM (Qwen2.5 Instruct GGUF, Q4_K_M).
+/// Selectable summary LLM (Qwen Instruct GGUF, Q4_K_M). A size/quality ladder
+/// from ~1 GB up to ~20 GB; all single-file downloads (the previous 7B pointed
+/// at an official repo that shards Q4_K_M into parts — a single-file fetch can't
+/// assemble those — so it now uses bartowski's single-file build). `ALL` is in
+/// ascending size/quality order, which is also the order the picker shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SummaryModel {
     Qwen1_5B,
     Qwen3B,
     Qwen7B,
+    Qwen3_8B,
+    Qwen3_14B,
+    Qwen32B,
 }
 
 impl SummaryModel {
-    pub const ALL: &'static [SummaryModel] =
-        &[SummaryModel::Qwen1_5B, SummaryModel::Qwen3B, SummaryModel::Qwen7B];
+    pub const ALL: &'static [SummaryModel] = &[
+        SummaryModel::Qwen1_5B,
+        SummaryModel::Qwen3B,
+        SummaryModel::Qwen7B,
+        SummaryModel::Qwen3_8B,
+        SummaryModel::Qwen3_14B,
+        SummaryModel::Qwen32B,
+    ];
 
+    /// Stable identifier persisted in config (`summary_model`). Do not change
+    /// existing values — it would orphan users' saved selections.
     pub fn name(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct",
             SummaryModel::Qwen3B => "qwen2.5-3b-instruct",
             SummaryModel::Qwen7B => "qwen2.5-7b-instruct",
+            SummaryModel::Qwen3_8B => "qwen3-8b",
+            SummaryModel::Qwen3_14B => "qwen3-14b",
+            SummaryModel::Qwen32B => "qwen2.5-32b-instruct",
         }
     }
 
@@ -40,7 +58,10 @@ impl SummaryModel {
         match self {
             SummaryModel::Qwen1_5B => "Qwen2.5 1.5B — fastest, lighter quality",
             SummaryModel::Qwen3B => "Qwen2.5 3B — balanced (default)",
-            SummaryModel::Qwen7B => "Qwen2.5 7B — best quality, slower",
+            SummaryModel::Qwen7B => "Qwen2.5 7B — strong, slower",
+            SummaryModel::Qwen3_8B => "Qwen3 8B — newer, sharper reasoning",
+            SummaryModel::Qwen3_14B => "Qwen3 14B — high quality, needs ~16 GB RAM",
+            SummaryModel::Qwen32B => "Qwen2.5 32B — maximum quality, needs ~24 GB RAM",
         }
     }
 
@@ -49,6 +70,9 @@ impl SummaryModel {
             SummaryModel::Qwen1_5B => "~1 GB",
             SummaryModel::Qwen3B => "~2 GB",
             SummaryModel::Qwen7B => "~4.7 GB",
+            SummaryModel::Qwen3_8B => "~5 GB",
+            SummaryModel::Qwen3_14B => "~9 GB",
+            SummaryModel::Qwen32B => "~20 GB",
         }
     }
 
@@ -56,7 +80,10 @@ impl SummaryModel {
         match self {
             SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct-q4_k_m.gguf",
             SummaryModel::Qwen3B => "qwen2.5-3b-instruct-q4_k_m.gguf",
-            SummaryModel::Qwen7B => "qwen2.5-7b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen7B => "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+            SummaryModel::Qwen3_8B => "Qwen3-8B-Q4_K_M.gguf",
+            SummaryModel::Qwen3_14B => "Qwen_Qwen3-14B-Q4_K_M.gguf",
+            SummaryModel::Qwen32B => "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
         }
     }
 
@@ -64,7 +91,10 @@ impl SummaryModel {
         match self {
             SummaryModel::Qwen1_5B => "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
             SummaryModel::Qwen3B => "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
-            SummaryModel::Qwen7B => "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf",
+            SummaryModel::Qwen7B => "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+            SummaryModel::Qwen3_8B => "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+            SummaryModel::Qwen3_14B => "https://huggingface.co/bartowski/Qwen_Qwen3-14B-GGUF/resolve/main/Qwen_Qwen3-14B-Q4_K_M.gguf",
+            SummaryModel::Qwen32B => "https://huggingface.co/bartowski/Qwen2.5-32B-Instruct-GGUF/resolve/main/Qwen2.5-32B-Instruct-Q4_K_M.gguf",
         }
     }
 
@@ -72,16 +102,12 @@ impl SummaryModel {
         Self::ALL.iter().copied().find(|m| m.name() == s)
     }
 
-    /// Non-HuggingFace mirror URL (ModelScope) for the same GGUF — for users
-    /// whose network blocks HuggingFace. Same filename as [`filename`], so a
-    /// browser-download dropped into the models folder is recognized as this
-    /// built-in model.
-    pub fn mirror_url(self) -> &'static str {
-        match self {
-            SummaryModel::Qwen1_5B => "https://modelscope.cn/models/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/master/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-            SummaryModel::Qwen3B => "https://modelscope.cn/models/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/master/qwen2.5-3b-instruct-q4_k_m.gguf",
-            SummaryModel::Qwen7B => "https://modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/master/qwen2.5-7b-instruct-q4_k_m.gguf",
-        }
+    /// Mirror URL for users whose network blocks HuggingFace: the same path on
+    /// the widely-used `hf-mirror.com` (works for any HF repo, same filename, so
+    /// a browser-download dropped into the models folder is recognized as this
+    /// built-in model).
+    pub fn mirror_url(self) -> String {
+        self.url().replace("https://huggingface.co/", "https://hf-mirror.com/")
     }
 }
 
