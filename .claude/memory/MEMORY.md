@@ -8,6 +8,7 @@
 - [Teams audio options](teams-audio-options.md) — getting Teams audio/speaker names without a bot (Graph callTranscript); per-participant needs a bot
 - [Project ledger](project-ledger.md) — Phase 26 stateful Overview: extract→reconcile→apply fold; id-validation, manual flag, deterministic ids (supersedes Phase 23 rollup)
 - [Cross-meeting synthesis](cross-meeting-synthesis.md) — Phase 23 compression infra (still used as extract input + chat fallback); the markdown Overview is legacy → see project-ledger
+- [Summary model catalog](summary-model-catalog.md) — adding summary LLM downloads: single-file GGUFs only (official Qwen shards Q4_K_M at 7B+); verify URL returns 206 first; mirror = hf-mirror.com swap
 - [macOS build](macos-build.md) — deployment target 13, Swift lib path, build.rs links libclang_rt.osx
 - [CI macOS Xcode 26](ci-macos-xcode26.md) — release macOS job needs macos-15 (Xcode 26 / macOS 26 SDK) for the screencapturekit Swift bridge
 - [CI Windows CRT](ci-windows-crt.md) — Windows release must force static MSVC CRT (sherpa /MT vs llama/whisper /MD link clash); also needs LLAMA_STATIC_CRT=1
