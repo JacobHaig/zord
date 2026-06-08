@@ -16,15 +16,17 @@ use llama_cpp_2::token::LlamaToken;
 
 use crate::opts::{truncate_chars, ChatRole, GenOpts};
 
-/// Selectable summary LLM (Qwen Instruct GGUF, Q4_K_M). A size/quality ladder
-/// from ~1 GB up to ~20 GB; all single-file downloads (the previous 7B pointed
-/// at an official repo that shards Q4_K_M into parts — a single-file fetch can't
-/// assemble those — so it now uses bartowski's single-file build). `ALL` is in
-/// ascending size/quality order, which is also the order the picker shows.
+/// Selectable summary LLM (Qwen / Gemma Instruct GGUF, Q4_K_M). A size/quality
+/// ladder from ~1 GB up to ~20 GB; all single-file downloads (the previous 7B
+/// pointed at an official repo that shards Q4_K_M into parts — a single-file
+/// fetch can't assemble those — so it now uses bartowski's single-file build).
+/// `ALL` is in ascending size order, which is also the order the picker shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SummaryModel {
     Qwen1_5B,
+    Gemma2_2B,
     Qwen3B,
+    Gemma3_4B,
     Qwen7B,
     Qwen3_8B,
     Qwen3_14B,
@@ -34,7 +36,9 @@ pub enum SummaryModel {
 impl SummaryModel {
     pub const ALL: &'static [SummaryModel] = &[
         SummaryModel::Qwen1_5B,
+        SummaryModel::Gemma2_2B,
         SummaryModel::Qwen3B,
+        SummaryModel::Gemma3_4B,
         SummaryModel::Qwen7B,
         SummaryModel::Qwen3_8B,
         SummaryModel::Qwen3_14B,
@@ -46,7 +50,9 @@ impl SummaryModel {
     pub fn name(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct",
+            SummaryModel::Gemma2_2B => "gemma-2-2b-it",
             SummaryModel::Qwen3B => "qwen2.5-3b-instruct",
+            SummaryModel::Gemma3_4B => "gemma-3-4b-it",
             SummaryModel::Qwen7B => "qwen2.5-7b-instruct",
             SummaryModel::Qwen3_8B => "qwen3-8b",
             SummaryModel::Qwen3_14B => "qwen3-14b",
@@ -57,7 +63,9 @@ impl SummaryModel {
     pub fn label(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "Qwen2.5 1.5B — fastest, lighter quality",
+            SummaryModel::Gemma2_2B => "Gemma 2 2B — efficient, strong for its size (8K context)",
             SummaryModel::Qwen3B => "Qwen2.5 3B — balanced (default)",
+            SummaryModel::Gemma3_4B => "Gemma 3 4B — big quality per GB, long context",
             SummaryModel::Qwen7B => "Qwen2.5 7B — strong, slower",
             SummaryModel::Qwen3_8B => "Qwen3 8B — newer, sharper reasoning",
             SummaryModel::Qwen3_14B => "Qwen3 14B — high quality, needs ~16 GB RAM",
@@ -68,7 +76,9 @@ impl SummaryModel {
     pub fn size_label(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "~1 GB",
+            SummaryModel::Gemma2_2B => "~1.7 GB",
             SummaryModel::Qwen3B => "~2 GB",
+            SummaryModel::Gemma3_4B => "~2.5 GB",
             SummaryModel::Qwen7B => "~4.7 GB",
             SummaryModel::Qwen3_8B => "~5 GB",
             SummaryModel::Qwen3_14B => "~9 GB",
@@ -79,7 +89,9 @@ impl SummaryModel {
     fn filename(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            SummaryModel::Gemma2_2B => "gemma-2-2b-it-Q4_K_M.gguf",
             SummaryModel::Qwen3B => "qwen2.5-3b-instruct-q4_k_m.gguf",
+            SummaryModel::Gemma3_4B => "google_gemma-3-4b-it-Q4_K_M.gguf",
             SummaryModel::Qwen7B => "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
             SummaryModel::Qwen3_8B => "Qwen3-8B-Q4_K_M.gguf",
             SummaryModel::Qwen3_14B => "Qwen_Qwen3-14B-Q4_K_M.gguf",
@@ -90,7 +102,9 @@ impl SummaryModel {
     pub fn url(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            SummaryModel::Gemma2_2B => "https://huggingface.co/bartowski/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf",
             SummaryModel::Qwen3B => "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+            SummaryModel::Gemma3_4B => "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf",
             SummaryModel::Qwen7B => "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
             SummaryModel::Qwen3_8B => "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
             SummaryModel::Qwen3_14B => "https://huggingface.co/bartowski/Qwen_Qwen3-14B-GGUF/resolve/main/Qwen_Qwen3-14B-Q4_K_M.gguf",
