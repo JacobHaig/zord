@@ -25,7 +25,6 @@ use crate::opts::{truncate_chars, ChatRole, GenOpts};
 pub enum SummaryModel {
     Qwen1_5B,
     Gemma2_2B,
-    Qwen3B,
     Gemma3_4B,
     Qwen7B,
     Qwen3_8B,
@@ -34,10 +33,13 @@ pub enum SummaryModel {
 }
 
 impl SummaryModel {
+    // Every model here must be commercially licensed (Apache-2.0 / MIT / Gemma
+    // Terms). Notably Qwen2.5-3B is NOT — it's the Qwen Research License
+    // (non-commercial) — so it is deliberately absent (its siblings 1.5B/7B/32B
+    // are Apache-2.0). See docs: model-licensing.
     pub const ALL: &'static [SummaryModel] = &[
         SummaryModel::Qwen1_5B,
         SummaryModel::Gemma2_2B,
-        SummaryModel::Qwen3B,
         SummaryModel::Gemma3_4B,
         SummaryModel::Qwen7B,
         SummaryModel::Qwen3_8B,
@@ -51,7 +53,6 @@ impl SummaryModel {
         match self {
             SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct",
             SummaryModel::Gemma2_2B => "gemma-2-2b-it",
-            SummaryModel::Qwen3B => "qwen2.5-3b-instruct",
             SummaryModel::Gemma3_4B => "gemma-3-4b-it",
             SummaryModel::Qwen7B => "qwen2.5-7b-instruct",
             SummaryModel::Qwen3_8B => "qwen3-8b",
@@ -63,8 +64,7 @@ impl SummaryModel {
     pub fn label(self) -> &'static str {
         match self {
             SummaryModel::Qwen1_5B => "Qwen2.5 1.5B — fastest, lighter quality",
-            SummaryModel::Gemma2_2B => "Gemma 2 2B — efficient, strong for its size (8K context)",
-            SummaryModel::Qwen3B => "Qwen2.5 3B — balanced (default)",
+            SummaryModel::Gemma2_2B => "Gemma 2 2B — balanced (default)",
             SummaryModel::Gemma3_4B => "Gemma 3 4B — big quality per GB, long context",
             SummaryModel::Qwen7B => "Qwen2.5 7B — strong, slower",
             SummaryModel::Qwen3_8B => "Qwen3 8B — newer, sharper reasoning",
@@ -77,7 +77,6 @@ impl SummaryModel {
         match self {
             SummaryModel::Qwen1_5B => "~1 GB",
             SummaryModel::Gemma2_2B => "~1.7 GB",
-            SummaryModel::Qwen3B => "~2 GB",
             SummaryModel::Gemma3_4B => "~2.5 GB",
             SummaryModel::Qwen7B => "~4.7 GB",
             SummaryModel::Qwen3_8B => "~5 GB",
@@ -90,7 +89,6 @@ impl SummaryModel {
         match self {
             SummaryModel::Qwen1_5B => "qwen2.5-1.5b-instruct-q4_k_m.gguf",
             SummaryModel::Gemma2_2B => "gemma-2-2b-it-Q4_K_M.gguf",
-            SummaryModel::Qwen3B => "qwen2.5-3b-instruct-q4_k_m.gguf",
             SummaryModel::Gemma3_4B => "google_gemma-3-4b-it-Q4_K_M.gguf",
             SummaryModel::Qwen7B => "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
             SummaryModel::Qwen3_8B => "Qwen3-8B-Q4_K_M.gguf",
@@ -103,7 +101,6 @@ impl SummaryModel {
         match self {
             SummaryModel::Qwen1_5B => "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
             SummaryModel::Gemma2_2B => "https://huggingface.co/bartowski/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf",
-            SummaryModel::Qwen3B => "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
             SummaryModel::Gemma3_4B => "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf",
             SummaryModel::Qwen7B => "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
             SummaryModel::Qwen3_8B => "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
@@ -201,7 +198,7 @@ pub struct OllamaModel {
 /// Curated small instruct models offered via the Ollama registry.
 pub fn ollama_models() -> &'static [OllamaModel] {
     &[
-        OllamaModel { repo: "qwen2.5", tag: "3b", filename: "qwen2.5-3b-ollama.gguf", label: "Qwen2.5 3B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~1.9 GB" },
+        // (Qwen2.5 3B intentionally omitted — Qwen Research License, non-commercial.)
         OllamaModel { repo: "qwen2.5", tag: "1.5b", filename: "qwen2.5-1.5b-ollama.gguf", label: "Qwen2.5 1.5B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~1 GB" },
         OllamaModel { repo: "llama3.2", tag: "3b", filename: "llama3.2-3b-ollama.gguf", label: "Llama 3.2 3B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~2 GB" },
         OllamaModel { repo: "phi3.5", tag: "latest", filename: "phi3.5-ollama.gguf", label: "Phi-3.5 mini Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~2.2 GB" },

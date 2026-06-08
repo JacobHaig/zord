@@ -75,9 +75,9 @@ pub struct Settings {
     /// auto. Lower = split into more speakers; higher = merge into fewer.
     #[serde(default = "default_diarize_threshold")]
     pub diarize_threshold: f32,
-    /// Speaker-segmentation model id for diarization ("pyannote-3.0",
-    /// "reverb-v1", "reverb-v2"). Reverb = Rev's fine-tunes — more accurate but
-    /// under a non-commercial license; downloaded on first use.
+    /// Speaker-segmentation model id for diarization (currently "pyannote-3.0",
+    /// MIT). Downloaded on first use. (Rev's Reverb fine-tunes were removed —
+    /// non-commercial license.)
     #[serde(default = "default_segmentation_model")]
     pub diarize_segmentation_model: String,
     /// Context window (tokens) used when *compressing* a meeting into dense prose
@@ -352,8 +352,18 @@ fn default_capture_mode() -> String {
     "both".to_string()
 }
 fn default_summary_model() -> String {
-    "qwen2.5-3b-instruct".to_string()
+    // Commercially licensed (Gemma Terms allow commercial use). The previous
+    // default, qwen2.5-3b-instruct, was removed — Qwen Research License is
+    // non-commercial. See `migrate_removed_models`.
+    "gemma-2-2b-it".to_string()
 }
+
+/// Ids of models removed for non-commercial licensing — a saved selection
+/// pointing at one is reset to the current default on load.
+const REMOVED_SUMMARY_MODELS: &[&str] = &[
+    "qwen2.5-3b-instruct",     // Qwen Research License (non-commercial)
+    "qwen2.5-3b-ollama.gguf",  // same model via the Ollama registry
+];
 fn default_summary_preset() -> String {
     "balanced".to_string()
 }
@@ -554,13 +564,24 @@ pub fn logs_dir() -> Result<PathBuf> {
 impl Settings {
     /// Load settings, or defaults if the file is missing/unreadable.
     pub fn load() -> Self {
-        match config_path().and_then(|p| Ok(std::fs::read_to_string(p)?)) {
+        let mut s = match config_path().and_then(|p| Ok(std::fs::read_to_string(p)?)) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
                 tracing::warn!("config parse failed ({e}); using defaults");
                 Settings::default()
             }),
             Err(_) => Settings::default(),
+        };
+        // Migrate away from models removed for non-commercial licensing so an
+        // upgraded install doesn't keep pointing at one. (Reverb segmentation is
+        // handled by SegmentationModel::parse_or_default falling back to pyannote.)
+        if REMOVED_SUMMARY_MODELS.contains(&s.summary_model.as_str()) {
+            tracing::info!(
+                "summary model '{}' is non-commercial and was removed; resetting to default",
+                s.summary_model
+            );
+            s.summary_model = default_summary_model();
         }
+        s
     }
 
     /// Persist settings to disk (creates the app data dir if needed). The file

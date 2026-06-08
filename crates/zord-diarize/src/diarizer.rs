@@ -22,45 +22,30 @@ const EMB_TAG: &str =
 /// likely to merge speakers; higher = more likely to split.
 const DEFAULT_THRESHOLD: f32 = 0.5;
 
-/// Selectable speaker-segmentation model. All of these load through sherpa's
-/// pyannote config — the Reverb models are pyannote-architecture variants
-/// fine-tuned by Rev on ~26k hours of expertly-labeled real meetings.
+/// Selectable speaker-segmentation model. Loads through sherpa's pyannote
+/// config. Only commercially-licensed models are offered — Rev's Reverb v1/v2
+/// were removed (Rev Non-Production License: non-commercial). An unknown/removed
+/// value (e.g. a saved "reverb-v2") falls back to pyannote via
+/// [`parse_or_default`]. The enum is kept open so a future commercially-licensed
+/// model (e.g. pyannote community-1, once ONNX-exported) can slot in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentationModel {
-    /// pyannote segmentation-3.0 — the long-standing default (MIT license).
+    /// pyannote segmentation-3.0 — the default (MIT license).
     Pyannote30,
-    /// Rev Reverb v1 — pyannote-3.0 fine-tune, ~16% better word-diarization
-    /// error than stock pyannote. Non-commercial license (Rev).
-    ReverbV1,
-    /// Rev Reverb v2 — WavLM-based, Rev's most accurate (~22% better than
-    /// stock pyannote). Large download. Non-commercial license (Rev).
-    ReverbV2,
 }
 
 impl SegmentationModel {
-    pub const ALL: &'static [SegmentationModel] = &[
-        SegmentationModel::Pyannote30,
-        SegmentationModel::ReverbV1,
-        SegmentationModel::ReverbV2,
-    ];
+    pub const ALL: &'static [SegmentationModel] = &[SegmentationModel::Pyannote30];
 
     pub fn name(self) -> &'static str {
         match self {
             SegmentationModel::Pyannote30 => "pyannote-3.0",
-            SegmentationModel::ReverbV1 => "reverb-v1",
-            SegmentationModel::ReverbV2 => "reverb-v2",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            SegmentationModel::Pyannote30 => "pyannote 3.0 — default (MIT license)",
-            SegmentationModel::ReverbV1 => {
-                "Reverb v1 — more accurate, ~11 MB (non-commercial license)"
-            }
-            SegmentationModel::ReverbV2 => {
-                "Reverb v2 — most accurate, ~254 MB (non-commercial license)"
-            }
+            SegmentationModel::Pyannote30 => "pyannote 3.0 (MIT license)",
         }
     }
 
@@ -69,8 +54,6 @@ impl SegmentationModel {
     fn stem(self) -> &'static str {
         match self {
             SegmentationModel::Pyannote30 => "sherpa-onnx-pyannote-segmentation-3-0",
-            SegmentationModel::ReverbV1 => "sherpa-onnx-reverb-diarization-v1",
-            SegmentationModel::ReverbV2 => "sherpa-onnx-reverb-diarization-v2",
         }
     }
 
