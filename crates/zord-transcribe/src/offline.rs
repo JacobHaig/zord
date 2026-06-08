@@ -18,11 +18,15 @@ use crate::Transcriber;
 /// returns how many were produced. Timestamps are sample-position-derived, so
 /// for Zord's wall-clock-aligned session WAVs they land on the session
 /// timeline exactly like live ones.
+/// `cancel` is polled between ~1-second blocks; when it returns `true`,
+/// transcription stops promptly (segments already emitted are kept — the caller
+/// decides what to do with them). Pass `&|| false` for an uncancellable run.
 pub fn transcribe_wav_file(
     transcriber: &Transcriber,
     source: Source,
     wav_path: &Path,
     on_segment: &mut dyn FnMut(Segment),
+    cancel: &dyn Fn() -> bool,
 ) -> Result<usize> {
     let mut reader =
         hound::WavReader::open(wav_path).with_context(|| format!("opening {wav_path:?}"))?;
@@ -42,6 +46,9 @@ pub fn transcribe_wav_file(
                             segmenter: &mut Segmenter,
                             count: &mut usize|
      -> Result<()> {
+        if cancel() {
+            return Ok(()); // cancelled — stop transcribing further blocks
+        }
         let mono = resampler.process(block)?;
         for vad in segmenter.push(&mono) {
             for seg in transcriber.transcribe(&vad.samples, source, vad.t_start_ms)? {
@@ -60,6 +67,9 @@ pub fn transcribe_wav_file(
                 if block.len() >= block_len {
                     handle_block(&block, &mut resampler, &mut segmenter, &mut count)?;
                     block.clear();
+                    if cancel() {
+                        break;
+                    }
                 }
             }
         }
@@ -70,15 +80,18 @@ pub fn transcribe_wav_file(
                 if block.len() >= block_len {
                     handle_block(&block, &mut resampler, &mut segmenter, &mut count)?;
                     block.clear();
+                    if cancel() {
+                        break;
+                    }
                 }
             }
         }
     }
-    if !block.is_empty() {
+    if !block.is_empty() && !cancel() {
         handle_block(&block, &mut resampler, &mut segmenter, &mut count)?;
     }
-    // Flush the trailing partial VAD chunk.
-    if let Some(vad) = segmenter.flush() {
+    // Flush the trailing partial VAD chunk (skip if cancelled).
+    if let Some(vad) = segmenter.flush().filter(|_| !cancel()) {
         for seg in transcriber.transcribe(&vad.samples, source, vad.t_start_ms)? {
             on_segment(seg);
             count += 1;

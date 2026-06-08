@@ -2276,14 +2276,14 @@ fn post_transcribe_inner(
         }
         let cancel = || token.map(cancelled).unwrap_or(false);
         let mut on_segment = |seg: Segment| {
-            // Keep-partial: once cancelled, stop persisting new segments (the
-            // ones already inserted are kept). The decode finishes in the
-            // background — Rust can't interrupt the call mid-segment.
+            // Keep-partial: segments transcribed before the cancel are kept.
             if !cancel() {
                 let _ = store.insert_segment(session_id, &seg);
             }
         };
-        match zord_transcribe::transcribe_wav_file(&transcriber, source, &wav, &mut on_segment) {
+        // `cancel` also stops the decode loop within ~1s (Phase C) — not just
+        // persistence — so a cancelled re-transcribe frees the CPU promptly.
+        match zord_transcribe::transcribe_wav_file(&transcriber, source, &wav, &mut on_segment, &cancel) {
             Ok(n) => total += n,
             Err(e) => {
                 let _ = ev.send(Event::Notice(format!("transcribing {suffix}: {e}")));

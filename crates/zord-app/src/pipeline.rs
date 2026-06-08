@@ -248,7 +248,7 @@ fn transcribe_wav(
         let _ = store.insert_segment(session_id, &seg);
         println!("[{} {}] {}", fmt_ts(seg.t_start_ms), seg.source.label(), seg.text);
     };
-    zord_transcribe::transcribe_wav_file(transcriber, source, wav_path, &mut on_segment)
+    zord_transcribe::transcribe_wav_file(transcriber, source, wav_path, &mut on_segment, &|| false)
 }
 
 /// `foo.wav` + "me" -> `foo.me.wav`
