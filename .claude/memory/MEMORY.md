@@ -16,6 +16,7 @@
 - [Data locations](data-locations.md) — app-data dir layout (config/db/models/audio/exports) per OS
 - [dx bundling gotchas](dx-bundling-gotchas.md) — info_plist REPLACES; app is ZordGui.app; build with --package
 - [Feature build deps](feature-build-deps.md) — perl/OpenSSL, ONNX, llama.cpp toolchain per feature
+- [Dep upgrade notes](dep-upgrade-notes.md) — June 2026 bump cycle: per-crate breaking changes (rusqlite u64, ureq 3, rodio, cpal, rubato); keyring 4 deferred (ecosystem split)
 - [Commit & workflow](commit-and-workflow.md) — NO co-author trailers; phased commits; verify before claiming
 - [Verification limits](verification-limits.md) — what can't run headlessly (live audio, LLM/ASR, Windows, signing)
 - [ASR/diarization model watchlist](asr-diarization-model-watchlist.md) — Parakeet v3 is the ceiling; Reverb added; Sortformer rejected; revisit triggers
