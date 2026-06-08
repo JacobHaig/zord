@@ -11,8 +11,8 @@ serde_json = { workspace = true }
 # native-tls → OS certificate store (Windows schannel / macOS Secure Transport),
 # so corporate HTTPS-inspection root CAs are trusted like the browser. rustls
 # (ureq's default) only trusts the bundled Mozilla roots and fails on those.
-ureq = { version = "2", default-features = false, features = ["native-tls", "gzip"] }
-native-tls = "0.2"
+# (ureq 3 manages native-tls itself via the TlsProvider — no direct dep needed.)
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
 # Verify content-addressed downloads (Ollama blob digests) against their hash —
 # the only integrity guarantee left once we trust corporate MITM CAs.
 sha2 = "0.10"

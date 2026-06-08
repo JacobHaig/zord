@@ -17,8 +17,10 @@ use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
+use ureq::http::Response;
+use ureq::tls::{TlsConfig, TlsProvider};
+use ureq::{Agent, Body};
 
 /// Hard ceiling for any single download (bytes). Generous enough for the
 /// largest GGUF/ONNX assets (a few GB) while bounding a malicious/compromised
@@ -26,32 +28,30 @@ use std::time::Duration;
 const MAX_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
 /// Build an agent that trusts the OS cert store and uses an env proxy if set.
-fn agent() -> ureq::Agent {
-    let mut builder = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(30))
-        .user_agent(concat!("zord/", env!("CARGO_PKG_VERSION")));
+/// `timeout` (when set) bounds the whole request; downloads pass `None` since
+/// large transfers can legitimately run long (the connect timeout still applies).
+fn agent(timeout: Option<Duration>) -> Agent {
+    let mut builder = ureq::Agent::config_builder()
+        .user_agent(concat!("zord/", env!("CARGO_PKG_VERSION")))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_global(timeout)
+        // Surface non-2xx as Ok(response) so we can read the error body
+        // (ApiError::Status) rather than ureq erroring before we see it.
+        .http_status_as_error(false)
+        // OS cert store via native-tls — trusts an IT-installed inspection CA,
+        // unlike rustls's bundled Mozilla roots.
+        .tls_config(TlsConfig::builder().provider(TlsProvider::NativeTls).build());
 
-    match native_tls::TlsConnector::new() {
-        Ok(connector) => builder = builder.tls_connector(Arc::new(connector)),
-        Err(e) => tracing::warn!("native-tls connector unavailable: {e}"),
-    }
-
-    builder = apply_env_proxy(builder);
-    builder.build()
-}
-
-/// Apply an env-var proxy (if one is set) to an in-progress agent builder.
-fn apply_env_proxy(mut builder: ureq::AgentBuilder) -> ureq::AgentBuilder {
     if let Some(p) = proxy_from_env() {
         match ureq::Proxy::new(&p) {
             Ok(proxy) => {
                 tracing::info!("using proxy from environment");
-                builder = builder.proxy(proxy);
+                builder = builder.proxy(Some(proxy));
             }
             Err(e) => tracing::warn!("ignoring invalid proxy '{p}': {e}"),
         }
     }
-    builder
+    builder.build().into()
 }
 
 /// First non-empty proxy URL from the standard environment variables.
@@ -102,14 +102,12 @@ pub fn post_json(
     body: &serde_json::Value,
     timeout: Duration,
 ) -> Result<serde_json::Value, ApiError> {
-    let mut req = agent()
-        .post(url)
-        .set("Content-Type", "application/json")
-        .timeout(timeout);
+    let agent = agent(Some(timeout));
+    let mut req = agent.post(url).header("Content-Type", "application/json");
     if let Some(key) = bearer.filter(|k| !k.trim().is_empty()) {
-        req = req.set("Authorization", &format!("Bearer {key}"));
+        req = req.header("Authorization", format!("Bearer {key}"));
     }
-    json_response(req.send_string(&body.to_string()))
+    json_response(req.send(body.to_string()))
 }
 
 /// GET `url` and parse the JSON response (see [`post_json`] for agent/auth).
@@ -118,9 +116,10 @@ pub fn get_json(
     bearer: Option<&str>,
     timeout: Duration,
 ) -> Result<serde_json::Value, ApiError> {
-    let mut req = agent().get(url).timeout(timeout);
+    let agent = agent(Some(timeout));
+    let mut req = agent.get(url);
     if let Some(key) = bearer.filter(|k| !k.trim().is_empty()) {
-        req = req.set("Authorization", &format!("Bearer {key}"));
+        req = req.header("Authorization", format!("Bearer {key}"));
     }
     json_response(req.call())
 }
@@ -136,22 +135,29 @@ pub fn post_sse(
     on_data: &mut dyn FnMut(&str),
 ) -> Result<(), ApiError> {
     use std::io::BufRead;
-    let mut req = agent()
+    let agent = agent(Some(timeout));
+    let mut req = agent
         .post(url)
-        .set("Content-Type", "application/json")
-        .set("Accept", "text/event-stream")
-        .timeout(timeout);
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream");
     if let Some(key) = bearer.filter(|k| !k.trim().is_empty()) {
-        req = req.set("Authorization", &format!("Bearer {key}"));
+        req = req.header("Authorization", format!("Bearer {key}"));
     }
-    match req.send_string(&body.to_string()) {
-        Ok(resp) => {
-            // A streaming completion has no Content-Length, so ureq returns an
+    match req.send(body.to_string()) {
+        Ok(mut resp) => {
+            let code = resp.status().as_u16();
+            if !(200..300).contains(&code) {
+                let body = resp.body_mut().read_to_string().unwrap_or_default();
+                return Err(ApiError::Status { code, body });
+            }
+            // A streaming completion has no Content-Length, so the body is an
             // unbounded reader; `lines()` would accumulate a single never-newline
             // body until OOM. Cap the whole stream so a malicious/MITM'd server
             // can't exhaust memory (chat replies are kilobytes; 64 MiB is ample).
             const MAX_SSE_BYTES: u64 = 64 * 1024 * 1024;
-            let reader = std::io::BufReader::new(resp.into_reader().take(MAX_SSE_BYTES));
+            let reader = std::io::BufReader::new(
+                resp.body_mut().with_config().limit(MAX_SSE_BYTES).reader(),
+            );
             for line in reader.lines() {
                 let line =
                     line.map_err(|e| ApiError::Connect(format!("reading stream: {e}")))?;
@@ -167,29 +173,27 @@ pub fn post_sse(
             }
             Ok(())
         }
-        Err(ureq::Error::Status(code, resp)) => Err(ApiError::Status {
-            code,
-            body: resp.into_string().unwrap_or_default(),
-        }),
-        Err(ureq::Error::Transport(t)) => Err(ApiError::Connect(t.to_string())),
+        Err(e) => Err(ApiError::Connect(e.to_string())),
     }
 }
 
 fn json_response(
-    result: Result<ureq::Response, ureq::Error>,
+    result: Result<Response<Body>, ureq::Error>,
 ) -> Result<serde_json::Value, ApiError> {
     match result {
-        Ok(resp) => {
+        Ok(mut resp) => {
+            let code = resp.status().as_u16();
             let text = resp
-                .into_string()
+                .body_mut()
+                .read_to_string()
                 .map_err(|e| ApiError::Connect(format!("reading response: {e}")))?;
+            if !(200..300).contains(&code) {
+                return Err(ApiError::Status { code, body: text });
+            }
             serde_json::from_str(&text).map_err(|e| ApiError::BadJson(e.to_string()))
         }
-        Err(ureq::Error::Status(code, resp)) => Err(ApiError::Status {
-            code,
-            body: resp.into_string().unwrap_or_default(),
-        }),
-        Err(ureq::Error::Transport(t)) => Err(ApiError::Connect(t.to_string())),
+        // With http_status_as_error(false), any Err here is transport/timeout.
+        Err(e) => Err(ApiError::Connect(e.to_string())),
     }
 }
 
@@ -200,14 +204,14 @@ pub fn download_to_file(
     dest: &Path,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    download_with(&agent(), url, dest, None, progress)
+    download_with(&agent(None), url, dest, None, progress)
 }
 
 /// Shared download driver: 3 retries around [`try_download`]. `expected_sha256`
 /// (a `sha256:<hex>` or bare-hex digest) is verified against the bytes before
 /// the temp→dest rename when present.
 fn download_with(
-    agent: &ureq::Agent,
+    agent: &Agent,
     url: &str,
     dest: &Path,
     expected_sha256: Option<&str>,
@@ -240,7 +244,7 @@ pub fn download_ollama_model(
     dest: &Path,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let agent = agent();
+    let agent = agent(None);
     let (blob_url, digest) = ollama_blob_url(&agent, repo, tag)?;
     tracing::info!(%blob_url, "downloading GGUF from Ollama registry");
     download_with(&agent, &blob_url, dest, Some(&digest), progress)
@@ -249,15 +253,22 @@ pub fn download_ollama_model(
 /// Resolve an Ollama `repo:tag` to `(blob URL, sha256 digest)` of its GGUF
 /// model layer. The digest is content-addressed (it *is* the URL path), so
 /// verifying the downloaded bytes against it detects substitution.
-fn ollama_blob_url(agent: &ureq::Agent, repo: &str, tag: &str) -> Result<(String, String)> {
+fn ollama_blob_url(agent: &Agent, repo: &str, tag: &str) -> Result<(String, String)> {
     let base = format!("https://registry.ollama.ai/v2/library/{repo}");
     let manifest_url = format!("{base}/manifests/{tag}");
-    let body = agent
+    let mut resp = agent
         .get(&manifest_url)
-        .set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
         .call()
-        .with_context(|| format!("fetching Ollama manifest {manifest_url}"))?
-        .into_string()
+        .with_context(|| format!("fetching Ollama manifest {manifest_url}"))?;
+    let code = resp.status().as_u16();
+    anyhow::ensure!(
+        (200..300).contains(&code),
+        "fetching Ollama manifest {manifest_url}: HTTP {code}"
+    );
+    let body = resp
+        .body_mut()
+        .read_to_string()
         .context("reading Ollama manifest")?;
     let manifest: serde_json::Value =
         serde_json::from_str(&body).context("parsing Ollama manifest")?;
@@ -274,14 +285,22 @@ fn ollama_blob_url(agent: &ureq::Agent, repo: &str, tag: &str) -> Result<(String
 }
 
 fn try_download(
-    agent: &ureq::Agent,
+    agent: &Agent,
     url: &str,
     dest: &Path,
     expected_sha256: Option<&str>,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
     let resp = agent.get(url).call().with_context(|| format!("requesting {url}"))?;
-    let total = resp.header("Content-Length").and_then(|h| h.parse::<u64>().ok());
+    // ureq no longer treats non-2xx as an error (http_status_as_error=false),
+    // so reject it here rather than downloading an error page.
+    let code = resp.status().as_u16();
+    anyhow::ensure!((200..300).contains(&code), "{url}: HTTP {code}");
+    let total = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
     // Reject an oversized advertised length up front (cheap DoS guard).
     if let Some(t) = total {
         if t > MAX_DOWNLOAD_BYTES {
@@ -290,7 +309,7 @@ fn try_download(
     }
     let tmp = dest.with_extension("partial");
     let mut file = std::fs::File::create(&tmp)?;
-    let mut reader = resp.into_reader();
+    let mut reader = resp.into_body().into_reader();
     let mut hasher = expected_sha256.map(|_| Sha256::new());
     let mut buf = vec![0u8; 1 << 20];
     let mut downloaded = 0u64;
@@ -365,7 +384,7 @@ mod tests {
     #[test]
     #[ignore]
     fn resolves_ollama_blob_url() {
-        let (url, digest) = ollama_blob_url(&agent(), "qwen2.5", "1.5b").unwrap();
+        let (url, digest) = ollama_blob_url(&agent(None), "qwen2.5", "1.5b").unwrap();
         assert!(url.contains("/blobs/sha256:"), "unexpected blob url: {url}");
         assert!(digest.starts_with("sha256:"), "unexpected digest: {digest}");
         assert!(url.ends_with(&digest), "url must be content-addressed by the digest");
@@ -395,7 +414,7 @@ mod tests {
         let _ = std::fs::remove_file(&dest);
         let bogus = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         let r = download_with(
-            &agent(),
+            &agent(None),
             &format!("http://127.0.0.1:{port}/blob"),
             &dest,
             Some(bogus),
