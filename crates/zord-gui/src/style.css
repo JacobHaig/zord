@@ -427,6 +427,15 @@ body {
 .sg-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .search-hit { display: flex; gap: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px; line-height: 1.45; border-left: 3px solid transparent; }
 .search-hit:hover { background: var(--panel-2); border-left-color: var(--me); }
+.note-group { border-left: 3px solid var(--others); }
+.sg-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--others); border: 1px solid var(--others); border-radius: 4px; padding: 1px 5px; margin-right: 4px; }
+.note-hit { padding: 9px 14px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
+
+/* Per-session host notes panel (editable, searchable, AI-visible). */
+.notes-panel .notes-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--others); border: 1px solid var(--others); border-radius: 4px; padding: 1px 5px; }
+.notes-input { width: 100%; min-height: 90px; resize: vertical; margin-top: 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font: inherit; font-size: 13px; line-height: 1.5; outline: none; }
+.notes-input:focus { border-color: var(--me); }
+.notes-input::placeholder { color: var(--muted); }
 
 /* Flash-highlight a transcript line jumped to from search. */
 .line.hit { background: rgba(94,166,255,0.18); border-radius: 6px; transition: background 0.4s ease; }

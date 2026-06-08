@@ -375,6 +375,14 @@ fn MainApp() -> Element {
     // preference — on a small screen these can otherwise bury the transcript).
     let mut show_summary = use_signal(|| true);
     let mut show_compressed = use_signal(|| false);
+    // Host notes for the viewed session (links / action items / reminders),
+    // editable + searchable + fed to the AI. `notes` is the saved value (drives
+    // whether the panel shows content); `notes_draft` is the textarea buffer,
+    // persisted on blur. `note_results` holds notes that matched a search.
+    let mut notes = use_signal(|| Option::<String>::None);
+    let mut notes_draft = use_signal(String::new);
+    let mut show_notes = use_signal(|| false);
+    let mut note_results = use_signal(Vec::<(String, String)>::new);
     // Per-action busy flags for the session toolbar (set on click, cleared when
     // the corresponding result event lands) so buttons show progress + can't be
     // double-fired.
@@ -500,6 +508,13 @@ fn MainApp() -> Element {
                     compressed.set(v);
                     compressing.set(false);
                 }
+                Event::Notes(v) => {
+                    notes_draft.set(v.clone().unwrap_or_default());
+                    // Open the panel automatically when the session already has notes.
+                    show_notes.set(v.as_ref().is_some_and(|n| !n.trim().is_empty()));
+                    notes.set(v);
+                }
+                Event::NoteResults(v) => note_results.set(v),
                 Event::Overview(v) => {
                     overview.set(v);
                     overview_busy.set(false);
@@ -885,6 +900,7 @@ fn MainApp() -> Element {
             search_query.set(q.clone());
             if q.trim().is_empty() {
                 search_results.set(Vec::new());
+                note_results.set(Vec::new());
             } else {
                 let _ = engine.db_tx.send(DbCmd::Search(q));
             }
@@ -1513,6 +1529,44 @@ fn MainApp() -> Element {
                     }
                 }
 
+                // Host notes (links / action items / reminders) — editable,
+                // searchable, and fed to the AI. Available for any saved session.
+                if let View::Session(id) = &*view.read() {
+                    {
+                        let id = id.clone();
+                        let open = *show_notes.read();
+                        let eng = engine.clone();
+                        rsx! {
+                            div { class: "summary notes-panel",
+                                div { class: "summary-head",
+                                    button {
+                                        class: "panel-toggle",
+                                        onclick: move |_| { let v = *show_notes.peek(); show_notes.set(!v); },
+                                        span { class: "chev", if open { "▾" } else { "▸" } }
+                                        span { "Notes" }
+                                    }
+                                    if notes.read().is_some() {
+                                        span { class: "notes-badge", title: "These notes are searchable and visible to your AI summary + chat", "saved" }
+                                    }
+                                }
+                                if open {
+                                    textarea {
+                                        class: "notes-input",
+                                        placeholder: "Links, action items, reminders to revisit in later sessions… (searchable; your AI summary and \"ask this meeting\" chat can see these)",
+                                        value: "{notes_draft}",
+                                        oninput: move |e| notes_draft.set(e.value()),
+                                        onfocusout: move |_| {
+                                            let text = notes_draft.peek().clone();
+                                            let _ = eng.db_tx.send(DbCmd::SetNotes { id: id.clone(), notes: text.clone() });
+                                            notes.set((!text.trim().is_empty()).then_some(text));
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Speaker legend (rename diarized speakers) — only for a saved
                 // session that has speaker labels.
                 if let View::Session(id) = &*view.read() {
@@ -1562,6 +1616,7 @@ fn MainApp() -> Element {
                 if *view.read() == View::Search {
                     SearchView {
                         results: search_results,
+                        note_results,
                         sessions,
                         query: search_query,
                         on_query,
@@ -2525,6 +2580,7 @@ fn TranscriptView(
 #[component]
 fn SearchView(
     results: Signal<Vec<(String, Segment)>>,
+    note_results: Signal<Vec<(String, String)>>,
     sessions: Signal<Vec<Session>>,
     query: Signal<String>,
     on_query: EventHandler<String>,
@@ -2534,6 +2590,7 @@ fn SearchView(
     let sess = sessions.read();
     let started: HashMap<String, u64> = sess.iter().map(|s| (s.id.clone(), s.started_at)).collect();
     let titles: HashMap<String, String> = sess.iter().map(|s| (s.id.clone(), session_title(s))).collect();
+    let note_hits: Vec<(String, String)> = note_results.read().clone();
 
     // Group hits by session, sort lines chronologically, sessions newest-first.
     let mut groups: HashMap<String, Vec<Segment>> = HashMap::new();
@@ -2548,6 +2605,7 @@ fn SearchView(
 
     let q_empty = query.read().trim().is_empty();
     let total: usize = ordered.iter().map(|(_, s)| s.len()).sum();
+    let no_hits = ordered.is_empty() && note_hits.is_empty();
 
     rsx! {
         div { class: "search-view",
@@ -2561,15 +2619,36 @@ fn SearchView(
             }
             if !q_empty {
                 div { class: "search-count",
-                    "{total} match(es) across {ordered.len()} meeting(s)"
+                    "{total} transcript match(es) across {ordered.len()} meeting(s)"
+                    if !note_hits.is_empty() { " · {note_hits.len()} in notes" }
                 }
             }
             div { class: "search-results",
                 if q_empty {
-                    div { class: "empty", "Type to search across every meeting's transcript." }
-                } else if ordered.is_empty() {
+                    div { class: "empty", "Search every meeting's transcript and your session notes." }
+                } else if no_hits {
                     div { class: "empty", "No matches." }
                 } else {
+                    // Host-note matches first (high-signal: links / action items).
+                    for (sid, note) in note_hits {
+                        {
+                            let title = titles.get(&sid).cloned().unwrap_or_else(|| short_id(&sid));
+                            let when = started.get(&sid).copied().map(relative_time).unwrap_or_default();
+                            let sid_open = sid.clone();
+                            rsx! {
+                                div { class: "search-group note-group",
+                                    div {
+                                        class: "search-group-head",
+                                        title: "Open this meeting's notes",
+                                        onclick: move |_| on_open.call((sid_open.clone(), None)),
+                                        span { class: "sg-title", span { class: "sg-badge", "Notes" } " {title}" }
+                                        span { class: "sg-meta", "{when}" }
+                                    }
+                                    div { class: "note-hit", "{note}" }
+                                }
+                            }
+                        }
+                    }
                     for (sid, segs) in ordered {
                         {
                             let title = titles.get(&sid).cloned().unwrap_or_else(|| short_id(&sid));

@@ -78,6 +78,10 @@ pub enum Event {
     /// A session's dense-prose compression (loaded or freshly generated)
     /// (Phase 23). `None` = none yet.
     Compressed(Option<String>),
+    /// A session's host notes (loaded). `None` = none.
+    Notes(Option<String>),
+    /// Sessions whose notes matched a search: `(session_id, notes)`.
+    NoteResults(Vec<(String, String)>),
     /// The cross-meeting Overview rollup (loaded or freshly synthesized)
     /// (Phase 23). `None` = none generated yet.
     Overview(Option<OverviewData>),
@@ -343,6 +347,8 @@ pub enum DbCmd {
         speaker: i32,
         name: String,
     },
+    /// Save the host's free-form notes for a session (empty clears them).
+    SetNotes { id: String, notes: String },
     /// Load the most recently stored cross-meeting Overview (Phase 23).
     LoadOverview,
     /// Load the rolling project ledger (Phase 26) — no LLM, just reads.
@@ -612,6 +618,21 @@ fn render_labeled_transcript(
         .join("\n")
 }
 
+/// Prepend the host's session notes (links, action items, reminders) to LLM
+/// grounding input as an authoritative block, so summaries / compression / chat
+/// all see them alongside the transcript. No-op when there are no notes.
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+fn with_notes(store: &Store, session_id: &str, transcript: String) -> String {
+    match store.get_notes(session_id).ok().flatten() {
+        Some(n) if !n.trim().is_empty() => format!(
+            "Notes from the session host (links, action items, and reminders — \
+             treat these as authoritative and include them where relevant):\n{}\n\n{transcript}",
+            n.trim()
+        ),
+        _ => transcript,
+    }
+}
+
 /// The external-server connection from settings (Phase 24).
 #[cfg(feature = "llm-remote")]
 fn remote_cfg(settings: &zord_config::Settings) -> zord_summarize::RemoteConfig {
@@ -723,7 +744,7 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
         return;
     }
     let names = store.speaker_names(session_id).unwrap_or_default();
-    let transcript = render_labeled_transcript(&segs, &names);
+    let transcript = with_notes(&store, session_id, render_labeled_transcript(&segs, &names));
 
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing the LLM for compression…".to_string()));
@@ -956,7 +977,7 @@ fn meeting_chat_context(
         return None;
     }
     let names = store.speaker_names(session_id).unwrap_or_default();
-    let transcript = render_labeled_transcript(&segs, &names);
+    let transcript = with_notes(store, session_id, render_labeled_transcript(&segs, &names));
 
     // Reserve headroom (chat output + conversation + prompt) within the window.
     let budget = (settings.compress_ctx as usize).saturating_sub(1400);
@@ -1002,7 +1023,7 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
     // Label each line by its diarized speaker (and custom name, if assigned) so
     // the LLM can attribute statements/actions to the right person.
     let names = store.speaker_names(session_id).unwrap_or_default();
-    let transcript = render_labeled_transcript(&segs, &names);
+    let transcript = with_notes(&store, session_id, render_labeled_transcript(&segs, &names));
 
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing the LLM…".to_string()));
@@ -1232,12 +1253,25 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             DbCmd::ListSessions => {
                 emit_sessions(&store, &ev);
             }
-            DbCmd::Search(q) => {
-                let q = sanitize_fts(&q);
-                if q.is_empty() {
+            DbCmd::Search(raw) => {
+                let raw = raw.trim().to_string();
+                let q = sanitize_fts(&raw);
+                if raw.is_empty() {
                     let _ = ev.send(Event::SearchResults(Vec::new()));
-                } else if let Ok(v) = store.search(&q) {
-                    let _ = ev.send(Event::SearchResults(v));
+                    let _ = ev.send(Event::NoteResults(Vec::new()));
+                } else {
+                    // Transcript FTS (skip if the query sanitizes to nothing).
+                    let segs = if q.is_empty() {
+                        Vec::new()
+                    } else {
+                        store.search(&q).unwrap_or_default()
+                    };
+                    let _ = ev.send(Event::SearchResults(segs));
+                    // Host notes: literal substring of the RAW query (links/URLs
+                    // aren't FTS tokens, so search them verbatim).
+                    if let Ok(n) = store.search_notes(&raw) {
+                        let _ = ev.send(Event::NoteResults(n));
+                    }
                 }
             }
             DbCmd::Load(id) => {
@@ -1247,6 +1281,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
                 let _ = ev.send(Event::Summary(store.get_summary(&id).ok().flatten()));
                 let _ = ev.send(Event::Compressed(store.get_compressed(&id).ok().flatten()));
+                let _ = ev.send(Event::Notes(store.get_notes(&id).ok().flatten()));
                 let _ = ev.send(Event::DiarizeSpeakers(
                     store.get_diarize_speakers(&id).ok().flatten().unwrap_or(0),
                 ));
@@ -1264,6 +1299,9 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             DbCmd::Rename { id, title } => {
                 let _ = store.set_session_title(&id, &title);
                 emit_sessions(&store, &ev);
+            }
+            DbCmd::SetNotes { id, notes } => {
+                let _ = store.set_notes(&id, &notes);
             }
             DbCmd::DeleteSession(id) => {
                 let _ = store.delete_session(&id);

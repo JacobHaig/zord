@@ -119,6 +119,44 @@ impl Store {
         Ok(())
     }
 
+    /// Store (or clear, with empty text) the host's free-form notes for a session.
+    pub fn set_notes(&self, session_id: &str, notes: &str) -> Result<()> {
+        let trimmed = notes.trim();
+        self.conn.execute(
+            "UPDATE sessions SET notes = ?2 WHERE id = ?1",
+            params![session_id, (!trimmed.is_empty()).then_some(notes)],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a session's host notes, if any.
+    pub fn get_notes(&self, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT notes FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, Option<String>>(0))?;
+        Ok(rows.next().transpose()?.flatten())
+    }
+
+    /// Find sessions whose notes contain `query` (case-insensitive substring).
+    /// Notes are short + few, so a LIKE scan is plenty — no FTS needed. Returns
+    /// `(session_id, notes)`, newest session first.
+    pub fn search_notes(&self, query: &str) -> Result<Vec<(String, String)>> {
+        // Escape LIKE wildcards so the query is matched literally.
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, notes FROM sessions
+             WHERE notes IS NOT NULL AND notes LIKE ?1 ESCAPE '\\'
+             ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map(params![pattern], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Fetch a session's stored summary, if any.
     pub fn get_summary(&self, session_id: &str) -> Result<Option<String>> {
         let mut stmt = self
@@ -620,6 +658,9 @@ fn add_late_columns(conn: &Connection) {
     // Per-session expected speaker count for diarization (NULL = auto-detect),
     // set from the control next to "Identify speakers".
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN diarize_speakers INTEGER", []);
+    // Free-form per-session notes written by the host (links, action items,
+    // reminders). Searchable, and fed to the AI features as authoritative input.
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN notes TEXT", []);
 }
 
 /// Create the base tables, indexes, FTS virtual table, and sync triggers
@@ -984,6 +1025,48 @@ mod ledger_tests {
         let db = dir.join("t.db");
         let _ = std::fs::remove_file(&db);
         db
+    }
+
+    fn mk_session(s: &Store, id: &str, started_at: u64) {
+        s.create_session(&Session {
+            id: id.into(),
+            started_at,
+            ended_at: None,
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn notes_roundtrip_and_literal_search() {
+        let db = tmp_db("notes");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1", 10);
+        mk_session(&s, "s2", 20);
+
+        assert!(s.get_notes("s1").unwrap().is_none());
+        s.set_notes("s1", "Follow up: https://example.com/spec — 50% done").unwrap();
+        s.set_notes("s2", "  ").unwrap(); // whitespace clears
+        assert_eq!(
+            s.get_notes("s1").unwrap().as_deref(),
+            Some("Follow up: https://example.com/spec — 50% done")
+        );
+        assert!(s.get_notes("s2").unwrap().is_none());
+
+        // Literal substring (URLs aren't tokenized).
+        let hits = s.search_notes("example.com/spec").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "s1");
+        // `%` is matched literally, not as a LIKE wildcard.
+        assert_eq!(s.search_notes("50%").unwrap().len(), 1);
+        assert!(s.search_notes("nonexistent").unwrap().is_empty());
+        // A bare `%` must not match everything.
+        s.set_notes("s2", "no percent here").unwrap();
+        assert_eq!(s.search_notes("%").unwrap().len(), 1); // only s1 contains a literal %
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     #[test]
