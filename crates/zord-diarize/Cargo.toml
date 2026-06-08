@@ -17,6 +17,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 sherpa-onnx = { version = "1.13", optional = true }
 tar = { version = "0.4", optional = true }
-bzip2 = { version = "0.4", optional = true }
+bzip2 = { version = "0.6", optional = true }
 directories = { version = "6", optional = true }
 zord-net = { workspace = true, optional = true }
