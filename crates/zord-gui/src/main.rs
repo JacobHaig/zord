@@ -163,6 +163,16 @@ enum View {
     Overview,
 }
 
+/// A running background job, mirrored from the engine's `Event::JobStarted`
+/// (the jobs panel renders these and cancels them by `id`).
+#[derive(Clone, PartialEq)]
+struct JobView {
+    id: String,
+    kind: String,
+    label: String,
+    started_at: u64,
+}
+
 /// A manual edit to the project ledger (Phase 26e). Carried by a single
 /// `EventHandler<LedgerAction>` so the ledger components stay decoupled from the
 /// `Engine` (which isn't `PartialEq` and so can't be a component prop); the App
@@ -422,11 +432,10 @@ fn MainApp() -> Element {
     let mut model_progress = use_signal(|| Option::<(String, u8)>::None);
     // Name of a model whose download failed → show the manual-fetch fallback.
     let mut download_help = use_signal(|| Option::<String>::None);
-    // Background-jobs indicator (Phase 24-ish polish): a live board of running
-    // work. `job_starts` maps an active job key → start time (ms); reconciled from
-    // the existing busy signals so no engine changes are needed. `job_tick` forces
-    // the elapsed timers to re-render each second; `diarize_est_secs` is a rough
-    // ETA for diarization scaled to the meeting length (captured at click time).
+    // Background-jobs board: a live, cancellable list of running jobs driven by
+    // the engine's job registry (Event::JobStarted/JobFinished). `job_tick`
+    // forces the elapsed timers to re-render each second; `diarize_est_secs` is a
+    // rough ETA for diarization scaled to the meeting length (captured at click).
     let mut show_jobs = use_signal(|| false);
     // Whether the Export format dropdown is open.
     let mut show_export_menu = use_signal(|| false);
@@ -434,7 +443,11 @@ fn MainApp() -> Element {
     let mut show_generate_menu = use_signal(|| false);
     // Active tab in the settings overlay's left nav (Phase 3).
     let mut settings_tab = use_signal(|| "transcription".to_string());
-    let mut job_starts = use_signal(std::collections::HashMap::<String, u64>::new);
+    // Authoritative list of running background jobs (Phase: cancellable jobs),
+    // driven by Event::JobStarted/JobFinished from the engine — independent of
+    // the viewed session, so navigating/recording never clears them. The inline
+    // per-button busy flags (summarizing/diarizing/…) are separate.
+    let mut jobs = use_signal(Vec::<JobView>::new);
     let mut job_tick = use_signal(|| 0u64);
     let mut diarize_est_secs = use_signal(|| Option::<u64>::None);
 
@@ -541,6 +554,15 @@ fn MainApp() -> Element {
                 Event::AudioFiles { me, others } => audio_files.set((me, others)),
                 Event::Retranscribing => retranscribing.set(true),
                 Event::Retranscribed => retranscribing.set(false),
+                Event::JobStarted { id, kind, label } => {
+                    let mut v = jobs.write();
+                    if !v.iter().any(|j| j.id == id) {
+                        v.push(JobView { id, kind, label, started_at: now_ms() });
+                    }
+                }
+                Event::JobFinished { id } => {
+                    jobs.write().retain(|j| j.id != id);
+                }
                 Event::Playing(v) => playing_seg.set(v),
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
@@ -658,47 +680,15 @@ fn MainApp() -> Element {
         }
     });
 
-    // Reconcile the background-jobs board from the live busy signals: insert a
-    // start time when a job appears, drop it when it finishes.
-    use_effect(move || {
-        let mut active: Vec<&str> = Vec::new();
-        if matches!(*status.read(), Status::Recording) {
-            active.push("record");
-        }
-        if model_progress.read().is_some() {
-            active.push("download");
-        }
-        if retranscribing() {
-            active.push("transcribe");
-        }
-        if summarizing() {
-            active.push("summarize");
-        }
-        if compressing() {
-            active.push("compress");
-        }
-        if diarizing() {
-            active.push("diarize");
-        }
-        if overview_busy() {
-            active.push("overview");
-        }
-        if chat_busy() {
-            active.push("chat");
-        }
-        let now = now_ms();
-        let mut starts = job_starts.write();
-        for k in &active {
-            starts.entry((*k).to_string()).or_insert(now);
-        }
-        starts.retain(|k, _| active.iter().any(|a| *a == k));
-    });
+    // The background-jobs board is driven directly by Event::JobStarted/
+    // JobFinished (see the event loop) — the authoritative, view-independent
+    // source. No reconciliation from busy bools.
 
     // Tick once a second while any job is running so elapsed timers update.
     use_future(move || async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            if !job_starts.peek().is_empty() {
+            if !jobs.peek().is_empty() {
                 let v = *job_tick.peek();
                 job_tick.set(v.wrapping_add(1));
             } else if *show_jobs.peek() {
@@ -713,6 +703,32 @@ fn MainApp() -> Element {
         Status::Recording | Status::PreparingModel | Status::Downloading(_)
     );
     let status_text = status_label(&st);
+
+    // Cancel a background job from the jobs panel: request cancellation in the
+    // engine and optimistically drop it from the list (JobFinished also removes
+    // it). Cancellation is cooperative — see Engine::cancel_job.
+    let on_cancel_job = {
+        let engine = engine.clone();
+        move |id: String| {
+            engine.cancel_job(&id);
+            // Clear the matching inline button flag now (a cancelled job's result
+            // event is skipped, so the flag wouldn't otherwise reset).
+            if let Some(kind) = jobs.read().iter().find(|j| j.id == id).map(|j| j.kind.clone()) {
+                match kind.as_str() {
+                    "summarize" => summarizing.set(false),
+                    "compress" => compressing.set(false),
+                    "diarize" => {
+                        diarizing.set(false);
+                        diarize_est_secs.set(None);
+                    }
+                    "retranscribe" => retranscribing.set(false),
+                    "overview" => overview_busy.set(false),
+                    _ => {}
+                }
+            }
+            jobs.write().retain(|j| j.id != id);
+        }
+    };
 
     let on_record = {
         let engine = engine.clone();
@@ -730,9 +746,7 @@ fn MainApp() -> Element {
                 compressed.set(None);
                 summarizing.set(false);
                 compressing.set(false);
-                // NOTE: diarization is a detached background job keyed by session
-                // (cleared by Event::Diarized) — starting a recording must not
-                // clear its in-progress indicator.
+                diarizing.set(false);
                 retranscribing.set(false);
                 audio_files.set((None, None));
                 let _ = engine.play_tx.send(PlayCmd::Stop);
@@ -887,8 +901,7 @@ fn MainApp() -> Element {
             compressed.set(None);
             summarizing.set(false);
             compressing.set(false);
-            // diarization is a detached per-session background job — don't clear
-            // its indicator just because we opened a different session.
+            diarizing.set(false);
             reset_chat(chat, chat_input, chat_busy, chat_scope);
             scroll_to_seg.set(seg_id);
             let _ = engine.db_tx.send(DbCmd::Load(sid));
@@ -972,7 +985,7 @@ fn MainApp() -> Element {
                     }
                 }
                 div { class: "rail-bottom",
-                    if job_starts.read().len() > 0 {
+                    if !jobs.read().is_empty() {
                         button {
                             class: "rail-btn jobs",
                             title: "Background jobs",
@@ -1098,7 +1111,7 @@ fn MainApp() -> Element {
                                                 compressed.set(None);
                                                 summarizing.set(false);
                                                 compressing.set(false);
-                                                // detached per-session job — see Event::Diarized
+                                                diarizing.set(false);
                                                 retranscribing.set(false);
                                                 diar_speakers.set(String::new());
                                                 audio_files.set((None, None));
@@ -1619,8 +1632,8 @@ fn MainApp() -> Element {
         }
 
         // ---- Background jobs panel ----
-        if *show_jobs.read() && !job_starts.read().is_empty() {
-            JobsPanel { show_jobs, job_starts, job_tick, model_progress, diarize_est_secs }
+        if *show_jobs.read() && !jobs.read().is_empty() {
+            JobsPanel { show_jobs, jobs, job_tick, diarize_est_secs, on_cancel: on_cancel_job }
         }
 
         // ---- Confirm-delete dialog ----
@@ -3388,23 +3401,21 @@ fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> E
     }
 }
 
-/// The background-jobs board: one row per running job with elapsed time,
-/// per-job detail, and optional progress. Visibility is gated at the call site.
+/// The background-jobs board: one row per running cancellable job, with elapsed
+/// time and a cancel (✕) button. Driven by the engine's job registry, so it's
+/// independent of the viewed session. Visibility is gated at the call site.
 #[component]
 fn JobsPanel(
     mut show_jobs: Signal<bool>,
-    job_starts: Signal<std::collections::HashMap<String, u64>>,
+    jobs: Signal<Vec<JobView>>,
     job_tick: Signal<u64>,
-    model_progress: Signal<Option<(String, u8)>>,
     diarize_est_secs: Signal<Option<u64>>,
+    on_cancel: EventHandler<String>,
 ) -> Element {
     let _ = job_tick.read(); // re-render each second for elapsed timers
     let now = now_ms();
-    let mp = model_progress.read().clone();
     let est = *diarize_est_secs.read();
-    let mut rows: Vec<(String, u64)> =
-        job_starts.read().iter().map(|(k, v)| (k.clone(), *v)).collect();
-    rows.sort_by_key(|(k, _)| job_order(k));
+    let rows = jobs.read().clone();
     rsx! {
         div { class: "jobs-overlay", onclick: move |_| show_jobs.set(false),
             div {
@@ -3414,29 +3425,30 @@ fn JobsPanel(
                     span { "Background jobs" }
                     button { class: "close-btn", onclick: move |_| show_jobs.set(false), {icon("close")} }
                 }
-                for (key, start) in rows {
+                for job in rows {
                     {
-                        let elapsed = now.saturating_sub(start) / 1000;
-                        let (ic_name, title) = job_label(&key);
-                        // Per-job detail, optional progress %, and ETA.
-                        let (detail, pct): (String, Option<u8>) =
-                            job_detail(key.as_str(), &mp, est, elapsed);
+                        let elapsed = now.saturating_sub(job.started_at) / 1000;
+                        let detail = job_detail(&job.kind, est, elapsed);
+                        let id = job.id.clone();
                         rsx! {
-                            div { key: "{key}", class: "job-row",
-                                span { class: "job-icon", {icon(ic_name)} }
+                            div { key: "{job.id}", class: "job-row",
+                                span { class: "job-icon", {icon(job_icon(&job.kind))} }
                                 div { class: "job-main",
-                                    div { class: "job-title", "{title}" }
+                                    div { class: "job-title", "{job.label}" }
                                     div { class: "job-detail", "{detail}" }
-                                    if let Some(p) = pct {
-                                        div { class: "job-bar", div { class: "job-bar-fill", style: "width: {p}%" } }
-                                    }
                                 }
                                 span { class: "job-time", "{fmt_dur(elapsed)}" }
+                                button {
+                                    class: "job-cancel",
+                                    title: "Cancel this job",
+                                    onclick: move |_| on_cancel.call(id.clone()),
+                                    {icon("close")}
+                                }
                             }
                         }
                     }
                 }
-                div { class: "jobs-foot", "Local processing — times are estimates and vary with your hardware." }
+                div { class: "jobs-foot", "Cancel stops a job at its next safe point; in-progress local LLM work may finish in the background." }
             }
         }
     }
@@ -3453,64 +3465,30 @@ fn status_label(st: &Status) -> String {
     }
 }
 
-/// Icon name (registry key) + label for a background-job key.
-fn job_label(key: &str) -> (&'static str, &'static str) {
-    match key {
-        "record" => ("record", "Recording"),
-        "transcribe" => ("refresh", "Transcribing"),
-        "download" => ("download", "Downloading model"),
-        "summarize" => ("sparkles", "Summarizing"),
-        "compress" => ("archive", "Compressing"),
-        "overview" => ("overview", "Building overview"),
-        "chat" => ("chat", "Answering chat"),
-        "diarize" => ("users", "Identifying speakers"),
-        _ => ("", "Working"),
+/// Registry icon for a background-job kind.
+fn job_icon(kind: &str) -> &'static str {
+    match kind {
+        "summarize" => "sparkles",
+        "compress" => "archive",
+        "overview" => "overview",
+        "diarize" => "users",
+        "retranscribe" => "refresh",
+        _ => "sparkles",
     }
 }
 
-/// Per-job detail line + optional progress % for a background-job row.
-fn job_detail(
-    key: &str,
-    mp: &Option<(String, u8)>,
-    est: Option<u64>,
-    elapsed: u64,
-) -> (String, Option<u8>) {
-    match key {
-        "download" => {
-            let (name, p) = mp.clone().unwrap_or_default();
-            let eta = if p > 0 && p < 100 {
-                format!(" · ETA {}", fmt_dur(elapsed * (100 - p as u64) / p as u64))
-            } else {
-                String::new()
-            };
-            (format!("{name} · {p}%{eta}"), Some(p))
-        }
-        "diarize" => {
-            let d = match est {
-                Some(e) => format!("~{} left (estimate)", fmt_dur(e.saturating_sub(elapsed))),
-                None => "processing audio…".to_string(),
-            };
-            (d, None)
-        }
-        "record" => ("capturing audio".to_string(), None),
-        "transcribe" => ("transcribing the kept audio…".to_string(), None),
-        "overview" => ("compressing + synthesizing".to_string(), None),
-        _ => ("running…".to_string(), None),
-    }
-}
-
-/// Stable display order for the jobs panel.
-fn job_order(key: &str) -> u8 {
-    match key {
-        "record" => 0,
-        "transcribe" => 1,
-        "download" => 2,
-        "summarize" => 3,
-        "compress" => 4,
-        "overview" => 5,
-        "diarize" => 6,
-        "chat" => 7,
-        _ => 9,
+/// Per-job detail line (ETA for diarization; a short hint otherwise).
+fn job_detail(kind: &str, est: Option<u64>, elapsed: u64) -> String {
+    match kind {
+        "diarize" => match est {
+            Some(e) => format!("~{} left (estimate)", fmt_dur(e.saturating_sub(elapsed))),
+            None => "processing audio…".to_string(),
+        },
+        "retranscribe" => "transcribing the kept audio…".to_string(),
+        "overview" => "compressing + synthesizing…".to_string(),
+        "summarize" => "generating notes…".to_string(),
+        "compress" => "condensing…".to_string(),
+        _ => "running…".to_string(),
     }
 }
 

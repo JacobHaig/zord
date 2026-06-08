@@ -120,6 +120,15 @@ pub enum Event {
     /// Terminal counterpart of [`Event::Retranscribing`] — sent whether the
     /// pass succeeded or failed, so the GUI's busy state always clears.
     Retranscribed,
+    /// A cancellable background job started. The GUI tracks these as the
+    /// authoritative source for the jobs panel + the inline busy indicators —
+    /// independent of which session is being viewed, so navigating/recording
+    /// never clears them. `id` is unique (e.g. "diarize:<session>"); `kind` is
+    /// one of summarize|compress|overview|diarize|retranscribe|download.
+    JobStarted { id: String, kind: String, label: String },
+    /// A background job ended (success, no-op, error, or cancellation). Removes
+    /// it from the jobs panel and clears the matching inline indicator.
+    JobFinished { id: String },
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -413,6 +422,56 @@ pub enum SummCmd {
     Chat { scope: ChatScope, turns: Vec<(bool, String)> },
 }
 
+/// Registry of cancellable background jobs: job id → cooperative cancel flag.
+/// Workers register a token on start, poll it at safe checkpoints, and remove it
+/// on finish; the GUI flips it via [`Engine::cancel_job`]. Rust can't kill a
+/// thread, so cancellation is cooperative — it takes effect at the next
+/// checkpoint (instant for chunked work like downloads/streams; for an
+/// uninterruptible local LLM generation the result is simply discarded once it
+/// returns). Cheap to clone (shared `Arc`).
+#[derive(Clone, Default)]
+pub struct Jobs {
+    tokens: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
+}
+
+impl Jobs {
+    /// Register a job and announce it; returns its cancel token.
+    fn begin(&self, ev: &UnboundedSender<Event>, id: &str, kind: &str, label: &str) -> Arc<AtomicBool> {
+        let token = Arc::new(AtomicBool::new(false));
+        if let Ok(mut m) = self.tokens.lock() {
+            m.insert(id.to_string(), token.clone());
+        }
+        let _ = ev.send(Event::JobStarted {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            label: label.to_string(),
+        });
+        token
+    }
+
+    /// Deregister a job and announce its end (idempotent).
+    fn end(&self, ev: &UnboundedSender<Event>, id: &str) {
+        if let Ok(mut m) = self.tokens.lock() {
+            m.remove(id);
+        }
+        let _ = ev.send(Event::JobFinished { id: id.to_string() });
+    }
+
+    /// Request cancellation of a running job (no-op if it already finished).
+    pub fn cancel(&self, id: &str) {
+        if let Ok(m) = self.tokens.lock() {
+            if let Some(t) = m.get(id) {
+                t.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// True if a cancel was requested for this job's token.
+fn cancelled(token: &Arc<AtomicBool>) -> bool {
+    token.load(Ordering::Relaxed)
+}
+
 /// Handle the GUI keeps to drive the engine. Cheaply clonable.
 #[derive(Clone)]
 pub struct Engine {
@@ -423,6 +482,15 @@ pub struct Engine {
     pub summ_tx: mpsc::Sender<SummCmd>,
     /// Replay a transcript line from a retained WAV.
     pub play_tx: mpsc::Sender<PlayCmd>,
+    /// Cancellable background-job registry (see [`Jobs`]).
+    pub jobs: Jobs,
+}
+
+impl Engine {
+    /// Request cancellation of the background job with this id.
+    pub fn cancel_job(&self, id: &str) {
+        self.jobs.cancel(id);
+    }
 }
 
 impl Engine {
@@ -435,6 +503,7 @@ impl Engine {
         let (model_tx, model_rx) = mpsc::channel::<ModelCmd>();
         let (summ_tx, summ_rx) = mpsc::channel::<SummCmd>();
         let (play_tx, play_rx) = mpsc::channel::<PlayCmd>();
+        let jobs = Jobs::default();
 
         {
             let ev = ev_tx.clone();
@@ -444,7 +513,8 @@ impl Engine {
         {
             let ev = ev_tx.clone();
             let dbp = db_path.clone();
-            thread::spawn(move || db_loop(db_rx, ev, dbp));
+            let jobs = jobs.clone();
+            thread::spawn(move || db_loop(db_rx, ev, dbp, jobs));
         }
         {
             let ev = ev_tx.clone();
@@ -452,7 +522,8 @@ impl Engine {
         }
         {
             let ev = ev_tx.clone();
-            thread::spawn(move || summarize_loop(summ_rx, ev, db_path));
+            let jobs = jobs.clone();
+            thread::spawn(move || summarize_loop(summ_rx, ev, db_path, jobs));
         }
         {
             let ev = ev_tx;
@@ -465,6 +536,7 @@ impl Engine {
                 model_tx,
                 summ_tx,
                 play_tx,
+                jobs,
             },
             ev_rx,
         )
@@ -473,7 +545,7 @@ impl Engine {
 
 /// Worker that generates session summaries (local LLM, heavy). Real impl only
 /// in `summaries` builds; otherwise it reports a friendly notice.
-fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_path: PathBuf) {
+fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_path: PathBuf, jobs: Jobs) {
     // A chat keeps its model resident across turns so follow-ups don't reload it.
     // One-shot jobs (summarize/compress/overview) load + drop their own model, so
     // we free the resident one first to keep peak RAM at a single model.
@@ -482,21 +554,35 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
     while let Ok(cmd) = rx.recv() {
         #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
         match cmd {
+            // These run a single (uninterruptible) generation, so cancellation is
+            // "detach": the token is passed in and the result is discarded if it
+            // was cancelled by the time generation returns. Chat is not a tracked
+            // job (it has its own inline busy state).
             SummCmd::Summarize(id) => {
                 chat_model = None;
-                summarize_one(&id, &ev, &db_path);
+                let jid = format!("summarize:{id}");
+                let token = jobs.begin(&ev, &jid, "summarize", "Summarizing meeting");
+                summarize_one(&id, &ev, &db_path, &token);
+                jobs.end(&ev, &jid);
             }
             SummCmd::Compress(id) => {
                 chat_model = None;
-                compress_one(&id, &ev, &db_path);
+                let jid = format!("compress:{id}");
+                let token = jobs.begin(&ev, &jid, "compress", "Compressing meeting");
+                compress_one(&id, &ev, &db_path, &token);
+                jobs.end(&ev, &jid);
             }
             SummCmd::Overview => {
                 chat_model = None;
-                overview_one(&ev, &db_path);
+                let token = jobs.begin(&ev, "overview", "overview", "Synthesizing overview");
+                overview_one(&ev, &db_path, &token);
+                jobs.end(&ev, "overview");
             }
             SummCmd::FoldOverview { rebuild } => {
                 chat_model = None;
-                fold_overview(&ev, &db_path, rebuild);
+                let token = jobs.begin(&ev, "overview", "overview", "Updating project ledger");
+                fold_overview(&ev, &db_path, rebuild, &token);
+                jobs.end(&ev, "overview");
             }
             SummCmd::Chat { scope, turns } => {
                 chat_one(&mut chat_model, scope, turns, &ev, &db_path);
@@ -504,8 +590,7 @@ fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_pa
         }
         #[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
         {
-            let _ = &cmd;
-            let _ = &db_path;
+            let _ = (&cmd, &db_path, &jobs);
             let _ = ev.send(Event::Notice(
                 "AI features aren't built in — rebuild with `--features llm-local` and/or `--features llm-remote`.".to_string(),
             ));
@@ -624,7 +709,7 @@ fn resolve_summary_model_path(
 
 /// Compress a session's transcript into dense prose and store it (Phase 23).
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf) {
+fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf, token: &Arc<AtomicBool>) {
     let store = match Store::open(db_path) {
         Ok(s) => s,
         Err(e) => {
@@ -648,6 +733,9 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
     let _ = ev.send(Event::Notice("Compressing… (runs in the background)".to_string()));
     match llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
         Ok(text) => {
+            if cancelled(token) {
+                return; // cancelled mid-generation → discard (detach)
+            }
             let _ = store.set_compressed(session_id, &text);
             let _ = ev.send(Event::Compressed(Some(text)));
             let _ = ev.send(Event::Notice("Compressed.".to_string()));
@@ -661,7 +749,7 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
 /// Synthesize the cross-meeting Overview (Phase 23). Long-running; progress is
 /// relayed as notices, the result emitted as `Event::Overview`.
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path) {
+fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path, token: &Arc<AtomicBool>) {
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing the LLM…".to_string()));
     let Some(llm) = build_llm_backend(&settings, ev) else {
@@ -672,6 +760,9 @@ fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path) {
     };
     match zord_overview::synthesize(db_path, &settings, &llm, &mut progress) {
         Ok(o) => {
+            if cancelled(token) {
+                return; // cancelled mid-synthesis → discard (detach)
+            }
             let _ = ev.send(Event::Overview(Some(OverviewData {
                 text: o.text,
                 generated_at: o.generated_at_ms,
@@ -689,7 +780,7 @@ fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path) {
 /// sessions are applied. Progress is relayed as notices; the refreshed ledger is
 /// emitted as `Event::Ledger` (also on failure, so the UI reflects partial work).
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn fold_overview(ev: &UnboundedSender<Event>, db_path: &std::path::Path, rebuild: bool) {
+fn fold_overview(ev: &UnboundedSender<Event>, db_path: &std::path::Path, rebuild: bool, token: &Arc<AtomicBool>) {
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing the LLM…".to_string()));
     let Some(llm) = build_llm_backend(&settings, ev) else {
@@ -699,6 +790,7 @@ fn fold_overview(ev: &UnboundedSender<Event>, db_path: &std::path::Path, rebuild
         }
         return;
     };
+    let _ = token; // fold persists per-meeting (resumable); cancel just drops the panel entry
     let mut progress = |note: &str| {
         let _ = ev.send(Event::Notice(note.to_string()));
     };
@@ -894,7 +986,7 @@ fn meeting_chat_context(
 }
 
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf) {
+fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf, token: &Arc<AtomicBool>) {
     let store = match Store::open(db_path) {
         Ok(s) => s,
         Err(e) => {
@@ -920,6 +1012,10 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
     let _ = ev.send(Event::Notice("Summarizing…".to_string()));
     match llm.summarize(&transcript, &settings.effective_summary_prompt()) {
         Ok(text) => {
+            // Cancelled mid-generation → discard the result (detach).
+            if cancelled(token) {
+                return;
+            }
             let _ = store.set_summary(session_id, &text);
             let _ = ev.send(Event::Summary(Some(text.clone())));
 
@@ -1123,7 +1219,7 @@ fn build_ledger_view(store: &Store) -> LedgerView {
 // DB query thread
 // ---------------------------------------------------------------------------
 
-fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathBuf) {
+fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathBuf, jobs: Jobs) {
     let store = match Store::open(&db_path) {
         Ok(s) => s,
         Err(e) => {
@@ -1284,13 +1380,25 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 // stay responsive. The worker opens its own Store.
                 let ev = ev.clone();
                 let db_path = db_path.clone();
-                thread::spawn(move || diarize_session_ondemand(&db_path, &id, num_speakers, &ev));
+                let jobs = jobs.clone();
+                thread::spawn(move || {
+                    let jid = format!("diarize:{id}");
+                    let token = jobs.begin(&ev, &jid, "diarize", "Identifying speakers");
+                    diarize_session_ondemand(&db_path, &id, num_speakers, &ev, &token);
+                    jobs.end(&ev, &jid);
+                });
             }
             DbCmd::Retranscribe(id) => {
                 // Heavy (model load + minutes of inference); own thread + Store.
                 let ev = ev.clone();
                 let db_path = db_path.clone();
-                thread::spawn(move || retranscribe_session_ondemand(&db_path, &id, &ev));
+                let jobs = jobs.clone();
+                thread::spawn(move || {
+                    let jid = format!("retranscribe:{id}");
+                    let token = jobs.begin(&ev, &jid, "retranscribe", "Re-transcribing meeting");
+                    retranscribe_session_ondemand(&db_path, &id, &ev, &token);
+                    jobs.end(&ev, &jid);
+                });
             }
         }
     }
@@ -1407,10 +1515,11 @@ fn diarize_session_ondemand(
     session_id: &str,
     num_speakers: u32,
     ev: &UnboundedSender<Event>,
+    token: &Arc<AtomicBool>,
 ) {
     #[cfg(not(feature = "diarization"))]
     {
-        let _ = (db_path, session_id, num_speakers);
+        let _ = (db_path, session_id, num_speakers, token);
         let _ = ev.send(Event::Notice(
             "Diarization isn't built in — rebuild with `--features diarization`.".to_string(),
         ));
@@ -1435,14 +1544,18 @@ fn diarize_session_ondemand(
                     .to_string(),
             ));
         }
-        let speakers = Store::open(db_path)
-            .ok()
-            .and_then(|s| s.speaker_names(session_id).ok())
-            .unwrap_or_default();
-        let _ = ev.send(Event::Diarized {
-            id: session_id.to_string(),
-            speakers,
-        });
+        // If cancelled, don't repaint the view with the result (detach); the
+        // panel entry is cleared by JobFinished from the wrapper either way.
+        if !cancelled(token) {
+            let speakers = Store::open(db_path)
+                .ok()
+                .and_then(|s| s.speaker_names(session_id).ok())
+                .unwrap_or_default();
+            let _ = ev.send(Event::Diarized {
+                id: session_id.to_string(),
+                speakers,
+            });
+        }
     }
 }
 
@@ -1989,7 +2102,7 @@ fn run_session(
     // transcript comes from. Runs before diarization (which labels segments).
     let post_pass = settings.auto_transcribe;
     if post_pass {
-        post_transcribe_session(&store, &session_id, &audio_prefix, ev);
+        post_transcribe_session(&store, &session_id, &audio_prefix, ev, None);
     } else if !live {
         let _ = ev.send(Event::Notice(
             "Recording saved — transcription deferred. Open the session and press \
@@ -2035,7 +2148,12 @@ fn run_session(
 /// post-transcribe from the kept WAVs, then re-derive speaker labels when the
 /// session had them (re-transcribing wipes segments, labels included). Always
 /// ends with [`Event::Retranscribed`] so the GUI busy state clears.
-fn retranscribe_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &UnboundedSender<Event>) {
+fn retranscribe_session_ondemand(
+    db_path: &PathBuf,
+    session_id: &str,
+    ev: &UnboundedSender<Event>,
+    token: &Arc<AtomicBool>,
+) {
     let done = |ev: &UnboundedSender<Event>| {
         let _ = ev.send(Event::Retranscribed);
     };
@@ -2066,18 +2184,18 @@ fn retranscribe_session_ondemand(db_path: &PathBuf, session_id: &str, ev: &Unbou
     // transcription should honor the diarize-auto setting like a normal stop.
     let first_transcription = store.segments(session_id).map(|v| v.is_empty()).unwrap_or(false);
 
-    let ok = post_transcribe_session(&store, session_id, std::path::Path::new(&prefix), ev);
+    let ok = post_transcribe_session(&store, session_id, std::path::Path::new(&prefix), ev, Some(token));
     // Segments were replaced — any custom speaker labels were on the old rows.
     let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
 
     let want_diarize = had_speakers
         || (first_transcription && zord_config::Settings::load().diarize_auto);
-    if ok && want_diarize && cfg!(feature = "diarization") {
+    if ok && want_diarize && !cancelled(token) && cfg!(feature = "diarization") {
         let _ = ev.send(Event::Notice(
             "Re-identifying speakers on the new transcript…".to_string(),
         ));
         let pinned = store.get_diarize_speakers(session_id).ok().flatten().unwrap_or(0);
-        diarize_session_ondemand(db_path, session_id, pinned, ev);
+        diarize_session_ondemand(db_path, session_id, pinned, ev, token);
     }
     done(ev)
 }
@@ -2091,20 +2209,24 @@ fn post_transcribe_session(
     session_id: &str,
     audio_prefix: &std::path::Path,
     ev: &UnboundedSender<Event>,
+    token: Option<&Arc<AtomicBool>>,
 ) -> bool {
     let _ = ev.send(Event::Retranscribing);
-    let ok = post_transcribe_inner(store, session_id, audio_prefix, ev);
+    let ok = post_transcribe_inner(store, session_id, audio_prefix, ev, token);
     let _ = ev.send(Event::Retranscribed);
     ok
 }
 
 /// [`post_transcribe_session`] body — split out so the bracketing
-/// Retranscribing/Retranscribed events cover every early return.
+/// Retranscribing/Retranscribed events cover every early return. `token`, when
+/// present, makes it cancellable: on cancel it stops persisting further segments
+/// (keep-partial — segments transcribed so far are retained).
 fn post_transcribe_inner(
     store: &Store,
     session_id: &str,
     audio_prefix: &std::path::Path,
     ev: &UnboundedSender<Event>,
+    token: Option<&Arc<AtomicBool>>,
 ) -> bool {
     let settings = zord_config::Settings::load();
     let model = ModelId::parse(&settings.retranscribe_model)
@@ -2152,14 +2274,23 @@ fn post_transcribe_inner(
         if !wav.exists() {
             continue;
         }
+        let cancel = || token.map(cancelled).unwrap_or(false);
         let mut on_segment = |seg: Segment| {
-            let _ = store.insert_segment(session_id, &seg);
+            // Keep-partial: once cancelled, stop persisting new segments (the
+            // ones already inserted are kept). The decode finishes in the
+            // background — Rust can't interrupt the call mid-segment.
+            if !cancel() {
+                let _ = store.insert_segment(session_id, &seg);
+            }
         };
         match zord_transcribe::transcribe_wav_file(&transcriber, source, &wav, &mut on_segment) {
             Ok(n) => total += n,
             Err(e) => {
                 let _ = ev.send(Event::Notice(format!("transcribing {suffix}: {e}")));
             }
+        }
+        if cancel() {
+            break; // don't start the next channel
         }
     }
     if total == 0 {
