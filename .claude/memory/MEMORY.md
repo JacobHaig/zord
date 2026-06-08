@@ -17,6 +17,7 @@
 - [dx bundling gotchas](dx-bundling-gotchas.md) — info_plist REPLACES; app is ZordGui.app; build with --package
 - [Feature build deps](feature-build-deps.md) — perl/OpenSSL, ONNX, llama.cpp toolchain per feature
 - [Dep upgrade notes](dep-upgrade-notes.md) — June 2026 bump cycle: per-crate breaking changes (rusqlite u64, ureq 3, rodio, cpal, rubato); keyring 4 deferred (ecosystem split)
+- [Model licensing](model-licensing.md) — ships commercial: every model must be commercial-licensed; Qwen2.5-3B + Reverb v1/v2 removed (non-commercial); audit in docs/model-licensing.md
 - [Commit & workflow](commit-and-workflow.md) — NO co-author trailers; phased commits; verify before claiming
 - [Verification limits](verification-limits.md) — what can't run headlessly (live audio, LLM/ASR, Windows, signing)
 - [ASR/diarization model watchlist](asr-diarization-model-watchlist.md) — Parakeet v3 is the ceiling; Reverb added; Sortformer rejected; revisit triggers
