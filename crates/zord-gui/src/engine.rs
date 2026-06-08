@@ -280,6 +280,9 @@ pub enum RecorderCmd {
     /// muted, mic audio is dropped (recorded as silence) — no transcript, meter
     /// falls to zero.
     SetMicMuted(bool),
+    /// Mute/unmute the desktop/system audio ("Others") mid-recording without
+    /// stopping. Same semantics as [`SetMicMuted`] for the system channel.
+    SetSystemMuted(bool),
     /// Stop the engine entirely (process exit normally handles this; kept for
     /// completeness / future graceful shutdown).
     #[allow(dead_code)]
@@ -1675,8 +1678,9 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 }
             }
             RecorderCmd::Shutdown => break,
-            RecorderCmd::Stop => {}            // nothing recording
-            RecorderCmd::SetMicMuted(_) => {} // nothing recording
+            RecorderCmd::Stop => {}               // nothing recording
+            RecorderCmd::SetMicMuted(_) => {}     // nothing recording
+            RecorderCmd::SetSystemMuted(_) => {}  // nothing recording
         }
     }
 }
@@ -1697,9 +1701,13 @@ struct SessionOpts {
     live: bool,
 }
 
-/// Block until Stop / Shutdown, applying live mic mute toggles in the meantime.
-/// Returns `true` if it ended because of `Shutdown`.
-fn wait_for_stop(rx: &mpsc::Receiver<RecorderCmd>, mic_muted: &Arc<AtomicBool>) -> bool {
+/// Block until Stop / Shutdown, applying live mic/desktop mute toggles in the
+/// meantime. Returns `true` if it ended because of `Shutdown`.
+fn wait_for_stop(
+    rx: &mpsc::Receiver<RecorderCmd>,
+    mic_muted: &Arc<AtomicBool>,
+    sys_muted: &Arc<AtomicBool>,
+) -> bool {
     let mut shutdown = false;
     loop {
         match rx.recv() {
@@ -1713,6 +1721,7 @@ fn wait_for_stop(rx: &mpsc::Receiver<RecorderCmd>, mic_muted: &Arc<AtomicBool>) 
                 break;
             }
             Ok(RecorderCmd::SetMicMuted(m)) => mic_muted.store(m, Ordering::Relaxed),
+            Ok(RecorderCmd::SetSystemMuted(m)) => sys_muted.store(m, Ordering::Relaxed),
             Ok(RecorderCmd::Start { .. }) => {} // ignore double-start
         }
     }
@@ -1813,8 +1822,10 @@ fn run_session(
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let mut procs = Vec::new();
-    // Toggled live by RecorderCmd::SetMicMuted; read by the mic proc thread.
+    // Toggled live by RecorderCmd::SetMicMuted/SetSystemMuted; read by the
+    // respective proc threads.
     let mic_muted = Arc::new(AtomicBool::new(false));
+    let sys_muted = Arc::new(AtomicBool::new(false));
     // Set on Stop/Shutdown so the worker threads bail out *promptly* instead of
     // draining a whole queued backlog (which made Stop feel unresponsive when the
     // pipeline was behind real time). Any not-yet-transcribed tail is dropped; if
@@ -1847,7 +1858,7 @@ fn run_session(
             Ok(s) => {
                 let sys_level = zord_audio::LevelControl::new(
                     zord_audio::LevelMode::parse(&settings.others_level_mode, settings.others_gain_db));
-                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), None, sys_level, stopping.clone()));
+                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), Some(sys_muted.clone()), sys_level, stopping.clone()));
                 Some(s)
             }
             Err(e) => {
@@ -1936,8 +1947,8 @@ fn run_session(
         })
     });
 
-    // Wait for Stop / Shutdown (also handle live mic mute toggles).
-    let shutdown = wait_for_stop(rx, &mic_muted);
+    // Wait for Stop / Shutdown (also handle live mic/desktop mute toggles).
+    let shutdown = wait_for_stop(rx, &mic_muted, &sys_muted);
 
     // Tell the worker threads to bail out of any queued backlog promptly.
     stopping.store(true, Ordering::Relaxed);
@@ -2239,9 +2250,9 @@ fn spawn_proc(
             if stopping.load(Ordering::Relaxed) {
                 break;
             }
-            // Muted mic: replace this buffer with silence so timing stays aligned
-            // (segmenter/WAV keep advancing) but nothing is transcribed and the
-            // meter naturally falls to zero.
+            // Muted channel: replace this buffer with silence so timing stays
+            // aligned (segmenter/WAV keep advancing) but nothing is transcribed
+            // and the meter naturally falls to zero.
             let mut frame = match muted {
                 Some(ref m) if m.load(Ordering::Relaxed) => vec![0.0f32; frame.len()],
                 _ => frame,

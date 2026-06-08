@@ -43,6 +43,8 @@ fn icon_paths(name: &str) -> &'static str {
         "stop" => "<rect x='6' y='6' width='12' height='12' rx='2'/>",
         "mic" => "<rect x='9' y='3' width='6' height='11' rx='3'/><path d='M5 11a7 7 0 0 0 14 0'/><line x1='12' y1='18' x2='12' y2='21'/>",
         "mic-off" => "<path d='M15 9.3V6a3 3 0 0 0-5.7-1.3'/><path d='M9 9v2a3 3 0 0 0 4.6 2.5'/><path d='M5 11a7 7 0 0 0 11 5.3'/><line x1='12' y1='18' x2='12' y2='21'/><line x1='3' y1='3' x2='21' y2='21'/>",
+        "speaker" => "<path d='M11 5L6 9H3v6h3l5 4z'/><path d='M15.5 8.5a5 5 0 0 1 0 7'/><path d='M18.5 5.5a9 9 0 0 1 0 13'/>",
+        "speaker-off" => "<path d='M11 5L6 9H3v6h3l5 4z'/><line x1='22' y1='9' x2='16' y2='15'/><line x1='16' y1='9' x2='22' y2='15'/>",
         "play" => "<path d='M7 5v14l11-7z'/>",
         // AI / speaker actions
         "sparkles" => "<path d='M12 3l1.7 5.3a2 2 0 0 0 1.3 1.3L20.3 11l-5.3 1.7a2 2 0 0 0-1.3 1.3L12 19.3l-1.7-5.3a2 2 0 0 0-1.3-1.3L3.7 11l5.3-1.7a2 2 0 0 0 1.3-1.3z'/>",
@@ -402,8 +404,10 @@ fn MainApp() -> Element {
     let mut confirm_retranscribe = use_signal(|| Option::<String>::None);
     // Seconds elapsed in the current recording (0 when idle).
     let mut rec_secs = use_signal(|| 0u64);
-    // Whether the mic ("Me") is muted during the current recording.
+    // Whether the mic ("Me") / desktop ("Others") channels are muted during the
+    // current recording.
     let mut mic_muted = use_signal(|| false);
+    let mut sys_muted = use_signal(|| false);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     // Sidebar width (px) — adjusted by dragging the splitter, persisted in
@@ -722,6 +726,7 @@ fn MainApp() -> Element {
                 reset_chat(chat, chat_input, chat_busy, chat_scope);
                 speaker_names.write().clear();
                 mic_muted.set(false);
+                sys_muted.set(false);
                 view.set(View::Live);
                 let s = settings.peek().clone();
                 let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
@@ -740,8 +745,9 @@ fn MainApp() -> Element {
         }
     };
 
-    // Whether the mic is part of the current capture mode (system-only = no mic).
+    // Which channels the current capture mode includes (drives the mute buttons).
     let mic_in_capture = settings.read().capture_mode != "system";
+    let system_in_capture = settings.read().capture_mode != "mic";
     // Appearance: tint session badges by meaning vs monochrome (Settings → Theme).
     let tint_badges = settings.read().badge_tint;
 
@@ -751,6 +757,15 @@ fn MainApp() -> Element {
             let next = !*mic_muted.peek();
             let _ = engine.rec_tx.send(RecorderCmd::SetMicMuted(next));
             mic_muted.set(next);
+        }
+    };
+
+    let on_mute_system = {
+        let engine = engine.clone();
+        move |_| {
+            let next = !*sys_muted.peek();
+            let _ = engine.rec_tx.send(RecorderCmd::SetSystemMuted(next));
+            sys_muted.set(next);
         }
     };
 
@@ -1116,13 +1131,22 @@ fn MainApp() -> Element {
                 }
                 // ---- Record: permanent primary at the sidebar foot ----
                 div { class: "sidebar-foot",
+                    if recording && system_in_capture {
+                        button {
+                            class: if *sys_muted.read() { "record muted" } else { "record mute" },
+                            title: if *sys_muted.read() { "Desktop audio muted — click to unmute" } else { "Mute desktop / system audio" },
+                            onclick: on_mute_system,
+                            {icon(if *sys_muted.read() { "speaker-off" } else { "speaker" })}
+                            if *sys_muted.read() { "Unmute desktop" } else { "Mute desktop" }
+                        }
+                    }
                     if recording && mic_in_capture {
                         button {
                             class: if *mic_muted.read() { "record muted" } else { "record mute" },
                             title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
                             onclick: on_mute,
                             {icon(if *mic_muted.read() { "mic-off" } else { "mic" })}
-                            if *mic_muted.read() { "Unmute" } else { "Mute" }
+                            if *mic_muted.read() { "Unmute mic" } else { "Mute mic" }
                         }
                     }
                     button {
