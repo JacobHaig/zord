@@ -1,0 +1,36 @@
+[package]
+name = "zord-integrations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Platform integrations (Discord first). Everything heavy lives behind the
+# `discord` feature so the default workspace build never pulls songbird/serenity.
+# Phase 27 ships only the DAVE receive spike (the `discord-spike` bin); the
+# `Integration` seam (Phase 29) and the full Discord source (Phase 30) land later.
+
+[features]
+default = []
+discord = ["dep:songbird", "dep:serenity", "dep:tokio", "dep:dashmap"]
+
+[dependencies]
+zord-core = { workspace = true }
+zord-audio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Discord-only — versions/features mirror songbird 0.6's own voice_receive
+# example (the known-good combination for DAVE-enabled per-user receive).
+songbird = { version = "0.6", default-features = true, features = ["receive"], optional = true }
+serenity = { version = "0.12", features = ["cache", "framework", "standard_framework", "voice", "http", "rustls_backend"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+dashmap = { version = "6", optional = true }
+
+# The DAVE receive spike. `required-features` keeps it out of a bare
+# `cargo build` — it only compiles with `--features discord`.
+[[bin]]
+name = "discord-spike"
+path = "src/bin/discord_spike.rs"
+required-features = ["discord"]

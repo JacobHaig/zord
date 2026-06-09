@@ -15,4 +15,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 directories = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 keyring = { version = "3", optional = true }

@@ -1463,10 +1463,9 @@ fn session_audio_files(store: &Store, session_id: &str) -> (Option<String>, Opti
     let Some(prefix) = prefix else {
         return (None, None);
     };
-    let existing = |suffix: &str| {
-        let p = format!("{prefix}.{suffix}.wav");
-        std::path::Path::new(&p).exists().then_some(p)
-    };
+    // Resolve in the new folder layout or the legacy flat layout (Phase 28).
+    let existing =
+        |role: &str| zord_config::resolve_track(&prefix, role).map(|p| p.display().to_string());
     (existing("me"), existing("others"))
 }
 
@@ -1633,15 +1632,14 @@ fn diarize_session_inner(
         ));
         return;
     };
-    let wav = PathBuf::from(format!("{prefix}.others.wav"));
-    if !wav.exists() {
+    let Some(wav) = zord_config::resolve_track(&prefix, "others") else {
         let _ = ev.send(Event::Notice(
             "The 'Others' audio for this session is missing from disk, so speakers can't be \
              re-identified."
                 .to_string(),
         ));
         return;
-    }
+    };
     apply_diarization(&store, session_id, &wav, Some(num_speakers), ev);
 }
 
@@ -1945,9 +1943,6 @@ fn run_session(
     };
     let started_at = now_ms();
     let session_id = format!("sess-{started_at}");
-    // When keeping audio, we store per-channel WAVs as <audio_dir>/<id>.<src>.wav;
-    // record the prefix so re-transcribe / playback can find them.
-    let audio_prefix = audio_dir.join(&session_id);
 
     let settings = zord_config::Settings::load();
     // `diarize_auto` runs diarization at stop (needs the Others WAV, written as
@@ -1958,13 +1953,28 @@ fn run_session(
     // transcript — Phase 25).
     let persist_audio = keep_audio || !live;
 
+    // Phase 28: per-session audio **folder**, named with the start date-time
+    // (`audio/2026-06-09_18-15-47/`), holding `me.wav` / `others.wav` (and later
+    // `spk-N.wav`). Created only when we'll write audio (persisted, or a temp
+    // Others track for the diarize-auto pass); otherwise an uncreated placeholder.
+    // The stored `audio_path` is this folder; readers resolve tracks within it
+    // (with back-compat for the old flat `<prefix>.<role>.wav` layout).
+    let writes_audio = persist_audio || diarize_auto;
+    let session_dir = if writes_audio {
+        settings
+            .session_audio_dir(started_at)
+            .unwrap_or_else(|_| audio_dir.join(&session_id))
+    } else {
+        audio_dir.join(&session_id)
+    };
+
     let _ = store.create_session(&Session {
         id: session_id.clone(),
         started_at,
         ended_at: None,
         title: None,
         audio_path: if persist_audio {
-            Some(audio_prefix.display().to_string())
+            Some(session_dir.display().to_string())
         } else {
             None
         },
@@ -1975,8 +1985,8 @@ fn run_session(
     let wav_path = |src: &str| -> Option<PathBuf> {
         // Capture-only always writes — the WAV is the transcription input.
         if keep_audio || !live {
-            let _ = std::fs::create_dir_all(&audio_dir);
-            Some(audio_dir.join(format!("{session_id}.{src}.wav")))
+            let _ = std::fs::create_dir_all(&session_dir);
+            Some(zord_config::track_path(&session_dir, src))
         } else {
             None
         }
@@ -1986,8 +1996,8 @@ fn run_session(
     // retention for later re-diarization, or a capture-only recording.
     let others_wav: Option<PathBuf> =
         if record_system && (keep_audio || diarize_auto || !live) {
-            let _ = std::fs::create_dir_all(&audio_dir);
-            Some(audio_dir.join(format!("{session_id}.others.wav")))
+            let _ = std::fs::create_dir_all(&session_dir);
+            Some(zord_config::track_path(&session_dir, "others"))
         } else {
             None
         };
@@ -2146,7 +2156,7 @@ fn run_session(
     // transcript comes from. Runs before diarization (which labels segments).
     let post_pass = settings.auto_transcribe;
     if post_pass {
-        post_transcribe_session(&store, &session_id, &audio_prefix, ev, None);
+        post_transcribe_session(&store, &session_id, &session_dir, ev, None);
     } else if !live {
         let _ = ev.send(Event::Notice(
             "Recording saved — transcription deferred. Open the session and press \
@@ -2178,7 +2188,7 @@ fn run_session(
     // transcript (the safety rule: never purge an untranscribed capture).
     if !live && post_pass && !keep_audio {
         for suffix in ["me", "others"] {
-            let _ = std::fs::remove_file(audio_dir.join(format!("{session_id}.{suffix}.wav")));
+            let _ = std::fs::remove_file(zord_config::track_path(&session_dir, suffix));
         }
         let _ = store.set_audio_path(&session_id, None);
         emit_sessions(&store, ev); // 🎧 badge off
@@ -2307,17 +2317,12 @@ fn post_transcribe_inner(
     let _ = store.clear_segments(session_id);
     let _ = store.set_session_model(session_id, model.name());
     let mut total = 0usize;
+    let audio_path = audio_prefix.to_string_lossy();
     for (suffix, source) in [("me", Source::Me), ("others", Source::Others)] {
-        let wav = audio_prefix.with_file_name(format!(
-            "{}.{suffix}.wav",
-            audio_prefix
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default()
-        ));
-        if !wav.exists() {
+        // Resolve the track in the new folder layout or the legacy flat layout.
+        let Some(wav) = zord_config::resolve_track(&audio_path, suffix) else {
             continue;
-        }
+        };
         let cancel = || token.map(cancelled).unwrap_or(false);
         let mut on_segment = |seg: Segment| {
             // Keep-partial: segments transcribed before the cancel are kept.

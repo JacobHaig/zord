@@ -439,8 +439,9 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let prefix = session
         .audio_path
         .with_context(|| "this session didn't retain audio, so speakers can't be identified")?;
-    let wav = PathBuf::from(format!("{prefix}.others.wav"));
-    anyhow::ensure!(wav.exists(), "the 'Others' audio for this session is missing: {wav:?}");
+    // Resolve the Others track in the new folder layout or the legacy flat layout.
+    let wav = zord_config::resolve_track(&prefix, "others")
+        .with_context(|| format!("the 'Others' audio for this session is missing (looked under {prefix})"))?;
 
     // Streams + downsamples the (possibly native-rate) track to the 16 kHz the
     // diarizer expects (Phase 25d).

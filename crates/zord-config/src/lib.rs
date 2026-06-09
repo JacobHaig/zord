@@ -623,10 +623,62 @@ impl Settings {
         std::fs::create_dir_all(&d)?;
         Ok(d)
     }
+
+    /// Per-session audio **folder**, created and returned (Phase 28). Named with
+    /// the session's local start date-time — `audio/2026-06-09_18-15-47/` — for
+    /// every recording type. Tracks (`me.wav` / `others.wav` / `spk-N.wav`) live
+    /// inside it; `sessions.audio_path` stores this folder path. A numeric suffix
+    /// disambiguates the rare same-second collision.
+    pub fn session_audio_dir(&self, started_at_ms: u64) -> Result<PathBuf> {
+        let base = self.audio_dir()?;
+        let name = session_dir_name(started_at_ms);
+        let mut dir = base.join(&name);
+        let mut n = 2;
+        while dir.exists() {
+            dir = base.join(format!("{name}_{n}"));
+            n += 1;
+        }
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
 }
 
-/// Delete kept-audio files under `audio_dir` older than `days`. No-op when
-/// `days` is `None`. Returns how many files were removed.
+/// Folder name for a session's audio from its start time, in **local** time:
+/// `2026-06-09_18-15-47` (sortable, filesystem-safe). Falls back to a
+/// timestamp-tagged name if the instant can't be represented.
+pub fn session_dir_name(started_at_ms: u64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_millis_opt(started_at_ms as i64).single() {
+        Some(dt) => dt.format("%Y-%m-%d_%H-%M-%S").to_string(),
+        None => format!("session-{started_at_ms}"),
+    }
+}
+
+/// Path to write a track file inside a session folder, e.g. `track_path(dir,
+/// "me")` → `<dir>/me.wav`. Roles: `me`, `others`, `spk-0`, `spk-1`, …
+pub fn track_path(session_dir: &std::path::Path, role: &str) -> PathBuf {
+    session_dir.join(format!("{role}.wav"))
+}
+
+/// Resolve an existing track file for a session given its stored `audio_path`,
+/// transparently handling **both** layouts: the new per-session folder
+/// (`<audio_path>/<role>.wav`) and the legacy flat prefix
+/// (`<audio_path>.<role>.wav`). Returns `None` if neither exists.
+pub fn resolve_track(audio_path: &str, role: &str) -> Option<PathBuf> {
+    let folder = std::path::Path::new(audio_path).join(format!("{role}.wav"));
+    if folder.is_file() {
+        return Some(folder);
+    }
+    let flat = PathBuf::from(format!("{audio_path}.{role}.wav"));
+    if flat.is_file() {
+        return Some(flat);
+    }
+    None
+}
+
+/// Delete kept audio older than `days`. No-op when `days` is `None`. Returns how
+/// many entries were removed. Handles **both** layouts: new per-session
+/// **folders** (`remove_dir_all`) and legacy flat `<id>.<role>.wav` **files**.
 pub fn apply_retention(audio_dir: &std::path::Path, days: Option<u32>) -> usize {
     let Some(days) = days else { return 0 };
     let max_age = std::time::Duration::from_secs(days as u64 * 86_400);
@@ -638,14 +690,74 @@ pub fn apply_retention(audio_dir: &std::path::Path, days: Option<u32>) -> usize 
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         let Ok(modified) = meta.modified() else { continue };
-        if now.duration_since(modified).map(|age| age > max_age).unwrap_or(false) {
-            if std::fs::remove_file(entry.path()).is_ok() {
-                removed += 1;
-            }
+        let too_old = now
+            .duration_since(modified)
+            .map(|age| age > max_age)
+            .unwrap_or(false);
+        if !too_old {
+            continue;
+        }
+        let path = entry.path();
+        let ok = if meta.is_dir() {
+            std::fs::remove_dir_all(&path).is_ok()
+        } else {
+            std::fs::remove_file(&path).is_ok()
+        };
+        if ok {
+            removed += 1;
         }
     }
     if removed > 0 {
-        tracing::info!(removed, "retention: deleted old audio files");
+        tracing::info!(removed, "retention: deleted old audio (files/folders)");
     }
     removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("zord-cfg-test-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn dir_name_is_sortable_datetime() {
+        let n = session_dir_name(1_781_374_547_000);
+        // YYYY-MM-DD_HH-MM-SS
+        assert_eq!(n.len(), 19, "got {n}");
+        assert_eq!(&n[4..5], "-");
+        assert_eq!(&n[7..8], "-");
+        assert_eq!(&n[10..11], "_");
+        assert_eq!(&n[13..14], "-");
+    }
+
+    #[test]
+    fn resolves_new_folder_layout() {
+        let dir = tmp("new");
+        fs::write(track_path(&dir, "me"), b"x").unwrap();
+        fs::write(track_path(&dir, "spk-0"), b"x").unwrap();
+        let ap = dir.to_str().unwrap();
+        assert_eq!(resolve_track(ap, "me"), Some(dir.join("me.wav")));
+        assert_eq!(resolve_track(ap, "spk-0"), Some(dir.join("spk-0.wav")));
+        assert_eq!(resolve_track(ap, "others"), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolves_old_flat_layout() {
+        let dir = tmp("flat");
+        // Legacy: audio_path is a prefix, files are `<prefix>.<role>.wav`.
+        let prefix = dir.join("sess-123");
+        let others = format!("{}.others.wav", prefix.display());
+        fs::write(&others, b"x").unwrap();
+        let ap = prefix.to_str().unwrap();
+        assert_eq!(resolve_track(ap, "others"), Some(PathBuf::from(&others)));
+        assert_eq!(resolve_track(ap, "me"), None);
+        fs::remove_dir_all(&dir).ok();
+    }
 }

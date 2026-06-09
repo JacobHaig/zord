@@ -12,6 +12,7 @@ members = [
     "crates/zord-summarize",
     "crates/zord-overview",
     "crates/zord-diarize",
+    "crates/zord-integrations",
     "crates/zord-web",
     "crates/zord-app",
     "crates/zord-gui",

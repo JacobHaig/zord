@@ -219,17 +219,15 @@ pub fn run_retranscribe(
     store.set_session_model(session_id, model_id.name())?;
 
     let mut count = 0usize;
+    let audio_path = prefix.to_string_lossy();
     for (suffix, source) in [("me", Source::Me), ("others", Source::Others)] {
-        let path = prefix.with_file_name(format!(
-            "{}.{suffix}.wav",
-            prefix.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
-        ));
-        if path.exists() {
+        // Resolve in the new per-session folder layout or the legacy flat layout.
+        if let Some(path) = zord_config::resolve_track(&audio_path, suffix) {
             count += transcribe_wav(&transcriber, &store, session_id, source, &path)?;
         }
     }
     if count == 0 {
-        anyhow::bail!("no kept audio found for session (expected {prefix:?}.me/others.wav)");
+        anyhow::bail!("no kept audio found for session (looked under {prefix:?})");
     }
     Ok(count)
 }

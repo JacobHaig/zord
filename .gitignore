@@ -17,3 +17,12 @@ target/
 #.idea/
 # Private (per-user) repo memories — shared ones are committed
 .claude/memory/user_*.md
+
+# Local secrets for the Discord spike (never commit)
+config.temp
+
+# Discord spike test recordings (never commit captured audio)
+discord-spike-out/
+
+# macOS
+.DS_Store
