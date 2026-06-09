@@ -22,3 +22,4 @@
 - [Verification limits](verification-limits.md) — what can't run headlessly (live audio, LLM/ASR, Windows, signing)
 - [ASR/diarization model watchlist](asr-diarization-model-watchlist.md) — Parakeet v3 is the ceiling; Reverb added; Sortformer rejected; revisit triggers
 - [Canonical docs](docs-canonical.md) — docs/PLAN.md is the phase tracker; README + RELEASE roles
+- [Platform integrations](platform-integrations.md) — Phases 27–30: separated per-participant feeds (Discord/songbird) reuse the diarization speaker surface; DAVE is the feasibility gate

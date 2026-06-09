@@ -186,6 +186,34 @@ launch (`ZORD_PASSPHRASE` is honored for scripting). **Keep your passphrase
 safe — losing it means unrecoverable data.** This feature vendors SQLCipher +
 OpenSSL, so the build also needs perl.
 
+#### Discord integration (experimental, in progress)
+
+Record a Discord voice call with each participant on their own track — no
+diarization needed, since Discord gives us a separate, identified audio stream
+per person (real names instead of "Speaker 1"). A bot you control joins the
+voice channel you're in and receives per-user audio.
+
+```bash
+cargo build -p zord-integrations --features discord
+```
+
+Build requirements: **no extra system dependencies** beyond the CMake + C/C++
+toolchain already listed above. The `discord` feature pulls
+[`songbird`](https://github.com/serenity-rs/songbird) + `serenity` and compiles
+`libopus` (Opus audio codec) and the DAVE end-to-end-encryption stack from
+source — that's what the C toolchain/CMake are for. Discord enforces
+[DAVE](https://discord.com/blog/meet-dave-e2ee-for-audio-video) (E2EE) on all
+voice; songbird 0.6 implements it, so the bot can still receive and decrypt
+audio. The first build of this feature is slow (it compiles songbird + serenity).
+
+Status: the receive/decrypt path is **verified working** via a de-risking spike
+(`cargo run -p zord-integrations --features discord --bin discord-spike`, driven
+by `DISCORD_TOKEN` / `DISCORD_USER_ID` env vars — it follows you into voice and
+writes a per-user WAV). The full in-app integration (Settings → Integrations, a
+one-click bot invite, follow-the-user auto-join, live transcription) is being
+built out — see `docs/PLAN.md` → "Platform integrations (Phases 27–31)". You
+bring your own bot token; nothing is hosted by Zord.
+
 ### 3. Run the desktop app
 
 ```bash
@@ -318,6 +346,7 @@ A Cargo workspace of focused crates:
 | `zord-overview` | cross-meeting overview synthesis (compress → group → roll up) |
 | `zord-diarize` | per-speaker diarization (sherpa-onnx) under `diarization`; speaker-model catalog |
 | `zord-net` | shared, proxy/cert-store-aware HTTP for model downloads + the remote LLM |
+| `zord-integrations` | platform integrations (per-participant capture); Discord via `songbird`/`serenity` under `discord` |
 | `zord-web` | axum `localhost` review dashboard |
 | `zord-app` | the `zord` CLI |
 | `zord-gui` | the Dioxus desktop app |

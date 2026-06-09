@@ -1033,6 +1033,356 @@ Sub-phases (all shipped):
 - The legacy `app_meta["overview"]` blob becomes vestigial; keep reading it for
   one release so an upgrade isn't jarring, then drop.
 
+---
+
+## Platform integrations (Phases 27–31) — major initiative
+
+Today every voice the app hears arrives as one **mixed** stream: the system
+loopback ("Others"), which blends all remote participants together. Per-speaker
+diarization (Phase 16) recovers identity from that mix by *clustering* — error-
+prone (a 10-person call over-split into ~80 "speakers"; Phase 21) and label-less
+("Speaker 1", not "Alex").
+
+**The insight.** Some platforms can hand us **separate, already-identified audio
+feeds — one per participant**. When we have that, diarization is unnecessary: we
+*know* who is speaking, with their real name, by construction. Discord is the
+first and best fit (its voice gateway sends each participant as a distinct RTP
+stream). Desktop/system capture stays the universal fallback for everything that
+*can't* give us separated feeds.
+
+### Approaches researched (June 2026)
+
+| # | Approach | Per-participant? | Real names? | Bot/SDK? | Verdict |
+|---|---|---|---|---|---|
+| **A** | **Discord bot voice receive** (`songbird` `receive` feature) | ✅ per-SSRC PCM | ✅ via gateway speaking events → REST | bot joins VC as a visible participant | **Headline. Phases 27, 30.** |
+| **B** | **Per-process OS audio tap** (macOS 14.4+ Core Audio taps; Windows process-loopback) | ❌ still a per-*app* mix | ❌ | none | Universal fallback. **Phase 31.** Still needs diarization. |
+| **C** | **Meeting-platform media bots / SDKs** (Zoom Meeting SDK raw audio, Teams real-time media bot) | ✅ | ✅ | bot joins + credentials + (Teams) tenant admin + server infra | Heavyweight; **backlog**, not near-term. |
+| **D** | **Post-hoc transcript enrichment** (Teams Graph `callTranscript` names) | n/a (text) | ✅ | Azure AD app + tenant | **Declined** (no tenant access — see `teams-audio-options` memory). |
+
+**Approach A specifics (researched):**
+- Discord's voice gateway sends every participant's audio as a separate RTP
+  stream keyed by **SSRC**. [`songbird`](https://github.com/serenity-rs/songbird)
+  (serenity ecosystem) exposes decoded per-user PCM via its **`receive`** feature:
+  a sink's `write()` gets `VoiceData { user, audio }`. SSRC→user comes from
+  `SpeakingStateUpdate` events; user→display-name from REST.
+- ⚠ **DAVE is the feasibility gate.** Since March 2026 Discord mandates
+  end-to-end encryption ([DAVE](https://discord.com/blog/meet-dave-e2ee-for-audio-video),
+  MLS + WebRTC encoded transforms) on all voice. Bots that don't implement it
+  **cannot decrypt received audio** (cf. open `discord.js` issues:
+  `DecryptionFailed(UnencryptedWhenPassthroughDisabled)`). **songbird v0.6.0
+  (April 2026) added DAVE incl. in-place decryption** — so the Rust path is
+  viable in principle, but **receive-under-DAVE must be live-verified before any
+  UI work** (Phase 28 exists solely to retire this risk).
+- **Setup model (decided):** the user **brings their own bot** — creates a
+  Discord application, pastes the bot token into Zord settings, invites it to
+  their server. No Zord-operated infrastructure (keeps the all-local ethos); the
+  bot joins the VC as a *visible participant*, which also aids consent.
+- **Consent/ToS:** Discord's Developer Policy requires explicit per-instance
+  recording consent and minimal retention — baked into the connect UX.
+
+### Architecture (decided)
+
+**Reuse the diarization identity surface — do not generalize `Source`.** Phase 16
+already gave segments a `speaker` index within `Others` plus a `speaker_names`
+table (rename "Speaker 1" → "Alex"), wired through transcript colors, search, and
+exports. An integration is just **a capture source that pre-assigns the speaker
+label from ground truth instead of inferring it** — diarization with the
+clustering replaced by known identity.
+
+```
+                 today                          with an integration
+   mic ──► Me                          mic ──► Me   (unchanged)
+   system-loopback ──► Others ─┐       Discord ─┬─► Others + speaker=0 ("Alex")
+                               │                ├─► Others + speaker=1 ("Sam")
+                  diarization ─┘                └─► Others + speaker=2 ("Jo")
+                  (cluster → Speaker N)         name map written directly,
+                                                NO diarization pass
+```
+
+Each participant stream runs the **same** `spawn_proc` resample→VAD→transcribe
+path (tagged `Others` + a stable speaker index); the integration writes real
+names into `speaker_names`. FTS / exports / transcript UI therefore need almost
+no change — the work is the integration seam, the Discord connection, the
+auth/consent UX, and an **audio-storage rework** (below). Local-mic "Me" is kept
+for quality; the local user's own SSRC in the bot feed is suppressed (dedupe self).
+
+**Diarization parity (decided).** Diarized desktop audio and integration audio
+must be *structurally identical* once stored — same `source=Others` + `speaker`
+index + `speaker_names` entry. The only difference is provenance: diarization
+*infers* the speaker index by clustering one mixed `others` track; an integration
+*knows* it from the source. Consequences:
+- An integration session is **never diarized** — it already has ground-truth
+  speakers. The "Identify speakers" button is hidden/disabled when speakers are
+  pre-assigned (just as "Me" mic audio is kept as plain transcription, integration
+  per-speaker audio is kept as plain transcription — no clustering pass ever).
+- Desktop-only sessions behave exactly as today: plain `Others` until the user
+  clicks Identify speakers, which clusters the mix into speaker indices.
+- Re-transcription and per-line replay resolve a segment to its audio by
+  `(source, speaker)` uniformly, regardless of how the speaker was assigned.
+
+**Sparse audio → explicit silence (decided, critical).** Integration sources are
+*sparse*: a participant's stream delivers packets only while they speak (a user
+silent for minutes sends nothing). Absence **must be counted as silence**, or
+timestamps collapse and transcription mis-segments. This is the same hazard the
+WASAPI loopback already hit (no samples during silence) and is solved the same
+way: each per-speaker stream's `spawn_proc` pads silence to wall-clock
+(`produced` vs session-clock; see `capture-design` memory). ⚠ The existing
+**5-min silence-pad cap** must be revisited — a participant idle longer than that
+would drift; for integration sources, drive padding from the bot-connection
+session clock (which we know exactly) rather than capping. Wall-clock alignment
+keeps every speaker on one timeline and keeps the saved per-speaker WAVs exact for
+replay / re-transcription.
+
+**Audio storage → folder-per-session (decided).** Today audio is flat files keyed
+by a prefix: `audio/<id>.me.wav`, `audio/<id>.others.wav` (`sessions.audio_path`
+holds the prefix; replay / re-transcribe / diarize / retention all resolve by
+`{prefix}.{role}.wav`). A fixed two-file scheme can't hold N per-speaker tracks.
+Move to **one folder per session, named with the session start date-time** —
+`audio/2026-06-09_18-15-47/` (local, sortable; **all** session types, Discord or
+desktop) — containing `me.wav`, `others.wav` (when desktop capture is used), and
+per-speaker integration tracks `spk-0.wav`, `spk-1.wav`, … — with a small **track
+manifest** mapping each file to its role + speaker index + the speaker's real name
+(so a reader knows whether speaker N has a dedicated file (integration) or maps
+into the single `others.wav` (diarized mix)). `sessions.audio_path` now holds the
+folder path. Migration: resolvers accept the **old flat layout** for existing
+sessions while new sessions use the folder; retention deletes whole session
+folders by age.
+
+**Sparse-speaker model → full session-aligned tracks (decided).** Every track —
+`me`, `others`, and each `spk-N` — is **anchored at session start and spans the
+whole recording**, wall-clock silence-padded (exactly how Me/Others already work
+per `capture-design`). A participant who joins 5 min in gets 5 min of leading
+silence; one who leaves early gets trailing silence to the stop. **No per-track
+offset** — `sample N` is the same real instant on every track, so a segment's
+`t_start_ms` maps 1:1 to a sample on any track and replay / re-transcribe /
+diarization-overlap / timeline-merge need **zero new logic**. (Rejected
+alternatives: presence-window tracks + offset — saves storage but adds an offset
+concept to every reader; per-utterance clips — smallest storage but fragments a
+speaker's intermittent speech and wrecks ASR quality.) Transcription quality is
+unaffected by the leading/trailing silence (VAD skips it). **Storage cost** of
+session-length silence for partial-attendance speakers is accepted, bounded by
+the 30-day retention; **trailing-silence trimming** is a noted future
+optimization, not part of this phase.
+
+### Phase 27 — Discord receive spike (de-risk DAVE) ✅ VERIFIED LIVE (June 2026)
+A minimal `songbird` (+`serenity`) receive bench behind the `discord` feature:
+join a real voice channel with a user-supplied bot token and **prove per-user PCM
+decrypts under DAVE** (write per-SSRC WAVs, mapped to user ids). This is Phase
+0-style risk-killing and gates everything below. **Exit criteria:** clean
+per-user audio from a live DAVE-encrypted channel. If it fails, the bot path is
+blocked and we pivot to Approach B (Phase 31) as the primary — *learn it now, not
+after building storage + UI.*
+
+**Done (build):** new `crates/zord-integrations` crate; `discord` feature pulls
+`songbird = "0.6"` (default feats + `receive`; DAVE/`davey` + `opus2` come with
+the driver) + `serenity = "0.12"` + `tokio`. The `discord-spike` bin
+(`required-features = ["discord"]`, so a bare `cargo build` never pulls the heavy
+tree) joins a fixed VC by id, subscribes `CoreEvent::{VoiceTick, SpeakingStateUpdate,
+ClientDisconnect}`, downmixes each speaker's decoded 48 kHz stereo to mono, writes
+one `spk-<ssrc>.wav` per user **silence-padded to wall-clock via `tick.silent`**
+(prototyping the Phase 28 sparse→silence model), maps SSRC→user, leaves after N s.
+Verified: `--features discord` compiles + links (davey/opus2/songbird all build);
+default workspace build stays green; clippy clean on the crate.
+**✅ Verified live (June 2026):** ran against a real DAVE-encrypted channel. Crypto
+negotiated `Aes256Gcm`, the DAVE/MLS handshake completed (opcode-25 binary
+frames), and the bot received **527 decoded audio frames** over 30 s →
+`spk-6529.wav` (48 kHz mono) measured peak 16992/32767, ~15% non-silent windows =
+**clean intelligible speech**. So **DAVE receive works via songbird 0.6** — the
+bot path is unblocked. **End-to-end confirmed:** `zord file spk-6529.wav` ran the
+captured audio through the real pipeline (resample→VAD→Whisper Metal) → an
+accurate timestamped transcript (7 segments, speech correctly placed across the
+30 s — proving the sparse→silence wall-clock padding too). The spike also grew the real **follow-the-user** mechanic
+(guild-agnostic: scans every shared server's voice states + `voice_state_update`
+to join whichever channel the configured user is in — no guild/channel config),
+de-risking Phase 30 early.
+
+**⚠ Gap found — SSRC→user mapping:** the run got audio but `mapped_users=0` — no
+`SpeakingStateUpdate` mapped the speaking SSRC to a Discord user id (likely the
+speaker was already talking before the bot joined, so no fresh speaking-state was
+sent). Audio attribution worked by *stream* but not by *identity*. **Phase 30 must
+make SSRC→user mapping robust** (e.g. seed from voice states / client-connect on
+join, backfill on first speaking event, fall back to "Speaker N"). Not a DAVE
+blocker — the decryption/decode path is proven.
+
+### Phase 28 — Session audio storage rework (folder-per-session) 🟢 28a–d DONE
+Prerequisite for N per-speaker tracks (see "Audio storage" + "Sparse-speaker
+model" above). Move from the flat `audio/<id>.{me,others}.wav` prefix scheme to a
+**date-time-named folder per session** holding `me.wav`, `others.wav`, and (later)
+`spk-N.wav`, with full session-aligned tracks. **Pure storage/plumbing refactor —
+no integration code yet, fully verifiable on the existing desktop/diarization
+paths** before anything depends on it.
+
+Sub-steps:
+- **28a — paths + back-compat resolver (`zord-config`).** ✅ **DONE.**
+  `Settings::session_audio_dir(started_at) → audio/<YYYY-MM-DD_HH-MM-SS>/`
+  (unique, created), `session_dir_name()`, `track_path(dir, role)`, and
+  `resolve_track(audio_path, role)` — which returns the existing track whether
+  it's in the **new folder** (`<dir>/<role>.wav`) or the **old flat**
+  (`<prefix>.<role>.wav`) layout. 3 unit tests (both layouts + name format).
+  Added `chrono` (clock) to `zord-config` for local-time naming.
+- **28b — engine writes to the folder.** ✅ **DONE.** `run_session` builds a
+  `session_dir` via `session_audio_dir`; `wav_path`/`others_wav` write
+  `track_path(&session_dir, …)`; `sessions.audio_path` stores the folder. Existing
+  wall-clock silence-padding already yields full session-aligned tracks.
+- **28c — update readers.** ✅ **DONE.** `session_audio_files` (replay), diarize's
+  `others` lookup, and `post_transcribe_inner` (GUI) + `run_retranscribe` /
+  `cmd_diarize` (CLI) all resolve via `resolve_track` (folder + flat back-compat).
+  No timeline-offset logic (session-aligned). **Migration-free:** existing flat
+  sessions keep working; new recordings use the folder.
+- **28d — retention.** ✅ **DONE.** `apply_retention` now removes whole session
+  **folders** (`remove_dir_all`) *and* legacy flat files by age.
+- **28e — per-speaker (`spk-N`) plumbing + track manifest.** **→ folded into
+  Phase 30.** The foundation is ready (`resolve_track`/`track_path` already accept
+  arbitrary roles like `spk-0`), but a manifest (role+speaker idx+name→file) and
+  manifest-driven multi-track read (resolve a segment to its track by
+  `(source, speaker)`) can't be tested without a `spk-N` producer — so it lands
+  with the Discord source in Phase 30.
+- **Deferred refinement:** revisit the 5-min silence-pad cap (drive padding from
+  the session clock) when integration sources arrive in Phase 30 — not exercised
+  by today's mic/desktop paths.
+
+### Phase 29 — Integration framework (the seam)
+New `zord-integrations` crate. Define an `Integration` / `SessionProvider` trait:
+connect/disconnect, **resolve-and-join** a session, yield **N identity-labeled
+streams + a participant→name map** into the `spawn_proc` plumbing,
+`speaker_names`, and the Phase 28 per-speaker tracks, and signal session-end
+(e.g. the followed user left). **No network code yet** — prove the
+engine/store/GUI paths end-to-end with a built-in **fake provider** (canned
+labeled sparse streams) so the seam is validated before any heavy dep lands.
+Engine gains an "integration session" recording mode alongside mic/system/both;
+integration sessions carry ground-truth speakers, so the diarization auto-pass is
+skipped and the Identify-speakers button is hidden for them. Designed so a
+**local vs hosted backend swap** is feasible later (see backlog).
+
+### Phase 30 — Discord integration (full)
+The `discord` Integration implementation on the Phase 29 seam, using the Phase 27
+receive code.
+
+- **Settings → Integrations (new tab).** A new top-level settings tab that is the
+  home for *all* integrations (Discord now; Teams/Zoom later — **not built now**).
+  Follows the existing string-keyed `stab` button pattern in `main.rs`
+  (transcription/ai/speakers/recording/files/about → add `integrations`). Discord
+  config lives here: **bot token** (plaintext in config like the remote-LLM key;
+  keychain only if demand appears) + **the user's Discord user ID to follow** +
+  test-connection. **Include inline help text** on how to obtain the user ID —
+  enable Discord Developer Mode → right-click your name → *Copy User ID* — right
+  there in the Discord section.
+- **One-click "Invite bot to a server" button (decided — validated during the
+  Phase 27 spike).** The bot must be in the target server before anything works;
+  make that frictionless. From the bot token alone, Zord calls Discord REST
+  `GET /oauth2/applications/@me` (`Authorization: Bot <token>`, via `zord-net`) to
+  read the application `id`, builds
+  `https://discord.com/oauth2/authorize?client_id=<id>&scope=bot&permissions=3146752`
+  (perms = View Channel + Connect + Speak), and opens it in the browser (reuse
+  `osutil::open_*`). No manual Application-ID hunting. Surface a "not in any
+  server yet" hint when a connect attempt finds zero shared guilds (the exact
+  failure the spike hit).
+- **Follow-the-user auto-join — no guild/channel input (decided).** On Connect,
+  the bot resolves the followed user's *current* voice channel itself: with the
+  `GUILDS` + `GUILD_VOICE_STATES` intents it scans the voice states of every
+  guild it shares with that user (by ID or resolved username), finds the one VC
+  they're in (a user can only be in one at a time → unambiguous), and joins it.
+  The user never supplies a guild or channel — they just need the bot **invited
+  to the server they're calling in**. If they're not in a VC, surface "join a
+  voice channel, then Connect" (optionally poll); if the bot shares no guild with
+  them, "invite the bot to that server." **Works with any bot token** (BYO bot).
+  *This `identity → find their live session → join` flow is deliberately the same
+  primitive the future hosted bot uses (see backlog), so it forward-maps cleanly.*
+- **Leave when the user leaves (decided).** The bot follows the *user*, not the
+  channel: a `VOICE_STATE_UPDATE` showing the followed user left (or moved) ends
+  the capture session — the bot leaves the VC and the recording stops/finalizes
+  (a move could optionally follow them; v1 = stop). This is the session-end signal
+  the Phase 29 seam exposes.
+- **Live capture:** per-participant PCM streams routed into the pipeline as
+  `Others` + stable speaker index, each written to its own `spk-N.wav` (Phase 28),
+  sparse-padded to wall-clock; SSRC→user→display-name resolved live and written to
+  `speaker_names`; **self-SSRC suppressed** (Me = local mic). Late joiners handled
+  (name backfilled on first speaking event). **Transcription timing reuses the
+  existing Phase 25 `live_transcription` toggle** — it stays optional and simply
+  **defaults off for integration sessions** (many speakers live is CPU-heavy), so
+  capture-only-then-transcribe is the default while a capable machine can still
+  flip live on. No new mechanism — the capture-only path already exists.
+- **Consent gate:** explicit per-session recording-consent confirmation
+  (Discord ToS); bot-presence is the in-channel transparency signal.
+- Heavy deps (`serenity`/`songbird`/`opus`) stay behind the `discord` Cargo
+  feature; releases ship it alongside `diarization,llm-local,llm-remote,parakeet`.
+
+### Phase 31 — Per-app capture (Approach B, bot-free universal fallback)
+Upgrade `SystemAudio` to optionally tap a **single chosen process** instead of
+the whole-system mix: macOS via Core Audio process taps (14.4+,
+`CATapDescription` + `AudioHardwareCreateProcessTap`, `NSAudioCaptureUsageDescription`);
+Windows via process-loopback (`ActivateAudioInterfaceAsync` targeting a PID). One
+app's audio (just Zoom, just a browser tab) — excludes music/notifications, works
+for *any* meeting app with no bot/SDK. Still a per-app **mix**, so diarization
+remains the identity path here (no real names). This is the fallback for every
+platform that can't hand us separated feeds.
+
+### Integration backlog (post-30)
+- **⭐ Centralized / hosted bot (the long-term direction — keep accessible).**
+  Instead of the local machine running everything, a Zord-operated bot (named
+  after the app) lives in the cloud. A user supplies their **Discord user ID /
+  identity**; the bot finds the voice session that user is currently in, joins,
+  records, and delivers the transcript **back to the requester** (e.g. DM). The
+  *only* server-side requirement is the bot having been added to the server where
+  the call happens — no per-user token, no local capture. This is why Phase 30's
+  local flow is built as **follow-by-identity → find live session → join**: the
+  exact same primitive the hosted bot needs, so the local implementation rolls
+  forward into the centralized one. Deliberately **back-burnered** for now (local
+  is the right call today); design the Phase 29 seam and the Discord
+  connect/resolve code so a "local vs hosted" backend swap is feasible later.
+- **Zoom Meeting SDK / Teams media bot** (Approach C) — per-participant + names,
+  but bot-joins-as-participant + credentials + (Teams) tenant admin + server
+  infra. The Integrations tab is where they'd surface. Revisit only on demand.
+- Generalizing `Source` into a first-class participant model — considered and
+  **deferred**; the diarization-surface reuse covers the need with far less churn.
+
+### Gaps / risks to watch
+- **DAVE receive** — verified in principle (songbird 0.6), unverified live →
+  Phase 27 retires it first.
+- **Async-runtime bridge** — songbird needs a *long-lived tokio task* holding the
+  gateway + voice connection, vs. today's thread-per-capture model. The Discord
+  integration runs that task and bridges each received per-user PCM stream into a
+  sync `FrameSink` (mpsc) → `spawn_proc`. New shape; the engine already has a
+  tokio event channel to build on.
+- **Discord audio format** — voice is **Opus 48 kHz stereo**; songbird decodes to
+  48 kHz PCM. Downmix to mono + the usual resample to 16 kHz; the native-rate
+  stored `spk-N.wav` is 48 kHz (rate-agnostic readers already handle this).
+- **Identity by user ID (decided)** — following by **user ID** needs only
+  `GUILDS` + `GUILD_VOICE_STATES` (non-privileged). User ID is the primary path;
+  username→ID resolution (would need the *privileged* `GUILD_MEMBERS` intent /
+  REST member search) is deferred / best-effort only.
+- **Dynamic speaker set** — Discord participants join/leave **mid-call**, so
+  speaker indices, `spk-N.wav` tracks, and `speaker_names` rows are created
+  *during* the session (diarization assumed a fixed set discovered at the end).
+  The store/UI must handle speakers appearing mid-session.
+- **Self = followed user (local mode)** — the configured identity is both *who to
+  follow* and *whose Discord SSRC to suppress as self*; "Me" comes from the local
+  mic. (In the hosted future the requester isn't at the machine — keep the linkage
+  explicit so it can decouple later.)
+- **Integration replaces system-loopback** — an integration session is Me (mic) +
+  per-speaker Discord tracks; **no mixed `others.wav`** (avoids double-capturing
+  the call). Capture mode gains an "integration" option distinct from
+  mic/system/both.
+- **Clock/latency** — Discord PCM arrives ~tens of ms after the local mic; fine
+  locally (same machine clock, wall-clock padding absorbs it), but cross-machine
+  clock sync becomes real in the hosted future.
+- **SSRC→user gaps** — mapping needs a `SpeakingStateUpdate`/client-connect event;
+  a participant silent the whole call (or who joined before the bot) may be
+  unlabeled until they speak — backfill names, fall back to "Speaker N" if never
+  resolved.
+- **Bot token is a secret in plaintext `config.json`** — like the remote-LLM key;
+  acceptable precedent but a real credential → note in `docs/SECURITY.md` and
+  consider keychain if demand appears.
+- **Many-speaker UI/CPU** — enough distinct transcript colors for N speakers;
+  live transcription of N streams is heavy → deferred (post-stop) transcription
+  is the default for integration sessions (reuse Phase 25).
+- **Consent + retention** — per-instance consent gate; honor minimal-retention;
+  optional in-channel "recording started" message for transparency.
+- **Heavy deps** — `serenity`/`songbird`/`opus` behind `discord`, out of the
+  default build; confirm they coexist with the whisper/sherpa/llama toolchains.
+- **Verification limit** — live Discord + DAVE needs a real bot + a live call;
+  not headlessly testable (add to `verification-limits`).
+
 ### Cross-cutting / smaller
 - macOS code-sign + notarize automation (needs Apple Developer account).
 - ~~Multilingual UX~~ / ~~CUDA release builds~~ — **declined** (not wanted).
