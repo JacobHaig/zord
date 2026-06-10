@@ -1090,6 +1090,9 @@ fn MainApp() -> Element {
     rsx! {
         style { dangerous_inner_html: CSS }
         div { class: "app",
+            // User theme overrides land here as CSS custom properties — the
+            // whole token system re-derives from them (Settings → Theme).
+            style: "{theme_style(&settings.read())}",
             // Splitter drag: track the pointer anywhere in the app while the
             // handle is held; persist the final width when released.
             onmousemove: move |e| {
@@ -4489,4 +4492,72 @@ fn fmt_dur(secs: u64) -> String {
 
 fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
+}
+
+/// Black-or-white text for a `#rrggbb` background, by relative luminance —
+/// keeps any user-picked theme color readable. Garbage input gets the
+/// default dark ink (matches the built-in cyan's pairing).
+fn readable_fg(hex: &str) -> &'static str {
+    if !zord_config::is_valid_hex_color(hex) {
+        return "#06222f";
+    }
+    let v = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0) as f32 / 255.0;
+    let lin = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let lum = 0.2126 * lin(v(1)) + 0.7152 * lin(v(3)) + 0.0722 * lin(v(5));
+    if lum > 0.35 {
+        "#06222f"
+    } else {
+        "#ffffff"
+    }
+}
+
+/// CSS custom-property overrides for the `.app` root from the theme settings.
+/// Only valid `#rrggbb` values are emitted (inputs are also validated at the
+/// settings layer; this is the second gate before a style attribute).
+fn theme_style(s: &Settings) -> String {
+    let mut css = String::new();
+    for (var, value) in [
+        ("--accent", &s.theme_accent),
+        ("--me", &s.theme_me),
+        ("--others", &s.theme_others),
+    ] {
+        if zord_config::is_valid_hex_color(value) {
+            css.push_str(&format!("{var}: {value}; {var}-fg: {}; ", readable_fg(value)));
+        }
+    }
+    css.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn readable_fg_picks_contrast() {
+        assert_eq!(readable_fg("#ffffff"), "#06222f"); // light bg → dark text
+        assert_eq!(readable_fg("#4cc2ff"), "#06222f"); // cyan is light
+        assert_eq!(readable_fg("#1a1a2e"), "#ffffff"); // dark bg → white text
+        assert_eq!(readable_fg("#5865f2"), "#ffffff"); // blurple is dark enough
+        assert_eq!(readable_fg("not-a-color"), "#06222f"); // garbage → default
+    }
+
+    #[test]
+    fn theme_style_only_emits_valid_overrides() {
+        let mut s = zord_config::Settings::default();
+        assert_eq!(theme_style(&s), "");
+        s.theme_accent = "#5865f2".into();
+        let css = theme_style(&s);
+        assert!(css.contains("--accent: #5865f2;"));
+        assert!(css.contains("--accent-fg: #ffffff;"));
+        s.theme_me = "junk".into(); // invalid → ignored
+        assert!(!theme_style(&s).contains("--me:"));
+        s.theme_others = "#3ecf8e".into();
+        assert!(theme_style(&s).contains("--others: #3ecf8e;"));
+    }
 }
