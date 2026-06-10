@@ -2149,6 +2149,9 @@ fn apply_voiceprints(
     let embedder = match zord_diarize::SpeakerEmbedder::load(model) {
         Ok(e) => e,
         Err(e) => {
+            // Defensive: apply_diarization already ran ensure_diar_models and
+            // loaded the Diarizer with this same model, so it's effectively
+            // guaranteed present here — a failure is worth a loud notice.
             let _ = ev.send(Event::Notice(format!("voiceprints: {e}")));
             return;
         }
@@ -3221,7 +3224,9 @@ fn enroll_integration_tracks(
         Ok(e) => e,
         Err(_) => return, // model not downloaded — bail silently
     };
-    // Enumerate spk-N.wav tracks written by the integration session.
+    // Enumerate spk-N.wav tracks written by the integration session. `.wav`
+    // only — this runs immediately post-stop, before the compression sweep,
+    // so `.opus` tracks can't exist yet.
     let spk_indices: Vec<i32> = {
         let Ok(rd) = std::fs::read_dir(session_dir) else {
             return;
