@@ -1743,7 +1743,7 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 // from Phase 25d and older 16 kHz ones both work). Native rate
                 // also means playback at full capture quality.
                 let (samples, rate) =
-                    zord_audio::read_wav_slice_ms(&wav, start_ms, end_ms).unwrap_or_default();
+                    zord_audio::read_audio_slice_ms(&wav, start_ms, end_ms).unwrap_or_default();
                 if samples.is_empty() {
                     let _ = ev.send(Event::Notice(
                         "Couldn't read this line's audio.".to_string(),
@@ -1892,7 +1892,7 @@ fn apply_diarization(
 ) {
     // Streams + resamples the (possibly native-rate) track down to the 16 kHz
     // the diarizer expects, without loading the whole file (Phase 25d).
-    let samples = match zord_audio::read_wav_mono_16k(others_wav) {
+    let samples = match zord_audio::read_audio_mono_16k(others_wav) {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
             let _ = ev.send(Event::Notice("No 'Others' audio to diarize.".to_string()));
@@ -2045,7 +2045,7 @@ fn export_session(store: &Store, id: &str, format: zord_export::Format) -> anyho
 
 /// Mix every retained track of a session into `exports/<id>.merged.wav`
 /// (Phase 30e). Tracks are session-aligned by construction, so the mix is a
-/// plain sample-wise sum (see [`zord_audio::mix_wavs`]). Works for both the
+/// plain sample-wise sum (see [`zord_audio::mix_tracks`]). Works for both the
 /// folder layout (me/others/spk-N) and the legacy flat prefix.
 fn export_merged_audio(db_path: &PathBuf, id: &str) -> anyhow::Result<String> {
     let store = Store::open(db_path)?;
@@ -2059,7 +2059,7 @@ fn export_merged_audio(db_path: &PathBuf, id: &str) -> anyhow::Result<String> {
         std::fs::read_dir(&dir)?
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+            .filter(|p| p.extension().is_some_and(|x| x == "wav" || x == "opus"))
             .collect()
     } else {
         ["me", "others"]
@@ -2071,7 +2071,7 @@ fn export_merged_audio(db_path: &PathBuf, id: &str) -> anyhow::Result<String> {
     anyhow::ensure!(!paths.is_empty(), "this session kept no audio");
 
     let out = exports_dir()?.join(format!("{id}.merged.wav"));
-    zord_audio::mix_wavs(&paths, &out)?;
+    zord_audio::mix_tracks(&paths, &out)?;
     Ok(out.display().to_string())
 }
 

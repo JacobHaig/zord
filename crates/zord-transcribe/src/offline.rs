@@ -28,6 +28,13 @@ pub fn transcribe_wav_file(
     on_segment: &mut dyn FnMut(Segment),
     cancel: &dyn Fn() -> bool,
 ) -> Result<usize> {
+    // Compressed sessions (Phase 37): same pipeline, opus block source.
+    if wav_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("opus"))
+    {
+        return transcribe_opus_file(transcriber, source, wav_path, on_segment, cancel);
+    }
     let mut reader =
         hound::WavReader::open(wav_path).with_context(|| format!("opening {wav_path:?}"))?;
     let spec = reader.spec();
@@ -96,6 +103,61 @@ pub fn transcribe_wav_file(
         handle_block(&block, &mut resampler, &mut segmenter, &mut count)?;
     }
     // Flush the trailing partial VAD chunk (skip if cancelled).
+    if let Some(vad) = segmenter.flush().filter(|_| !cancel()) {
+        for seg in transcriber.transcribe(&vad.samples, source, vad.t_start_ms)? {
+            on_segment(seg);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// The opus flavor of [`transcribe_wav_file`]: streams decoded 48 kHz blocks
+/// (batched to ~1 s) through the identical resample → VAD → transcribe path.
+fn transcribe_opus_file(
+    transcriber: &Transcriber,
+    source: Source,
+    path: &Path,
+    on_segment: &mut dyn FnMut(Segment),
+    cancel: &dyn Fn() -> bool,
+) -> Result<usize> {
+    let mut blocks =
+        zord_audio::OpusBlocks::open(path).with_context(|| format!("opening {path:?}"))?;
+    let rate = blocks.sample_rate();
+    tracing::info!(rate, ?source, "offline transcription (opus)");
+    let mut resampler = MonoResampler::new(rate, 1)?;
+    let mut segmenter = Segmenter::new(SegmenterConfig::default());
+    let mut batch: Vec<f32> = Vec::with_capacity(rate as usize);
+    let mut count = 0usize;
+
+    let mut handle = |batch: &[f32],
+                      resampler: &mut MonoResampler,
+                      segmenter: &mut Segmenter,
+                      count: &mut usize|
+     -> Result<()> {
+        let mono = resampler.process(batch)?;
+        for vad in segmenter.push(&mono) {
+            for seg in transcriber.transcribe(&vad.samples, source, vad.t_start_ms)? {
+                on_segment(seg);
+                *count += 1;
+            }
+        }
+        Ok(())
+    };
+
+    while let Some(block) = blocks.next_block()? {
+        batch.extend_from_slice(&block);
+        if batch.len() >= rate as usize {
+            if cancel() {
+                return Ok(count);
+            }
+            handle(&batch, &mut resampler, &mut segmenter, &mut count)?;
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() && !cancel() {
+        handle(&batch, &mut resampler, &mut segmenter, &mut count)?;
+    }
     if let Some(vad) = segmenter.flush().filter(|_| !cancel()) {
         for seg in transcriber.transcribe(&vad.samples, source, vad.t_start_ms)? {
             on_segment(seg);

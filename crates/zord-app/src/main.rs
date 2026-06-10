@@ -472,7 +472,7 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
 
     // Streams + downsamples the (possibly native-rate) track to the 16 kHz the
     // diarizer expects (Phase 25d).
-    let samples = zord_audio::read_wav_mono_16k(&wav)?;
+    let samples = zord_audio::read_audio_mono_16k(&wav)?;
     anyhow::ensure!(!samples.is_empty(), "no 'Others' audio to diarize");
 
     let settings = zord_config::Settings::load();

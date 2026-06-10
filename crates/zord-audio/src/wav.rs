@@ -248,15 +248,22 @@ pub fn read_wav_mono_f32(path: impl AsRef<Path>) -> Result<Vec<f32>> {
 /// never loads whole. Overlap is clamped rather than normalized: meeting
 /// speech rarely overlaps, and keeping single-speaker level intact beats
 /// guarding rare peaks.
-pub fn mix_wavs(paths: &[std::path::PathBuf], out: &Path) -> Result<()> {
+pub fn mix_tracks(paths: &[std::path::PathBuf], out: &Path) -> Result<()> {
     anyhow::ensure!(!paths.is_empty(), "no audio tracks to mix");
 
+    enum Src {
+        Wav {
+            reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+            channels: usize,
+            float: bool,
+            scale: f32,
+        },
+        Opus(crate::compress::OpusBlocks),
+    }
+
     struct Track {
-        reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
-        channels: usize,
+        src: Src,
         rate: u32,
-        float: bool,
-        scale: f32,
         resampler: Option<crate::MonoResampler>,
         /// Target-rate mono samples decoded but not yet mixed.
         carry: Vec<f32>,
@@ -266,24 +273,43 @@ pub fn mix_wavs(paths: &[std::path::PathBuf], out: &Path) -> Result<()> {
     impl Track {
         /// Read up to `frames` native frames, downmixed to mono (native rate).
         fn read_native(&mut self, frames: usize) -> Result<Vec<f32>> {
-            let want = frames * self.channels;
-            let mut inter = Vec::with_capacity(want);
-            if self.float {
-                for s in self.reader.samples::<f32>().take(want) {
-                    inter.push(s?);
+            match &mut self.src {
+                Src::Wav {
+                    reader,
+                    channels,
+                    float,
+                    scale,
+                } => {
+                    let want = frames * *channels;
+                    let mut inter = Vec::with_capacity(want);
+                    if *float {
+                        for s in reader.samples::<f32>().take(want) {
+                            inter.push(s?);
+                        }
+                    } else {
+                        for s in reader.samples::<i32>().take(want) {
+                            inter.push(s? as f32 * *scale);
+                        }
+                    }
+                    if *channels <= 1 {
+                        return Ok(inter);
+                    }
+                    Ok(inter
+                        .chunks(*channels)
+                        .map(|f| f.iter().sum::<f32>() / f.len() as f32)
+                        .collect())
                 }
-            } else {
-                for s in self.reader.samples::<i32>().take(want) {
-                    inter.push(s? as f32 * self.scale);
+                Src::Opus(blocks) => {
+                    let mut mono = Vec::with_capacity(frames);
+                    while mono.len() < frames {
+                        match blocks.next_block()? {
+                            Some(b) => mono.extend_from_slice(&b),
+                            None => break,
+                        }
+                    }
+                    Ok(mono)
                 }
             }
-            if self.channels <= 1 {
-                return Ok(inter);
-            }
-            Ok(inter
-                .chunks(self.channels)
-                .map(|f| f.iter().sum::<f32>() / f.len() as f32)
-                .collect())
         }
 
         /// Top `carry` up to ≥ `want` target-rate samples (or until the file
@@ -304,34 +330,44 @@ pub fn mix_wavs(paths: &[std::path::PathBuf], out: &Path) -> Result<()> {
         }
     }
 
-    let mut tracks = Vec::new();
+    let mut opened: Vec<(Src, u32)> = Vec::new();
     for p in paths {
-        let _ = repair_wav_header(p); // crash recovery, as in the readers
-        let reader =
-            hound::WavReader::open(p).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
-        let spec = reader.spec();
-        validate_wav_spec(spec)?;
-        tracks.push((reader, spec));
+        if p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("opus"))
+        {
+            let blocks = crate::compress::OpusBlocks::open(p)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            let rate = blocks.sample_rate();
+            opened.push((Src::Opus(blocks), rate));
+        } else {
+            let _ = repair_wav_header(p); // crash recovery, as in the readers
+            let reader =
+                hound::WavReader::open(p).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            let spec = reader.spec();
+            validate_wav_spec(spec)?;
+            opened.push((
+                Src::Wav {
+                    channels: spec.channels.max(1) as usize,
+                    float: spec.sample_format == hound::SampleFormat::Float,
+                    scale: 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32,
+                    reader,
+                },
+                spec.sample_rate,
+            ));
+        }
     }
-    let target_rate = tracks
-        .iter()
-        .map(|(_, s)| s.sample_rate)
-        .max()
-        .unwrap_or(48_000);
-    let mut tracks: Vec<Track> = tracks
+    let target_rate = opened.iter().map(|(_, r)| *r).max().unwrap_or(48_000);
+    let mut tracks: Vec<Track> = opened
         .into_iter()
-        .map(|(reader, spec)| -> Result<Track> {
+        .map(|(src, rate)| -> Result<Track> {
             Ok(Track {
-                channels: spec.channels.max(1) as usize,
-                rate: spec.sample_rate,
-                float: spec.sample_format == hound::SampleFormat::Float,
-                scale: 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32,
-                resampler: (spec.sample_rate != target_rate)
-                    .then(|| crate::MonoResampler::to_rate(spec.sample_rate, 1, target_rate))
+                src,
+                rate,
+                resampler: (rate != target_rate)
+                    .then(|| crate::MonoResampler::to_rate(rate, 1, target_rate))
                     .transpose()?,
                 carry: Vec::new(),
                 done: false,
-                reader,
             })
         })
         .collect::<Result<_>>()?;
@@ -423,7 +459,7 @@ mod tests {
         w.write(&vec![0.25f32; 3_200]).unwrap(); // 0.2 s
         w.finalize().unwrap();
 
-        mix_wavs(&[a, b], &out).unwrap();
+        mix_tracks(&[a, b], &out).unwrap();
         let mixed = read_wav_mono_f32(&out).unwrap();
         assert_eq!(mixed.len(), 3_200);
         assert!((mixed[0] - 0.5).abs() < 0.02, "overlap sums: {}", mixed[0]);

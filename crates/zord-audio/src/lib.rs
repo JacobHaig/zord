@@ -15,6 +15,6 @@ pub use level::{LevelControl, LevelMode};
 pub use resample::MonoResampler;
 pub use segment::{Segmenter, SegmenterConfig, VadSegment};
 pub use wav::{
-    mix_wavs, read_wav_mono_16k, read_wav_mono_f32, read_wav_slice_ms, repair_wav_header,
+    mix_tracks, read_wav_mono_16k, read_wav_mono_f32, read_wav_slice_ms, repair_wav_header,
     validate_wav_spec, WavWriter,
 };
