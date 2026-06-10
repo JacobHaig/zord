@@ -2323,9 +2323,21 @@ fn run_session(
     };
 
     // System audio ("Others") — optional; only if the capture mode includes it.
+    // Capture mode "app" (Phase 31) scopes it to one chosen application.
     let system = if record_system {
         let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
-        match SystemAudio::start(sys_tx) {
+        let app_target = (settings.capture_mode == "app" && !settings.capture_app_id.is_empty())
+            .then(|| settings.capture_app_id.clone());
+        if settings.capture_mode == "app" && app_target.is_none() {
+            let _ = ev.send(Event::Notice(
+                "no app selected — capturing the whole system mix (pick one in Settings → Recording)".into(),
+            ));
+        }
+        let started = match app_target.as_deref() {
+            Some(app) => SystemAudio::start_app(sys_tx, app),
+            None => SystemAudio::start(sys_tx),
+        };
+        match started {
             Ok(s) => {
                 let sys_level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
                     &settings.others_level_mode,

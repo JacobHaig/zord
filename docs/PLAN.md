@@ -1360,14 +1360,33 @@ code, plus the Settings UI.
   feature; releases add it once mature.
 
 ### Phase 31 — Per-app capture (Approach B, bot-free universal fallback)
-Upgrade `SystemAudio` to optionally tap a **single chosen process** instead of
-the whole-system mix: macOS via Core Audio process taps (14.4+,
-`CATapDescription` + `AudioHardwareCreateProcessTap`, `NSAudioCaptureUsageDescription`);
-Windows via process-loopback (`ActivateAudioInterfaceAsync` targeting a PID). One
-app's audio (just Zoom, just a browser tab) — excludes music/notifications, works
-for *any* meeting app with no bot/SDK. Still a per-app **mix**, so diarization
-remains the identity path here (no real names). This is the fallback for every
-platform that can't hand us separated feeds.
+✅ **DONE (June 2026; macOS build-verified + Windows cross-compile-verified —
+live Windows run still untested).** `SystemAudio` can now tap a **single chosen
+app** instead of the whole-system mix; one app's audio (just Zoom, just a
+browser) — excludes music/notifications, works for *any* meeting app with no
+bot/SDK. Still a per-app **mix**, so diarization remains the identity path here
+(no real names). The fallback for every platform that can't hand us separated
+feeds.
+- **macOS:** the ScreenCaptureKit content filter scoped via
+  `with_including_applications` (simpler than the originally-planned Core Audio
+  process taps — SCK's filter applies to audio, needs only macOS 13 + the same
+  Screen Recording permission). Picker = `SCShareableContent` applications.
+- **Windows:** WASAPI **process-loopback**
+  (`AudioClient::new_application_loopback_client(pid, include_tree=true)`,
+  Windows 10 2004+; child processes included so multi-process apps are captured
+  whole; fixed 20 ms period — `get_device_period` is unsupported in this mode).
+  Picker = audio sessions on the default render device → PID → exe name
+  (`QueryFullProcessImageNameW`).
+- **Shared surface:** `CapturableApp { id, name, pid }` —
+  `id` is the *stable* identity settings persist (bundle id / exe name), PID is
+  resolved fresh at record time. `zord_capture::list_capturable_apps()` +
+  `SystemAudio::start_app(sink, id)`; missing app → actionable error.
+- **UI:** capture mode **"Microphone + one app's audio"** + an app picker
+  (Refresh button; enumeration is never eager — it triggers the macOS Screen
+  Recording prompt; saved choice stays listed as "(not running)").
+  Settings: `capture_app_id` / `capture_app_name`. CLI stays whole-mix (v1).
+- **CI:** new `windows-check` job (windows-latest `cargo check` on
+  zord-capture/config/net) keeps the cfg(windows) code compiling.
 
 ### Integration backlog (post-30)
 - **⭐ Centralized / hosted bot (the long-term direction — keep accessible).**

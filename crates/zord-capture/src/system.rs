@@ -8,13 +8,13 @@
 //! - **Other (Linux):** not implemented yet.
 
 #[cfg(target_os = "macos")]
-pub use macos::SystemAudio;
+pub use macos::{list_capturable_apps, SystemAudio};
 
 #[cfg(target_os = "windows")]
-pub use windows_impl::SystemAudio;
+pub use windows_impl::{list_capturable_apps, SystemAudio};
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub use other::SystemAudio;
+pub use other::{list_capturable_apps, SystemAudio};
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -32,7 +32,18 @@ mod macos {
     }
 
     impl SystemAudio {
+        /// Capture the whole system mix (every app).
         pub fn start(sink: FrameSink) -> Result<Self> {
+            Self::start_filtered(sink, None)
+        }
+
+        /// Capture only the app with this bundle id (Phase 31). Fails with an
+        /// actionable message when the app isn't running.
+        pub fn start_app(sink: FrameSink, app_id: &str) -> Result<Self> {
+            Self::start_filtered(sink, Some(app_id))
+        }
+
+        fn start_filtered(sink: FrameSink, app_id: Option<&str>) -> Result<Self> {
             // Touching shareable content is what triggers / requires the
             // Screen Recording permission.
             let content = SCShareableContent::get().context(
@@ -45,10 +56,26 @@ mod macos {
                 .next()
                 .context("no display available to attach the audio stream to")?;
 
-            let filter = SCContentFilter::create()
+            // Whole mix, or scoped to one application (ScreenCaptureKit's
+            // content filter applies to the audio as well as the video).
+            let builder = SCContentFilter::create()
                 .with_display(&display)
-                .with_excluding_windows(&[])
-                .build();
+                .with_excluding_windows(&[]);
+            let filter = match app_id {
+                None => builder.build(),
+                Some(id) => {
+                    let app = content
+                        .applications()
+                        .into_iter()
+                        .find(|a| a.bundle_identifier() == id)
+                        .with_context(|| {
+                            format!(
+                                "the app to capture ({id}) isn't running — start it, then record"
+                            )
+                        })?;
+                    builder.with_including_applications(&[&app], &[]).build()
+                }
+            };
 
             // Audio-only: tiny video frames (we register no Screen handler).
             let config = SCStreamConfiguration::new()
@@ -70,12 +97,39 @@ mod macos {
                 .start_capture()
                 .context("failed to start system audio capture")?;
 
-            tracing::info!(sample_rate = SYSTEM_SR, "system audio capture started");
+            tracing::info!(
+                sample_rate = SYSTEM_SR,
+                app = app_id.unwrap_or("<all>"),
+                "system audio capture started"
+            );
             Ok(Self {
                 stream,
                 sample_rate: SYSTEM_SR as u32,
             })
         }
+    }
+
+    /// Running applications that per-app capture can target. Triggers the
+    /// Screen Recording permission prompt on first use (same as recording).
+    pub fn list_capturable_apps() -> Result<Vec<crate::CapturableApp>> {
+        let content = SCShareableContent::get().context(
+            "could not access screen content — grant Screen Recording permission \
+             in System Settings > Privacy & Security, then retry",
+        )?;
+        let mut seen = std::collections::HashSet::new();
+        let mut apps: Vec<crate::CapturableApp> = content
+            .applications()
+            .into_iter()
+            .filter(|a| !a.application_name().is_empty())
+            .filter(|a| seen.insert(a.bundle_identifier()))
+            .map(|a| crate::CapturableApp {
+                id: a.bundle_identifier(),
+                name: a.application_name(),
+                pid: a.process_id().max(0) as u32,
+            })
+            .collect();
+        apps.sort_by_key(|a| a.name.to_lowercase());
+        Ok(apps)
     }
 
     impl AudioSource for SystemAudio {
@@ -170,7 +224,28 @@ mod windows_impl {
     }
 
     impl SystemAudio {
+        /// Capture the whole system mix (every app).
         pub fn start(sink: FrameSink) -> Result<Self> {
+            Self::start_inner(sink, None)
+        }
+
+        /// Capture only one app (Phase 31): `app_id` is its executable name
+        /// (e.g. "Discord.exe"), matched against apps with a live audio
+        /// session. Fails with an actionable message when it isn't running.
+        pub fn start_app(sink: FrameSink, app_id: &str) -> Result<Self> {
+            let pid = enumerate_audio_apps()?
+                .into_iter()
+                .find(|a| a.id.eq_ignore_ascii_case(app_id))
+                .map(|a| a.pid)
+                .with_context(|| {
+                    format!(
+                        "the app to capture ({app_id}) isn't running (or hasn't played audio yet) — start it, then record"
+                    )
+                })?;
+            Self::start_inner(sink, Some(pid))
+        }
+
+        fn start_inner(sink: FrameSink, target_pid: Option<u32>) -> Result<Self> {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_thread = stop.clone();
             // The capture thread owns all COM/WASAPI objects (they are
@@ -178,7 +253,7 @@ mod windows_impl {
             // back over `ready` so `start` can surface errors synchronously.
             let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
-            let handle = thread::spawn(move || match capture_setup() {
+            let handle = thread::spawn(move || match capture_setup(target_pid) {
                 Ok((audio_client, h_event, capture_client)) => {
                     let _ = ready_tx.send(Ok(()));
                     capture_loop(audio_client, h_event, capture_client, sink, stop_thread);
@@ -192,6 +267,7 @@ mod windows_impl {
                 Ok(Ok(())) => {
                     tracing::info!(
                         sample_rate = SYSTEM_SR,
+                        pid = target_pid.unwrap_or(0),
                         "system audio (WASAPI loopback) started"
                     );
                     Ok(Self {
@@ -203,6 +279,87 @@ mod windows_impl {
                 Ok(Err(e)) => bail!("WASAPI loopback init failed: {e}"),
                 Err(_) => bail!("WASAPI capture thread exited during setup"),
             }
+        }
+    }
+
+    /// Apps with a live audio session on the default output device — the
+    /// per-app capture picker. Runs the COM work on its own thread (the
+    /// caller's apartment state is unknown).
+    pub fn list_capturable_apps() -> Result<Vec<crate::CapturableApp>> {
+        std::thread::spawn(enumerate_audio_apps)
+            .join()
+            .map_err(|_| anyhow::anyhow!("app enumeration thread panicked"))?
+    }
+
+    fn enumerate_audio_apps() -> Result<Vec<crate::CapturableApp>> {
+        let _ = initialize_mta();
+        let enumerator = DeviceEnumerator::new().context("DeviceEnumerator::new")?;
+        let device = enumerator
+            .get_default_device(&Direction::Render)
+            .context("no default render (output) device")?;
+        let manager = device
+            .get_iaudiosessionmanager()
+            .context("audio session manager")?;
+        let sessions = manager
+            .get_audiosessionenumerator()
+            .context("audio session enumerator")?;
+        let mut seen = std::collections::HashSet::new();
+        let mut apps = Vec::new();
+        for i in 0..sessions.get_count().unwrap_or(0) {
+            let Ok(session) = sessions.get_session(i) else {
+                continue;
+            };
+            let Ok(pid) = session.get_process_id() else {
+                continue;
+            };
+            if pid == 0 {
+                continue; // the system-sounds session
+            }
+            let Some(exe) = process_image_name(pid) else {
+                continue;
+            };
+            if !seen.insert(exe.to_ascii_lowercase()) {
+                continue;
+            }
+            apps.push(crate::CapturableApp {
+                name: exe
+                    .strip_suffix(".exe")
+                    .or_else(|| exe.strip_suffix(".EXE"))
+                    .unwrap_or(&exe)
+                    .to_string(),
+                id: exe,
+                pid,
+            });
+        }
+        apps.sort_by_key(|a| a.name.to_lowercase());
+        Ok(apps)
+    }
+
+    /// Executable file name (e.g. "Discord.exe") for a PID.
+    fn process_image_name(pid: u32) -> Option<String> {
+        use windows::core::PWSTR;
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+            .is_ok();
+            let _ = CloseHandle(handle);
+            if !ok {
+                return None;
+            }
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            path.rsplit(['\\', '/']).next().map(|s| s.to_string())
         }
     }
 
@@ -227,16 +384,25 @@ mod windows_impl {
         wasapi::AudioCaptureClient,
     );
 
-    /// Initialize a loopback capture client on the default render device.
-    fn capture_setup() -> Result<ClientBundle> {
+    /// Initialize a loopback capture client: the default render device's whole
+    /// mix, or — given a PID — that process's audio only (process-loopback,
+    /// Windows 10 2004+; includes child processes, so multi-process apps like
+    /// browsers and Discord are captured whole).
+    fn capture_setup(target_pid: Option<u32>) -> Result<ClientBundle> {
         // COM apartment for this thread.
         let _ = initialize_mta();
 
-        let enumerator = DeviceEnumerator::new().context("DeviceEnumerator::new")?;
-        let device = enumerator
-            .get_default_device(&Direction::Render)
-            .context("no default render (output) device")?;
-        let mut audio_client = device.get_iaudioclient().context("get_iaudioclient")?;
+        let mut audio_client = match target_pid {
+            None => {
+                let enumerator = DeviceEnumerator::new().context("DeviceEnumerator::new")?;
+                let device = enumerator
+                    .get_default_device(&Direction::Render)
+                    .context("no default render (output) device")?;
+                device.get_iaudioclient().context("get_iaudioclient")?
+            }
+            Some(pid) => wasapi::AudioClient::new_application_loopback_client(pid, true)
+                .context("process-loopback client (needs Windows 10 2004+)")?,
+        };
 
         // 32-bit float, stereo, 48 kHz; autoconvert makes WASAPI match the
         // device mix format to ours.
@@ -248,12 +414,19 @@ mod windows_impl {
             CHANNELS,
             None,
         );
-        let (_def, min_time) = audio_client
-            .get_device_period()
-            .context("get_device_period")?;
+        let buffer_duration_hns = match target_pid {
+            // get_device_period is unsupported in process-loopback mode.
+            Some(_) => 200_000, // 20 ms
+            None => {
+                audio_client
+                    .get_device_period()
+                    .context("get_device_period")?
+                    .1
+            }
+        };
         let mode = StreamMode::EventsShared {
             autoconvert: true,
-            buffer_duration_hns: min_time,
+            buffer_duration_hns,
         };
         // Render device + Capture direction + Shared => loopback flag.
         audio_client
@@ -336,6 +509,14 @@ mod other {
         pub fn start(_sink: FrameSink) -> Result<Self> {
             bail!("system audio capture is not yet implemented on this platform")
         }
+
+        pub fn start_app(_sink: FrameSink, _app_id: &str) -> Result<Self> {
+            bail!("per-app audio capture is not yet implemented on this platform")
+        }
+    }
+
+    pub fn list_capturable_apps() -> Result<Vec<crate::CapturableApp>> {
+        Ok(Vec::new())
     }
 
     impl AudioSource for SystemAudio {

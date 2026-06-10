@@ -15,3 +15,6 @@ screencapturekit = "7.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.23"
+# Process name lookup for the per-app capture picker (Phase 31). Same major
+# as wasapi's own `windows` dep so only one copy is built.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading"] }

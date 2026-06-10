@@ -49,6 +49,24 @@ jobs:
       - name: Check the discord feature
         run: cargo check -p zord-gui --features discord
 
+  windows-check:
+    name: Windows compile check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The crates with Windows-specific code paths (WASAPI loopback,
+      # process-loopback per-app capture). Kept narrow — the full Windows app
+      # is built by release.yml; this just keeps cfg(windows) code compiling.
+      - name: Check
+        run: cargo check -p zord-capture -p zord-config -p zord-net
+
   heavy-features:
     name: Heavy feature check (weekly / manual)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

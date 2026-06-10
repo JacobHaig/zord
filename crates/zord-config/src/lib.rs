@@ -133,6 +133,13 @@ pub struct Settings {
     /// signal Discord's developer policy expects.
     #[serde(default = "default_true")]
     pub discord_announce: bool,
+    /// Per-app capture target (Phase 31, capture_mode == "app"): a stable app
+    /// identity — macOS bundle id, Windows executable name. Empty = unset.
+    #[serde(default)]
+    pub capture_app_id: String,
+    /// Display name of the per-app capture target (for the picker UI only).
+    #[serde(default)]
+    pub capture_app_name: String,
     /// Transcribe while recording (Phase 25). Off = capture-only: meters + WAV
     /// writing only (~no CPU, no model RAM — for low-power machines where live
     /// whisper bursts stutter the webcam); transcription runs when you stop.
@@ -482,6 +489,8 @@ impl Default for Settings {
             discord_bot_token: String::new(),
             discord_user_id: String::new(),
             discord_announce: true,
+            capture_app_id: String::new(),
+            capture_app_name: String::new(),
             badge_tint: false,
             mic_level_mode: default_level_mode(),
             mic_gain_db: 0.0,

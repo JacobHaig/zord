@@ -15,7 +15,20 @@ mod microphone;
 mod system;
 
 pub use microphone::{input_devices, Microphone};
-pub use system::SystemAudio;
+pub use system::{list_capturable_apps, SystemAudio};
+
+/// A running application that per-app capture can target (Phase 31).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturableApp {
+    /// Identity that stays stable across launches — what settings store:
+    /// the bundle id on macOS (`com.discordapp.Discord`), the executable
+    /// name on Windows (`Discord.exe`).
+    pub id: String,
+    /// Human-readable name for the picker.
+    pub name: String,
+    /// Current process id (resolution-time only; never persisted).
+    pub pid: u32,
+}
 
 /// Channel that receives mono `f32` capture frames.
 pub type FrameSink = Sender<Vec<f32>>;

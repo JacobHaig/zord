@@ -3676,6 +3676,18 @@ fn RetentionSettings(mut settings: Signal<Settings>) -> Element {
 /// Settings → Audio input: microphone device + capture-mode pickers.
 #[component]
 fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> Element {
+    // Per-app capture picker (Phase 31): (id, name) of running apps. Populated
+    // when the user switches to "app" mode or presses Refresh — never eagerly,
+    // since enumerating apps triggers the Screen Recording prompt on macOS.
+    let mut apps = use_signal(Vec::<(String, String)>::new);
+    let mut apps_err = use_signal(|| None::<String>);
+    let mut refresh_apps = move || match zord_capture::list_capturable_apps() {
+        Ok(list) => {
+            apps.set(list.into_iter().map(|a| (a.id, a.name)).collect());
+            apps_err.set(None);
+        }
+        Err(e) => apps_err.set(Some(e.to_string())),
+    };
     rsx! {
         section { class: "settings-section",
             h3 { "Audio input" }
@@ -3703,13 +3715,57 @@ fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> E
                         s.capture_mode = e.value();
                         let _ = s.save();
                         settings.set(s);
+                        if settings.peek().capture_mode == "app" {
+                            refresh_apps();
+                        }
                     },
                     option { value: "both", selected: settings.read().capture_mode == "both", "Microphone + system audio" }
                     option { value: "mic", selected: settings.read().capture_mode == "mic", "Microphone only (Me)" }
                     option { value: "system", selected: settings.read().capture_mode == "system", "System audio only (Others)" }
+                    option { value: "app", selected: settings.read().capture_mode == "app", "Microphone + one app's audio" }
                     if cfg!(feature = "discord") {
                         option { value: "discord", selected: settings.read().capture_mode == "discord", "Discord call (via your bot)" }
                     }
+                }
+            }
+            if settings.read().capture_mode == "app" {
+                div { class: "field",
+                    label { "App to capture" }
+                    select {
+                        onchange: move |e: FormEvent| {
+                            let mut s = settings.peek().clone();
+                            s.capture_app_id = e.value();
+                            s.capture_app_name = apps
+                                .peek()
+                                .iter()
+                                .find(|(id, _)| *id == s.capture_app_id)
+                                .map(|(_, name)| name.clone())
+                                .unwrap_or_default();
+                            let _ = s.save();
+                            settings.set(s);
+                        },
+                        if settings.read().capture_app_id.is_empty() {
+                            option { value: "", selected: true, disabled: true, "Choose an app…" }
+                        } else if !apps.read().iter().any(|(id, _)| *id == settings.read().capture_app_id) {
+                            // Keep the saved choice visible even when that app
+                            // isn't running right now.
+                            option {
+                                value: "{settings.read().capture_app_id}",
+                                selected: true,
+                                "{settings.read().capture_app_name} (not running)"
+                            }
+                        }
+                        for (id, name) in apps.read().iter() {
+                            option { value: "{id}", selected: settings.read().capture_app_id == *id, "{name}" }
+                        }
+                    }
+                    button { class: "mbtn ghost", onclick: move |_| refresh_apps(), "Refresh apps" }
+                }
+                if let Some(e) = apps_err.read().clone() {
+                    p { class: "field-note", "⚠ Couldn't list apps: {e}" }
+                }
+                p { class: "field-note",
+                    "Records your microphone plus only this app's audio (music and notifications stay out). The app must be running when you press Record. Speakers in its audio are identified by diarization, as with system capture."
                 }
             }
             if settings.read().capture_mode == "discord" {
