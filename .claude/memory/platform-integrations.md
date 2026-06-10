@@ -105,3 +105,13 @@ primitive so it rolls forward; design the seam for a local↔hosted backend swap
 New crate `zord-integrations`; `serenity`/`songbird`/`opus` behind a `discord`
 Cargo feature (out of the default build). Related: [[architecture]],
 [[feature-flags]].
+
+**Phase 29 seam (29a ✅ DONE, June 2026):** `Integration` trait
+(`name`/`start`/`stop` → `Receiver<IntegrationEvent>`), events
+`ParticipantJoined{participant,sample_rate,audio: Receiver<Vec<f32>>}` /
+`ParticipantRenamed{key,name}` / `Ended{reason}`, `Participant{key,name}`. The
+seam is dependency-free (default build, NOT behind `discord`) — only impls are
+heavy. `FakeProvider` (canned sparse tone bursts) validates the path; unit-tested.
+Next: **29b** engine "integration session" mode (per-`ParticipantJoined` → assign
+speaker idx + `speaker_names` + per-speaker proc → `spk-N.wav`; Me = local mic;
+`Ended` finalizes; skip diarization). Then 29c GUI, then Phase 30 Discord impl.

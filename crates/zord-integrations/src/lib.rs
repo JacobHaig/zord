@@ -13,6 +13,15 @@
 //! source (Phase 30) build on what the spike confirms.
 //!
 //! See `docs/PLAN.md` → "Platform integrations (Phases 27–31)".
+//!
+//! Phase 29 adds the **seam** to the default build: the [`Integration`] trait
+//! (one identity-labeled audio stream per participant) plus a dependency-free
+//! [`FakeProvider`] to validate the engine path before any network backend. The
+//! Discord implementation (Phase 30) lands behind the `discord` feature; the
+//! `discord-spike` bin (Phase 27) remains as the DAVE receive proof.
 
-// Nothing in the default build yet — the spike lives in `src/bin/` behind the
-// `discord` feature. The trait seam lands in Phase 29.
+mod fake;
+mod integration;
+
+pub use fake::FakeProvider;
+pub use integration::{AudioStream, Integration, IntegrationEvent, Participant};

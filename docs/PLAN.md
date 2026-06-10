@@ -1241,18 +1241,30 @@ Sub-steps:
   the session clock) when integration sources arrive in Phase 30 — not exercised
   by today's mic/desktop paths.
 
-### Phase 29 — Integration framework (the seam)
-New `zord-integrations` crate. Define an `Integration` / `SessionProvider` trait:
-connect/disconnect, **resolve-and-join** a session, yield **N identity-labeled
-streams + a participant→name map** into the `spawn_proc` plumbing,
-`speaker_names`, and the Phase 28 per-speaker tracks, and signal session-end
-(e.g. the followed user left). **No network code yet** — prove the
-engine/store/GUI paths end-to-end with a built-in **fake provider** (canned
-labeled sparse streams) so the seam is validated before any heavy dep lands.
-Engine gains an "integration session" recording mode alongside mic/system/both;
-integration sessions carry ground-truth speakers, so the diarization auto-pass is
-skipped and the Identify-speakers button is hidden for them. Designed so a
-**local vs hosted backend swap** is feasible later (see backlog).
+### Phase 29 — Integration framework (the seam) 🟢 29a DONE
+Define the seam in `zord-integrations`, then wire the engine. **No network code**
+— a built-in fake provider validates the engine/store/GUI paths before any heavy
+dep lands. Designed so a **local vs hosted backend swap** is feasible later.
+
+- **29a — trait + fake provider.** ✅ **DONE.** Dependency-free seam in the
+  default build: `Integration` trait (`name`/`start`/`stop`) emitting
+  `IntegrationEvent::{ParticipantJoined { participant, sample_rate, audio },
+  ParticipantRenamed { key, name }, Ended { reason }}`; `Participant { key,
+  name }`; `AudioStream = Receiver<Vec<f32>>` (mono f32, same shape as the
+  capture `FrameSink`, sparse by nature). `FakeProvider` emits N participants
+  with real-time-paced sparse tone bursts + silent gaps, then `Ended`. Unit-test
+  passes; clippy clean; stays out of the `discord` feature (light seam).
+- **29b — engine wiring (the bigger part).** Engine gains an "integration
+  session" recording mode (alongside mic/system/both): runs an `Integration`,
+  and on each `ParticipantJoined` assigns the next speaker index, writes
+  `speaker_names`, and spawns a per-speaker proc (`Others` + speaker index →
+  `spk-N.wav`, Phase 28e). Local mic still drives "Me" (self-SSRC suppressed by
+  the Discord impl). `ParticipantRenamed` updates `speaker_names`; `Ended`
+  finalizes like Stop. Integration sessions carry ground-truth speakers → skip
+  the diarization auto-pass and hide Identify-speakers. Validate end-to-end with
+  `FakeProvider` (a hidden dev trigger) before Discord.
+- **29c — GUI surface.** Minimal: start/stop an integration session; show the
+  per-speaker live state. (Settings → Integrations tab is Phase 30.)
 
 ### Phase 30 — Discord integration (full)
 The `discord` Integration implementation on the Phase 29 seam, using the Phase 27
