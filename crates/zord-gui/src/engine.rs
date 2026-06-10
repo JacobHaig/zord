@@ -558,6 +558,16 @@ pub struct Engine {
     pub jobs: Jobs,
 }
 
+/// Every `Engine` in the process is a clone of the single handle returned by
+/// [`Engine::spawn`] (the same channels), so any two are interchangeable.
+/// Exists so `Engine` can be a Dioxus component prop: "equal" is correct for
+/// memoization — an engine handle never carries render-relevant state.
+impl PartialEq for Engine {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 impl Engine {
     /// Request cancellation of the background job with this id.
     pub fn cancel_job(&self, id: &str) {

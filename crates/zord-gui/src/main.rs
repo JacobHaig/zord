@@ -391,7 +391,7 @@ fn MainApp() -> Element {
     // Per-session badge flags (summary/compressed/speakers) + a title filter box.
     let mut session_badges =
         use_signal(std::collections::HashMap::<String, (bool, bool, bool)>::new);
-    let mut session_filter = use_signal(String::new);
+    let session_filter = use_signal(String::new);
     let mut search_results = use_signal(Vec::<(String, Segment)>::new);
     // Dedicated search view: the live query text, plus a pending "scroll to this
     // segment after the session loads" + which line to briefly highlight.
@@ -408,15 +408,15 @@ fn MainApp() -> Element {
     let mut compressed = use_signal(|| Option::<String>::None);
     // Collapse state for the AI panels (sticky across navigation so it acts as a
     // preference — on a small screen these can otherwise bury the transcript).
-    let mut show_summary = use_signal(|| true);
-    let mut show_compressed = use_signal(|| false);
+    let show_summary = use_signal(|| true);
+    let show_compressed = use_signal(|| false);
     // Host notes for the viewed session (links / action items / reminders),
     // editable + searchable + fed to the AI. `notes` is the saved value (drives
     // whether the panel shows content); `notes_draft` is the textarea buffer,
     // persisted on blur. `note_results` holds notes that matched a search.
     let mut notes = use_signal(|| Option::<String>::None);
     let mut notes_draft = use_signal(String::new);
-    let mut show_notes = use_signal(|| false);
+    let show_notes = use_signal(|| false);
     let mut note_results = use_signal(Vec::<(String, String)>::new);
     // Id of the session currently recording (from Event::SessionStarted), so the
     // notes drawer can attach notes live — the row exists in the DB from the
@@ -454,11 +454,11 @@ fn MainApp() -> Element {
     // Custom names for diarized speakers in the viewed session (index → name).
     let mut speaker_names = use_signal(std::collections::HashMap::<i32, String>::new);
     // Session id currently being renamed (+ its edit buffer); pending delete.
-    let mut editing = use_signal(|| Option::<String>::None);
-    let mut edit_text = use_signal(String::new);
-    let mut confirm_delete = use_signal(|| Option::<String>::None);
+    let editing = use_signal(|| Option::<String>::None);
+    let edit_text = use_signal(String::new);
+    let confirm_delete = use_signal(|| Option::<String>::None);
     // Session id awaiting Re-transcribe confirmation (Phase 25c).
-    let mut confirm_retranscribe = use_signal(|| Option::<String>::None);
+    let confirm_retranscribe = use_signal(|| Option::<String>::None);
     // Seconds elapsed in the current recording (0 when idle).
     let mut rec_secs = use_signal(|| 0u64);
     // Whether the mic ("Me") / desktop ("Others") channels are muted during the
@@ -485,11 +485,11 @@ fn MainApp() -> Element {
     // rough ETA for diarization scaled to the meeting length (captured at click).
     let mut show_jobs = use_signal(|| false);
     // Whether the Export format dropdown is open.
-    let mut show_export_menu = use_signal(|| false);
+    let show_export_menu = use_signal(|| false);
     // The contextual "Generate ▾" menu (Summarize/Compress/Identify/Re-transcribe).
-    let mut show_generate_menu = use_signal(|| false);
+    let show_generate_menu = use_signal(|| false);
     // Active tab in the settings overlay's left nav (Phase 3).
-    let mut settings_tab = use_signal(|| "transcription".to_string());
+    let settings_tab = use_signal(|| "transcription".to_string());
     // Authoritative list of running background jobs (Phase: cancellable jobs),
     // driven by Event::JobStarted/JobFinished from the engine — independent of
     // the viewed session, so navigating/recording never clears them. The inline
@@ -1046,6 +1046,36 @@ fn MainApp() -> Element {
         }
     };
 
+    // Open a saved session from the sidebar: reset the per-session panels and
+    // load it (same body the session row's onclick had inline).
+    let on_open_session = {
+        let engine = engine.clone();
+        move |id: String| {
+            view.set(View::Session(id.clone()));
+            last_export.set(None);
+            summary.set(None);
+            compressed.set(None);
+            summarizing.set(false);
+            compressing.set(false);
+            diarizing.set(false);
+            retranscribing.set(false);
+            diar_speakers.set(String::new());
+            audio_files.set((None, None));
+            let _ = engine.play_tx.send(PlayCmd::Stop);
+            reset_chat(chat, chat_input, chat_busy, chat_scope);
+            let _ = engine.db_tx.send(DbCmd::Load(id));
+        }
+    };
+
+    // Back to the live view; drop any panels left from a saved session viewed
+    // mid-recording (the sidebar's pinned "Current recording" row).
+    let on_show_live = move |_: ()| {
+        view.set(View::Live);
+        summary.set(None);
+        compressed.set(None);
+        speaker_names.write().clear();
+    };
+
     rsx! {
         style { dangerous_inner_html: CSS }
         div { class: "app",
@@ -1078,221 +1108,39 @@ fn MainApp() -> Element {
                 }
             },
             // ---- Icon rail: global nav (top) + utilities (bottom) ----
-            nav { class: "rail",
-                div { class: "rail-top",
-                    div { class: "rail-brand", "Z" }
-                    button {
-                        class: if matches!(&*view.read(), View::Overview) { "rail-btn active" } else { "rail-btn" },
-                        title: "Overview — a project-grouped rollup across recent meetings",
-                        onclick: on_open_overview,
-                        {icon("overview")}
-                    }
-                    button {
-                        class: if matches!(&*view.read(), View::Search) { "rail-btn active" } else { "rail-btn" },
-                        title: "Search across every meeting's transcript",
-                        onclick: on_open_search,
-                        {icon("search")}
-                    }
-                }
-                div { class: "rail-bottom",
-                    if !jobs.read().is_empty() {
-                        button {
-                            class: "rail-btn jobs",
-                            title: "Background jobs",
-                            onclick: move |_| { let v = *show_jobs.peek(); show_jobs.set(!v); },
-                            span { class: "jobs-spin" }
-                        }
-                    }
-                    button {
-                        class: "rail-btn",
-                        title: "Settings",
-                        onclick: on_toggle_settings,
-                        {icon("settings")}
-                    }
-                }
+            IconRail {
+                view,
+                jobs,
+                show_jobs,
+                on_open_overview,
+                on_open_search,
+                on_toggle_settings,
             }
             // ---- Sidebar: session history + Record ----
-            aside { class: "sidebar", style: "width: {sidebar_w}px;",
-                div { class: "side-label", "Sessions" }
-                if sessions.read().len() > 6 {
-                    input {
-                        class: "session-filter",
-                        placeholder: "Filter by title…",
-                        value: "{session_filter}",
-                        oninput: move |e| session_filter.set(e.value()),
-                    }
-                }
-                div { class: "session-list",
-                    // While recording, a pinned entry to jump back to the live view
-                    // (the in-progress session isn't in the saved list until it ends).
-                    if recording {
-                        div {
-                            class: if matches!(&*view.read(), View::Live) { "session live-rec active" } else { "session live-rec" },
-                            onclick: move |_| {
-                                // Back to the live view; drop any panels left from a
-                                // saved session viewed mid-recording.
-                                view.set(View::Live);
-                                summary.set(None);
-                                compressed.set(None);
-                                speaker_names.write().clear();
-                            },
-                            div { class: "session-row",
-                                div { class: "session-title",
-                                    span { class: "rec-pip" }
-                                    "Current recording"
-                                }
-                                div { class: "session-meta",
-                                    if matches!(st, Status::Recording) { "{fmt_dur(rec_secs())}" } else { "{status_text}" }
-                                }
-                            }
-                        }
-                    }
-                    {
-                        // Filter by title, then tag the first row of each date group.
-                        let q = session_filter.read().to_lowercase();
-                        let now = now_ms();
-                        let mut last_group: Option<&'static str> = None;
-                        let items: Vec<(Option<&'static str>, Session)> = sessions
-                            .read()
-                            .iter()
-                            .filter(|s| q.is_empty() || session_title(s).to_lowercase().contains(q.as_str()))
-                            .cloned()
-                            .map(|s| {
-                                let g = date_group(s.started_at, now);
-                                let hdr = if last_group != Some(g) { last_group = Some(g); Some(g) } else { None };
-                                (hdr, s)
-                            })
-                            .collect();
-                        let empty_msg = if sessions.read().is_empty() {
-                            "No recordings yet."
-                        } else {
-                            "No matching sessions."
-                        };
-                        rsx! {
-                            if items.is_empty() {
-                                div { class: "empty", "{empty_msg}" }
-                            }
-                            for (group_hdr, s) in items {
-                        {
-                            let id = s.id.clone();
-                            let active = matches!(&*view.read(), View::Session(v) if *v == id);
-                            let is_editing = editing.read().as_deref() == Some(id.as_str());
-                            let title = session_title(&s);
-                            let meta = session_meta(&s);
-                            let (b_sum, b_comp, b_spk) =
-                                session_badges.read().get(&id).copied().unwrap_or((false, false, false));
-                            let b_audio = s.audio_path.is_some();
-                            let eng_open = engine.clone();
-                            let eng_save = engine.clone();
-                            let (id_open, id_edit, id_save, id_del) =
-                                (id.clone(), id.clone(), id.clone(), id.clone());
-                            let title_edit = title.clone();
-                            rsx! {
-                                div { key: "{s.id}", class: "session-wrap",
-                                if let Some(h) = group_hdr {
-                                    div { class: "date-group", "{h}" }
-                                }
-                                div {
-                                    class: if active { "session active" } else { "session" },
-                                    if is_editing {
-                                        input {
-                                            class: "rename-input",
-                                            value: "{edit_text}",
-                                            autofocus: true,
-                                            oninput: move |e| edit_text.set(e.value()),
-                                            onkeydown: move |e| match e.key() {
-                                                Key::Enter => {
-                                                    let t = edit_text.peek().trim().to_string();
-                                                    if !t.is_empty() {
-                                                        let _ = eng_save.db_tx.send(DbCmd::Rename { id: id_save.clone(), title: t });
-                                                    }
-                                                    editing.set(None);
-                                                }
-                                                Key::Escape => editing.set(None),
-                                                _ => {}
-                                            },
-                                        }
-                                    } else {
-                                        div { class: "session-row",
-                                            onclick: move |_| {
-                                                view.set(View::Session(id_open.clone()));
-                                                last_export.set(None);
-                                                summary.set(None);
-                                                compressed.set(None);
-                                                summarizing.set(false);
-                                                compressing.set(false);
-                                                diarizing.set(false);
-                                                retranscribing.set(false);
-                                                diar_speakers.set(String::new());
-                                                audio_files.set((None, None));
-                                                let _ = eng_open.play_tx.send(PlayCmd::Stop);
-                                                reset_chat(chat, chat_input, chat_busy, chat_scope);
-                                                let _ = eng_open.db_tx.send(DbCmd::Load(id_open.clone()));
-                                            },
-                                            div { class: "session-title", "{title}" }
-                                            div { class: "session-meta",
-                                                span { "{meta}" }
-                                                span { class: "badges",
-                                                    if b_sum { span { class: if tint_badges { "badge tint-sum" } else { "badge" }, title: "Has summary", {icon("sparkles")} } }
-                                                    if b_comp { span { class: if tint_badges { "badge tint-comp" } else { "badge" }, title: "Compressed", {icon("archive")} } }
-                                                    if b_spk { span { class: if tint_badges { "badge tint-spk" } else { "badge" }, title: "Speakers identified", {icon("users")} } }
-                                                    if b_audio { span { class: if tint_badges { "badge tint-audio" } else { "badge" }, title: "Audio kept", {icon("headphones")} } }
-                                                }
-                                            }
-                                        }
-                                        div { class: "session-actions",
-                                            button {
-                                                class: "row-btn",
-                                                title: "Rename",
-                                                onclick: move |_| {
-                                                    edit_text.set(title_edit.clone());
-                                                    editing.set(Some(id_edit.clone()));
-                                                },
-                                                {icon("pen")}
-                                            }
-                                            button {
-                                                class: "row-btn",
-                                                title: "Delete",
-                                                onclick: move |_| confirm_delete.set(Some(id_del.clone())),
-                                                {icon("trash")}
-                                            }
-                                        }
-                                    }
-                                }
-                                }
-                            }
-                        }
-                    }
-                        }
-                    }
-                }
-                // ---- Record: permanent primary at the sidebar foot ----
-                div { class: "sidebar-foot",
-                    if recording && system_in_capture {
-                        button {
-                            class: if *sys_muted.read() { "record muted" } else { "record mute" },
-                            title: if *sys_muted.read() { "Desktop audio muted — click to unmute" } else { "Mute desktop / system audio" },
-                            onclick: on_mute_system,
-                            {icon(if *sys_muted.read() { "speaker-off" } else { "speaker" })}
-                            if *sys_muted.read() { "Unmute desktop" } else { "Mute desktop" }
-                        }
-                    }
-                    if recording && mic_in_capture {
-                        button {
-                            class: if *mic_muted.read() { "record muted" } else { "record mute" },
-                            title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
-                            onclick: on_mute,
-                            {icon(if *mic_muted.read() { "mic-off" } else { "mic" })}
-                            if *mic_muted.read() { "Unmute mic" } else { "Mute mic" }
-                        }
-                    }
-                    button {
-                        class: if recording { "record stop" } else { "record" },
-                        onclick: on_record,
-                        {icon(if recording { "stop" } else { "record" })}
-                        if recording { "Stop" } else { "Record" }
-                    }
-                }
+            SessionsSidebar {
+                sidebar_w,
+                sessions,
+                session_filter,
+                session_badges,
+                view,
+                editing,
+                edit_text,
+                confirm_delete,
+                rec_secs,
+                recording,
+                st: st.clone(),
+                status_text: status_text.clone(),
+                tint_badges,
+                mic_in_capture,
+                system_in_capture,
+                mic_muted,
+                sys_muted,
+                engine: engine.clone(),
+                on_open_session,
+                on_show_live,
+                on_record,
+                on_mute,
+                on_mute_system,
             }
 
             // ---- Sidebar / main divider (drag to resize) ----
@@ -1332,309 +1180,36 @@ fn MainApp() -> Element {
 
                 // Export bar (only when viewing a saved session)
                 if let View::Session(id) = &*view.read() {
-                    {
-                        let id = id.clone();
-                        let engine = engine.clone();
-                        let sid = id.clone();
-                        let eng_sum = engine.clone();
-                        let eng_comp = engine.clone();
-                        let sid_comp = id.clone();
-                        let eng_diar = engine.clone();
-                        let sid_diar = id.clone();
-                        let sid_rt = id.clone();
-                        let eng_maudio = engine.clone();
-                        let sid_maudio = id.clone();
-                        let mk = move |fmt: Format| {
-                            let id = id.clone();
-                            let engine = engine.clone();
-                            move |_| {
-                                let _ = engine.db_tx.send(DbCmd::Export { id: id.clone(), format: fmt });
-                                show_export_menu.set(false);
-                            }
-                        };
-                        // Contextual state for the Generate menu rows.
-                        let has_summary = summary.read().is_some();
-                        let has_compressed = compressed.read().is_some();
-                        let has_others_audio = audio_files.read().1.is_some();
-                        let has_any_audio = audio_files.read().0.is_some() || audio_files.read().1.is_some();
-                        let gen_busy = summarizing() || compressing() || diarizing() || retranscribing();
-                        rsx! {
-                            div { class: "toolbar",
-                                // --- Generate ▾ : stable surface, contents adapt ---
-                                div { class: "gen-dd",
-                                    button {
-                                        class: if gen_busy { "tbtn busy" } else { "tbtn" },
-                                        title: "Run AI / speaker actions on this meeting",
-                                        onclick: move |_| { let v = *show_generate_menu.peek(); show_generate_menu.set(!v); },
-                                        {icon("sparkles")}
-                                        if gen_busy { "Working… ▾" } else { "Generate ▾" }
-                                    }
-                                    if *show_generate_menu.read() {
-                                        div { class: "dd-backdrop", onclick: move |_| show_generate_menu.set(false) }
-                                        div { class: "gen-menu",
-                                            // Summarize
-                                            button {
-                                                class: "gen-item",
-                                                disabled: summarizing(),
-                                                onclick: move |_| {
-                                                    show_generate_menu.set(false);
-                                                    if *summarizing.peek() { return; }
-                                                    summarizing.set(true);
-                                                    notice.set(Some(if settings.peek().llm_backend == "external" {
-                                                        "Summarizing via the external LLM server…".to_string()
-                                                    } else {
-                                                        "Summarizing… (first run downloads the model)".to_string()
-                                                    }));
-                                                    let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
-                                                },
-                                                span { {icon("sparkles")}  { if has_summary { "Re-summarize" } else { "Summarize" } } }
-                                                if summarizing() { span { class: "gen-state", "running…" } }
-                                                else if has_summary { span { class: "gen-state ok", {icon("check")} } }
-                                            }
-                                            // Compress
-                                            button {
-                                                class: "gen-item",
-                                                title: "Condense this meeting into token-minimal dense prose for cross-meeting synthesis",
-                                                disabled: compressing(),
-                                                onclick: move |_| {
-                                                    show_generate_menu.set(false);
-                                                    if *compressing.peek() { return; }
-                                                    compressing.set(true);
-                                                    notice.set(Some(if settings.peek().llm_backend == "external" {
-                                                        "Compressing via the external LLM server…".to_string()
-                                                    } else {
-                                                        "Compressing… (first run downloads the model)".to_string()
-                                                    }));
-                                                    let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
-                                                },
-                                                span { {icon("archive")}  { if has_compressed { "Re-compress" } else { "Compress" } } }
-                                                if compressing() { span { class: "gen-state", "running…" } }
-                                                else if has_compressed { span { class: "gen-state ok", {icon("check")} } }
-                                            }
-                                            // Identify speakers (+ expected-count input) — needs the Others track.
-                                            div { class: "gen-item-row",
-                                                button {
-                                                    class: "gen-item grow",
-                                                    disabled: diarizing() || !has_others_audio,
-                                                    title: if has_others_audio { "Group the 'Others' channel into individual speakers" } else { "Needs the kept 'Others' audio" },
-                                                    onclick: move |_| {
-                                                        show_generate_menu.set(false);
-                                                        if *diarizing.peek() { return; }
-                                                        diarizing.set(true);
-                                                        // Rough ETA: diarization runs ~6x faster than real time on CPU.
-                                                        let est = sessions.peek().iter()
-                                                            .find(|s| s.id == sid_diar)
-                                                            .and_then(|s| s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000))
-                                                            .map(|secs| (secs / 6).max(15));
-                                                        diarize_est_secs.set(est);
-                                                        notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
-                                                        let n = diar_speakers.peek().trim().parse::<u32>().unwrap_or(0);
-                                                        let _ = eng_diar.db_tx.send(DbCmd::Diarize { id: sid_diar.clone(), num_speakers: n });
-                                                    },
-                                                    span { {icon("users")}  { if diarizing() { "Identifying…" } else { "Identify speakers" } } }
-                                                    if !has_others_audio { span { class: "gen-state", "no audio" } }
-                                                }
-                                                input {
-                                                    class: "spk-count",
-                                                    r#type: "number",
-                                                    min: "0",
-                                                    placeholder: "auto",
-                                                    title: "How many people spoke (blank = auto-detect). Remembered per session.",
-                                                    value: "{diar_speakers}",
-                                                    oninput: move |e| diar_speakers.set(e.value()),
-                                                }
-                                            }
-                                            // Re-transcribe — needs kept audio.
-                                            button {
-                                                class: "gen-item",
-                                                disabled: retranscribing() || !has_any_audio,
-                                                title: if has_any_audio { "Regenerate the transcript from kept audio with the re-transcription model" } else { "Needs kept audio" },
-                                                onclick: move |_| {
-                                                    show_generate_menu.set(false);
-                                                    if *retranscribing.peek() || !has_any_audio { return; }
-                                                    confirm_retranscribe.set(Some(sid_rt.clone()));
-                                                },
-                                                span { {icon("refresh")}  { if retranscribing() { "Re-transcribing…" } else { "Re-transcribe" } } }
-                                                if !has_any_audio { span { class: "gen-state", "no audio" } }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // --- Output cluster (right) ---
-                                div { class: "export-spacer" }
-                                button {
-                                    class: "tbtn",
-                                    title: "Copy the transcript to the clipboard",
-                                    onclick: move |_| {
-                                        let names = speaker_names.peek().clone();
-                                        let text = segments
-                                            .peek()
-                                            .iter()
-                                            .map(|s| format!("[{} {}] {}", fmt_ts(s.t_start_ms), s.speaker_label(&names), s.text))
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                                        osutil::copy_to_clipboard(&text);
-                                        notice.set(Some("Transcript copied to clipboard".to_string()));
-                                    },
-                                    {icon("copy")}
-                                    "Copy"
-                                }
-                                div { class: "export-dd",
-                                    button {
-                                        class: "tbtn",
-                                        title: "Export this transcript to a file",
-                                        onclick: move |_| { let v = *show_export_menu.peek(); show_export_menu.set(!v); },
-                                        {icon("export")}
-                                        "Export ▾"
-                                    }
-                                    if *show_export_menu.read() {
-                                        div { class: "dd-backdrop", onclick: move |_| show_export_menu.set(false) }
-                                        div { class: "export-menu",
-                                            button { class: "export-menu-item", onclick: mk(Format::Markdown), "Markdown (.md)" }
-                                            button { class: "export-menu-item", onclick: mk(Format::Srt), "Subtitles (.srt)" }
-                                            button { class: "export-menu-item", onclick: mk(Format::Json), "JSON (.json)" }
-                                            if has_any_audio {
-                                                button {
-                                                    class: "export-menu-item",
-                                                    title: "Mix every kept track into a single WAV",
-                                                    onclick: move |_| {
-                                                        let _ = eng_maudio.db_tx.send(DbCmd::ExportAudio(sid_maudio.clone()));
-                                                        show_export_menu.set(false);
-                                                    },
-                                                    "Merged audio (.wav)"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if let Some(path) = last_export.read().clone() {
-                                    button {
-                                        class: "tbtn ghost",
-                                        onclick: {
-                                            let p = path.clone();
-                                            move |_| osutil::reveal_in_file_manager(&p)
-                                        },
-                                        {icon("folder")} "Reveal"
-                                    }
-                                    button {
-                                        class: "tbtn ghost",
-                                        onclick: move |_| osutil::open_in_editor(&path),
-                                        {icon("external")} "Open"
-                                    }
-                                }
-                            }
-                        }
+                    SessionToolbar {
+                        id: id.clone(),
+                        engine: engine.clone(),
+                        settings,
+                        notice,
+                        sessions,
+                        summary,
+                        compressed,
+                        audio_files,
+                        last_export,
+                        segments,
+                        speaker_names,
+                        summarizing,
+                        compressing,
+                        diarizing,
+                        retranscribing,
+                        diar_speakers,
+                        diarize_est_secs,
+                        confirm_retranscribe,
+                        show_export_menu,
+                        show_generate_menu,
                     }
                 }
 
                 // AI summary (when present for the viewed session).
-                if matches!(&*view.read(), View::Session(_) | View::Live) {
-                    if let Some(text) = summary.read().clone() {
-                        {
-                            let text_copy = text.clone();
-                            let open = *show_summary.read();
-                            // Deleting only makes sense for a saved session.
-                            let del_id = match &*view.read() {
-                                View::Session(id) => Some(id.clone()),
-                                _ => None,
-                            };
-                            let can_del = del_id.is_some();
-                            let did = del_id.unwrap_or_default();
-                            let eng_del = engine.clone();
-                            rsx! {
-                                div { class: "summary",
-                                    div { class: "summary-head",
-                                        button {
-                                            class: "panel-toggle",
-                                            onclick: move |_| { let v = *show_summary.peek(); show_summary.set(!v); },
-                                            span { class: "chev", if open { "▾" } else { "▸" } }
-                                            span { "Summary" }
-                                        }
-                                        button {
-                                            class: "row-btn",
-                                            onclick: move |_| {
-                                                osutil::copy_to_clipboard(&text_copy);
-                                                notice.set(Some("Summary copied to clipboard".to_string()));
-                                            },
-                                            "Copy"
-                                        }
-                                        if can_del {
-                                            button {
-                                                class: "row-btn",
-                                                title: "Delete this summary (the transcript is kept)",
-                                                onclick: move |_| {
-                                                    let _ = eng_del.db_tx.send(DbCmd::ClearSummary(did.clone()));
-                                                    notice.set(Some("Summary deleted".to_string()));
-                                                },
-                                                {icon("trash")}
-                                            }
-                                        }
-                                    }
-                                    if open {
-                                        div { class: "summary-body", "{text}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                SummaryPanel { view, summary, show_summary, notice, engine: engine.clone() }
 
                 // Dense-prose compression (Phase 23). Machine-oriented, so the
                 // body is collapsed by default; the user can expand or copy it.
-                if matches!(&*view.read(), View::Session(_) | View::Live) {
-                    if let Some(text) = compressed.read().clone() {
-                        {
-                            let text_copy = text.clone();
-                            let expanded = *show_compressed.read();
-                            // Deleting only makes sense for a saved session.
-                            let del_id = match &*view.read() {
-                                View::Session(id) => Some(id.clone()),
-                                _ => None,
-                            };
-                            let can_del = del_id.is_some();
-                            let did = del_id.unwrap_or_default();
-                            let eng_del = engine.clone();
-                            rsx! {
-                                div { class: "summary compressed",
-                                    div { class: "summary-head",
-                                        button {
-                                            class: "panel-toggle",
-                                            onclick: move |_| {
-                                                let v = *show_compressed.peek();
-                                                show_compressed.set(!v);
-                                            },
-                                            span { class: "chev", if expanded { "▾" } else { "▸" } }
-                                            span { "Compressed (dense)" }
-                                        }
-                                        button {
-                                            class: "row-btn",
-                                            onclick: move |_| {
-                                                osutil::copy_to_clipboard(&text_copy);
-                                                notice.set(Some("Compressed text copied to clipboard".to_string()));
-                                            },
-                                            "Copy"
-                                        }
-                                        if can_del {
-                                            button {
-                                                class: "row-btn",
-                                                title: "Delete this compression (the transcript is kept)",
-                                                onclick: move |_| {
-                                                    let _ = eng_del.db_tx.send(DbCmd::ClearCompressed(did.clone()));
-                                                    notice.set(Some("Compressed text deleted".to_string()));
-                                                },
-                                                {icon("trash")}
-                                            }
-                                        }
-                                    }
-                                    if expanded {
-                                        div { class: "summary-body", "{text}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                CompressedPanel { view, compressed, show_compressed, notice, engine: engine.clone() }
 
                 // Host notes now live in a right-side drawer (see below), so they
                 // sit beside the transcript during recording + review rather than
@@ -1643,45 +1218,7 @@ fn MainApp() -> Element {
                 // Speaker legend (rename diarized speakers) — only for a saved
                 // session that has speaker labels.
                 if let View::Session(id) = &*view.read() {
-                    {
-                        let id = id.clone();
-                        let engine = engine.clone();
-                        let mut spk: Vec<i32> =
-                            segments.read().iter().filter_map(|s| s.speaker).collect();
-                        spk.sort_unstable();
-                        spk.dedup();
-                        if spk.is_empty() {
-                            rsx! {}
-                        } else {
-                            rsx! {
-                                div { class: "speaker-legend",
-                                    span { class: "legend-label", "Speakers:" }
-                                    for idx in spk {
-                                        {
-                                            let val = speaker_names.read().get(&idx).cloned().unwrap_or_default();
-                                            let engine = engine.clone();
-                                            let id = id.clone();
-                                            rsx! {
-                                                input {
-                                                    key: "{idx}",
-                                                    class: "speaker-name spk-{idx}",
-                                                    value: "{val}",
-                                                    placeholder: "Speaker {idx + 1}",
-                                                    onchange: move |e: FormEvent| {
-                                                        let _ = engine.db_tx.send(DbCmd::RenameSpeaker {
-                                                            id: id.clone(),
-                                                            speaker: idx,
-                                                            name: e.value(),
-                                                        });
-                                                    },
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    SpeakerLegend { id: id.clone(), segments, speaker_names, engine: engine.clone() }
                 }
 
                 // Transcript / results. Pass signals so the list subscribes and
@@ -1767,6 +1304,685 @@ fn MainApp() -> Element {
         // ---- Session notes drawer (right side) ----
         // Targets the viewed session, or the live one while recording (its row
         // exists from the start of capture, so notes save immediately).
+        NotesDrawer { view, recording, live_session_id, show_notes, notes, notes_draft, engine: engine.clone() }
+
+        // ---- Confirm-delete dialog ----
+        ConfirmDeleteDialog { confirm_delete, view, segments, summary, compressed, engine: engine.clone() }
+
+        // ---- Confirm-retranscribe dialog (Phase 25c) ----
+        ConfirmRetranscribeDialog { confirm_retranscribe, settings, retranscribing, notice, engine: engine.clone() }
+
+        // ---- Full-screen settings overlay ----
+        if *show_settings.read() {
+            SettingsOverlay {
+                show_settings,
+                settings,
+                settings_tab,
+                download_help,
+                models,
+                model_progress,
+                remote_models,
+                notice,
+                devices: devices.clone(),
+                engine: engine.clone(),
+            }
+        }
+    }
+}
+
+/// Left icon rail: global navigation (top) + utilities (bottom).
+#[component]
+fn IconRail(
+    view: Signal<View>,
+    jobs: Signal<Vec<JobView>>,
+    mut show_jobs: Signal<bool>,
+    on_open_overview: EventHandler<MouseEvent>,
+    on_open_search: EventHandler<MouseEvent>,
+    on_toggle_settings: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+            nav { class: "rail",
+                div { class: "rail-top",
+                    div { class: "rail-brand", "Z" }
+                    button {
+                        class: if matches!(&*view.read(), View::Overview) { "rail-btn active" } else { "rail-btn" },
+                        title: "Overview — a project-grouped rollup across recent meetings",
+                        onclick: move |e| on_open_overview.call(e),
+                        {icon("overview")}
+                    }
+                    button {
+                        class: if matches!(&*view.read(), View::Search) { "rail-btn active" } else { "rail-btn" },
+                        title: "Search across every meeting's transcript",
+                        onclick: move |e| on_open_search.call(e),
+                        {icon("search")}
+                    }
+                }
+                div { class: "rail-bottom",
+                    if !jobs.read().is_empty() {
+                        button {
+                            class: "rail-btn jobs",
+                            title: "Background jobs",
+                            onclick: move |_| { let v = *show_jobs.peek(); show_jobs.set(!v); },
+                            span { class: "jobs-spin" }
+                        }
+                    }
+                    button {
+                        class: "rail-btn",
+                        title: "Settings",
+                        onclick: move |e| on_toggle_settings.call(e),
+                        {icon("settings")}
+                    }
+                }
+            }
+    }
+}
+
+/// Sessions sidebar: title filter, the pinned "Current recording" row, the
+/// saved-session list (open / rename / delete), and the Record + mute foot.
+#[component]
+fn SessionsSidebar(
+    sidebar_w: Signal<u32>,
+    sessions: Signal<Vec<Session>>,
+    mut session_filter: Signal<String>,
+    session_badges: Signal<std::collections::HashMap<String, (bool, bool, bool)>>,
+    view: Signal<View>,
+    mut editing: Signal<Option<String>>,
+    mut edit_text: Signal<String>,
+    mut confirm_delete: Signal<Option<String>>,
+    rec_secs: Signal<u64>,
+    recording: bool,
+    st: Status,
+    status_text: String,
+    tint_badges: bool,
+    mic_in_capture: bool,
+    system_in_capture: bool,
+    mic_muted: Signal<bool>,
+    sys_muted: Signal<bool>,
+    engine: Engine,
+    on_open_session: EventHandler<String>,
+    on_show_live: EventHandler<()>,
+    on_record: EventHandler<MouseEvent>,
+    on_mute: EventHandler<MouseEvent>,
+    on_mute_system: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+            aside { class: "sidebar", style: "width: {sidebar_w}px;",
+                div { class: "side-label", "Sessions" }
+                if sessions.read().len() > 6 {
+                    input {
+                        class: "session-filter",
+                        placeholder: "Filter by title…",
+                        value: "{session_filter}",
+                        oninput: move |e| session_filter.set(e.value()),
+                    }
+                }
+                div { class: "session-list",
+                    // While recording, a pinned entry to jump back to the live view
+                    // (the in-progress session isn't in the saved list until it ends).
+                    if recording {
+                        div {
+                            class: if matches!(&*view.read(), View::Live) { "session live-rec active" } else { "session live-rec" },
+                            onclick: move |_| on_show_live.call(()),
+                            div { class: "session-row",
+                                div { class: "session-title",
+                                    span { class: "rec-pip" }
+                                    "Current recording"
+                                }
+                                div { class: "session-meta",
+                                    if matches!(st, Status::Recording) { "{fmt_dur(rec_secs())}" } else { "{status_text}" }
+                                }
+                            }
+                        }
+                    }
+                    {
+                        // Filter by title, then tag the first row of each date group.
+                        let q = session_filter.read().to_lowercase();
+                        let now = now_ms();
+                        let mut last_group: Option<&'static str> = None;
+                        let items: Vec<(Option<&'static str>, Session)> = sessions
+                            .read()
+                            .iter()
+                            .filter(|s| q.is_empty() || session_title(s).to_lowercase().contains(q.as_str()))
+                            .cloned()
+                            .map(|s| {
+                                let g = date_group(s.started_at, now);
+                                let hdr = if last_group != Some(g) { last_group = Some(g); Some(g) } else { None };
+                                (hdr, s)
+                            })
+                            .collect();
+                        let empty_msg = if sessions.read().is_empty() {
+                            "No recordings yet."
+                        } else {
+                            "No matching sessions."
+                        };
+                        rsx! {
+                            if items.is_empty() {
+                                div { class: "empty", "{empty_msg}" }
+                            }
+                            for (group_hdr, s) in items {
+                        {
+                            let id = s.id.clone();
+                            let active = matches!(&*view.read(), View::Session(v) if *v == id);
+                            let is_editing = editing.read().as_deref() == Some(id.as_str());
+                            let title = session_title(&s);
+                            let meta = session_meta(&s);
+                            let (b_sum, b_comp, b_spk) =
+                                session_badges.read().get(&id).copied().unwrap_or((false, false, false));
+                            let b_audio = s.audio_path.is_some();
+                            let eng_save = engine.clone();
+                            let (id_open, id_edit, id_save, id_del) =
+                                (id.clone(), id.clone(), id.clone(), id.clone());
+                            let title_edit = title.clone();
+                            rsx! {
+                                div { key: "{s.id}", class: "session-wrap",
+                                if let Some(h) = group_hdr {
+                                    div { class: "date-group", "{h}" }
+                                }
+                                div {
+                                    class: if active { "session active" } else { "session" },
+                                    if is_editing {
+                                        input {
+                                            class: "rename-input",
+                                            value: "{edit_text}",
+                                            autofocus: true,
+                                            oninput: move |e| edit_text.set(e.value()),
+                                            onkeydown: move |e| match e.key() {
+                                                Key::Enter => {
+                                                    let t = edit_text.peek().trim().to_string();
+                                                    if !t.is_empty() {
+                                                        let _ = eng_save.db_tx.send(DbCmd::Rename { id: id_save.clone(), title: t });
+                                                    }
+                                                    editing.set(None);
+                                                }
+                                                Key::Escape => editing.set(None),
+                                                _ => {}
+                                            },
+                                        }
+                                    } else {
+                                        div { class: "session-row",
+                                            onclick: move |_| on_open_session.call(id_open.clone()),
+                                            div { class: "session-title", "{title}" }
+                                            div { class: "session-meta",
+                                                span { "{meta}" }
+                                                span { class: "badges",
+                                                    if b_sum { span { class: if tint_badges { "badge tint-sum" } else { "badge" }, title: "Has summary", {icon("sparkles")} } }
+                                                    if b_comp { span { class: if tint_badges { "badge tint-comp" } else { "badge" }, title: "Compressed", {icon("archive")} } }
+                                                    if b_spk { span { class: if tint_badges { "badge tint-spk" } else { "badge" }, title: "Speakers identified", {icon("users")} } }
+                                                    if b_audio { span { class: if tint_badges { "badge tint-audio" } else { "badge" }, title: "Audio kept", {icon("headphones")} } }
+                                                }
+                                            }
+                                        }
+                                        div { class: "session-actions",
+                                            button {
+                                                class: "row-btn",
+                                                title: "Rename",
+                                                onclick: move |_| {
+                                                    edit_text.set(title_edit.clone());
+                                                    editing.set(Some(id_edit.clone()));
+                                                },
+                                                {icon("pen")}
+                                            }
+                                            button {
+                                                class: "row-btn",
+                                                title: "Delete",
+                                                onclick: move |_| confirm_delete.set(Some(id_del.clone())),
+                                                {icon("trash")}
+                                            }
+                                        }
+                                    }
+                                }
+                                }
+                            }
+                        }
+                    }
+                        }
+                    }
+                }
+                // ---- Record: permanent primary at the sidebar foot ----
+                div { class: "sidebar-foot",
+                    if recording && system_in_capture {
+                        button {
+                            class: if *sys_muted.read() { "record muted" } else { "record mute" },
+                            title: if *sys_muted.read() { "Desktop audio muted — click to unmute" } else { "Mute desktop / system audio" },
+                            onclick: move |e| on_mute_system.call(e),
+                            {icon(if *sys_muted.read() { "speaker-off" } else { "speaker" })}
+                            if *sys_muted.read() { "Unmute desktop" } else { "Mute desktop" }
+                        }
+                    }
+                    if recording && mic_in_capture {
+                        button {
+                            class: if *mic_muted.read() { "record muted" } else { "record mute" },
+                            title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
+                            onclick: move |e| on_mute.call(e),
+                            {icon(if *mic_muted.read() { "mic-off" } else { "mic" })}
+                            if *mic_muted.read() { "Unmute mic" } else { "Mute mic" }
+                        }
+                    }
+                    button {
+                        class: if recording { "record stop" } else { "record" },
+                        onclick: move |e| on_record.call(e),
+                        {icon(if recording { "stop" } else { "record" })}
+                        if recording { "Stop" } else { "Record" }
+                    }
+                }
+            }
+    }
+}
+
+/// Toolbar above a saved session's transcript: the Generate ▾ menu
+/// (Summarize / Compress / Identify speakers / Re-transcribe) and the output
+/// cluster (Copy, Export ▾, Reveal/Open the last export).
+#[component]
+fn SessionToolbar(
+    id: String,
+    engine: Engine,
+    settings: Signal<Settings>,
+    notice: Signal<Option<String>>,
+    sessions: Signal<Vec<Session>>,
+    summary: Signal<Option<String>>,
+    compressed: Signal<Option<String>>,
+    audio_files: Signal<(Option<String>, Option<String>)>,
+    last_export: Signal<Option<String>>,
+    segments: Signal<Vec<Segment>>,
+    speaker_names: Signal<std::collections::HashMap<i32, String>>,
+    summarizing: Signal<bool>,
+    compressing: Signal<bool>,
+    diarizing: Signal<bool>,
+    retranscribing: Signal<bool>,
+    diar_speakers: Signal<String>,
+    diarize_est_secs: Signal<Option<u64>>,
+    confirm_retranscribe: Signal<Option<String>>,
+    show_export_menu: Signal<bool>,
+    show_generate_menu: Signal<bool>,
+) -> Element {
+    let sid = id.clone();
+    let eng_sum = engine.clone();
+    let eng_comp = engine.clone();
+    let sid_comp = id.clone();
+    let eng_diar = engine.clone();
+    let sid_diar = id.clone();
+    let sid_rt = id.clone();
+    let eng_maudio = engine.clone();
+    let sid_maudio = id.clone();
+    let mk = move |fmt: Format| {
+        let id = id.clone();
+        let engine = engine.clone();
+        move |_| {
+            let _ = engine.db_tx.send(DbCmd::Export {
+                id: id.clone(),
+                format: fmt,
+            });
+            show_export_menu.set(false);
+        }
+    };
+    // Contextual state for the Generate menu rows.
+    let has_summary = summary.read().is_some();
+    let has_compressed = compressed.read().is_some();
+    let has_others_audio = audio_files.read().1.is_some();
+    let has_any_audio = audio_files.read().0.is_some() || audio_files.read().1.is_some();
+    let gen_busy = summarizing() || compressing() || diarizing() || retranscribing();
+    rsx! {
+        div { class: "toolbar",
+            // --- Generate ▾ : stable surface, contents adapt ---
+            div { class: "gen-dd",
+                button {
+                    class: if gen_busy { "tbtn busy" } else { "tbtn" },
+                    title: "Run AI / speaker actions on this meeting",
+                    onclick: move |_| { let v = *show_generate_menu.peek(); show_generate_menu.set(!v); },
+                    {icon("sparkles")}
+                    if gen_busy { "Working… ▾" } else { "Generate ▾" }
+                }
+                if *show_generate_menu.read() {
+                    div { class: "dd-backdrop", onclick: move |_| show_generate_menu.set(false) }
+                    div { class: "gen-menu",
+                        // Summarize
+                        button {
+                            class: "gen-item",
+                            disabled: summarizing(),
+                            onclick: move |_| {
+                                show_generate_menu.set(false);
+                                if *summarizing.peek() { return; }
+                                summarizing.set(true);
+                                notice.set(Some(if settings.peek().llm_backend == "external" {
+                                    "Summarizing via the external LLM server…".to_string()
+                                } else {
+                                    "Summarizing… (first run downloads the model)".to_string()
+                                }));
+                                let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
+                            },
+                            span { {icon("sparkles")}  { if has_summary { "Re-summarize" } else { "Summarize" } } }
+                            if summarizing() { span { class: "gen-state", "running…" } }
+                            else if has_summary { span { class: "gen-state ok", {icon("check")} } }
+                        }
+                        // Compress
+                        button {
+                            class: "gen-item",
+                            title: "Condense this meeting into token-minimal dense prose for cross-meeting synthesis",
+                            disabled: compressing(),
+                            onclick: move |_| {
+                                show_generate_menu.set(false);
+                                if *compressing.peek() { return; }
+                                compressing.set(true);
+                                notice.set(Some(if settings.peek().llm_backend == "external" {
+                                    "Compressing via the external LLM server…".to_string()
+                                } else {
+                                    "Compressing… (first run downloads the model)".to_string()
+                                }));
+                                let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
+                            },
+                            span { {icon("archive")}  { if has_compressed { "Re-compress" } else { "Compress" } } }
+                            if compressing() { span { class: "gen-state", "running…" } }
+                            else if has_compressed { span { class: "gen-state ok", {icon("check")} } }
+                        }
+                        // Identify speakers (+ expected-count input) — needs the Others track.
+                        div { class: "gen-item-row",
+                            button {
+                                class: "gen-item grow",
+                                disabled: diarizing() || !has_others_audio,
+                                title: if has_others_audio { "Group the 'Others' channel into individual speakers" } else { "Needs the kept 'Others' audio" },
+                                onclick: move |_| {
+                                    show_generate_menu.set(false);
+                                    if *diarizing.peek() { return; }
+                                    diarizing.set(true);
+                                    // Rough ETA: diarization runs ~6x faster than real time on CPU.
+                                    let est = sessions.peek().iter()
+                                        .find(|s| s.id == sid_diar)
+                                        .and_then(|s| s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000))
+                                        .map(|secs| (secs / 6).max(15));
+                                    diarize_est_secs.set(est);
+                                    notice.set(Some("Identifying speakers… (first run downloads the speaker model)".to_string()));
+                                    let n = diar_speakers.peek().trim().parse::<u32>().unwrap_or(0);
+                                    let _ = eng_diar.db_tx.send(DbCmd::Diarize { id: sid_diar.clone(), num_speakers: n });
+                                },
+                                span { {icon("users")}  { if diarizing() { "Identifying…" } else { "Identify speakers" } } }
+                                if !has_others_audio { span { class: "gen-state", "no audio" } }
+                            }
+                            input {
+                                class: "spk-count",
+                                r#type: "number",
+                                min: "0",
+                                placeholder: "auto",
+                                title: "How many people spoke (blank = auto-detect). Remembered per session.",
+                                value: "{diar_speakers}",
+                                oninput: move |e| diar_speakers.set(e.value()),
+                            }
+                        }
+                        // Re-transcribe — needs kept audio.
+                        button {
+                            class: "gen-item",
+                            disabled: retranscribing() || !has_any_audio,
+                            title: if has_any_audio { "Regenerate the transcript from kept audio with the re-transcription model" } else { "Needs kept audio" },
+                            onclick: move |_| {
+                                show_generate_menu.set(false);
+                                if *retranscribing.peek() || !has_any_audio { return; }
+                                confirm_retranscribe.set(Some(sid_rt.clone()));
+                            },
+                            span { {icon("refresh")}  { if retranscribing() { "Re-transcribing…" } else { "Re-transcribe" } } }
+                            if !has_any_audio { span { class: "gen-state", "no audio" } }
+                        }
+                    }
+                }
+            }
+
+            // --- Output cluster (right) ---
+            div { class: "export-spacer" }
+            button {
+                class: "tbtn",
+                title: "Copy the transcript to the clipboard",
+                onclick: move |_| {
+                    let names = speaker_names.peek().clone();
+                    let text = segments
+                        .peek()
+                        .iter()
+                        .map(|s| format!("[{} {}] {}", fmt_ts(s.t_start_ms), s.speaker_label(&names), s.text))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    osutil::copy_to_clipboard(&text);
+                    notice.set(Some("Transcript copied to clipboard".to_string()));
+                },
+                {icon("copy")}
+                "Copy"
+            }
+            div { class: "export-dd",
+                button {
+                    class: "tbtn",
+                    title: "Export this transcript to a file",
+                    onclick: move |_| { let v = *show_export_menu.peek(); show_export_menu.set(!v); },
+                    {icon("export")}
+                    "Export ▾"
+                }
+                if *show_export_menu.read() {
+                    div { class: "dd-backdrop", onclick: move |_| show_export_menu.set(false) }
+                    div { class: "export-menu",
+                        button { class: "export-menu-item", onclick: mk(Format::Markdown), "Markdown (.md)" }
+                        button { class: "export-menu-item", onclick: mk(Format::Srt), "Subtitles (.srt)" }
+                        button { class: "export-menu-item", onclick: mk(Format::Json), "JSON (.json)" }
+                        if has_any_audio {
+                            button {
+                                class: "export-menu-item",
+                                title: "Mix every kept track into a single WAV",
+                                onclick: move |_| {
+                                    let _ = eng_maudio.db_tx.send(DbCmd::ExportAudio(sid_maudio.clone()));
+                                    show_export_menu.set(false);
+                                },
+                                "Merged audio (.wav)"
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(path) = last_export.read().clone() {
+                button {
+                    class: "tbtn ghost",
+                    onclick: {
+                        let p = path.clone();
+                        move |_| osutil::reveal_in_file_manager(&p)
+                    },
+                    {icon("folder")} "Reveal"
+                }
+                button {
+                    class: "tbtn ghost",
+                    onclick: move |_| osutil::open_in_editor(&path),
+                    {icon("external")} "Open"
+                }
+            }
+        }
+    }
+}
+
+/// Collapsible AI-summary panel for the viewed (or live) session.
+#[component]
+fn SummaryPanel(
+    view: Signal<View>,
+    summary: Signal<Option<String>>,
+    show_summary: Signal<bool>,
+    notice: Signal<Option<String>>,
+    engine: Engine,
+) -> Element {
+    rsx! {
+                if matches!(&*view.read(), View::Session(_) | View::Live) {
+                    if let Some(text) = summary.read().clone() {
+                        {
+                            let text_copy = text.clone();
+                            let open = *show_summary.read();
+                            // Deleting only makes sense for a saved session.
+                            let del_id = match &*view.read() {
+                                View::Session(id) => Some(id.clone()),
+                                _ => None,
+                            };
+                            let can_del = del_id.is_some();
+                            let did = del_id.unwrap_or_default();
+                            let eng_del = engine.clone();
+                            rsx! {
+                                div { class: "summary",
+                                    div { class: "summary-head",
+                                        button {
+                                            class: "panel-toggle",
+                                            onclick: move |_| { let v = *show_summary.peek(); show_summary.set(!v); },
+                                            span { class: "chev", if open { "▾" } else { "▸" } }
+                                            span { "Summary" }
+                                        }
+                                        button {
+                                            class: "row-btn",
+                                            onclick: move |_| {
+                                                osutil::copy_to_clipboard(&text_copy);
+                                                notice.set(Some("Summary copied to clipboard".to_string()));
+                                            },
+                                            "Copy"
+                                        }
+                                        if can_del {
+                                            button {
+                                                class: "row-btn",
+                                                title: "Delete this summary (the transcript is kept)",
+                                                onclick: move |_| {
+                                                    let _ = eng_del.db_tx.send(DbCmd::ClearSummary(did.clone()));
+                                                    notice.set(Some("Summary deleted".to_string()));
+                                                },
+                                                {icon("trash")}
+                                            }
+                                        }
+                                    }
+                                    if open {
+                                        div { class: "summary-body", "{text}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+    }
+}
+
+/// Collapsible dense-prose compression panel (Phase 23) for the viewed (or
+/// live) session — machine-oriented, so the body starts collapsed.
+#[component]
+fn CompressedPanel(
+    view: Signal<View>,
+    compressed: Signal<Option<String>>,
+    show_compressed: Signal<bool>,
+    notice: Signal<Option<String>>,
+    engine: Engine,
+) -> Element {
+    rsx! {
+                if matches!(&*view.read(), View::Session(_) | View::Live) {
+                    if let Some(text) = compressed.read().clone() {
+                        {
+                            let text_copy = text.clone();
+                            let expanded = *show_compressed.read();
+                            // Deleting only makes sense for a saved session.
+                            let del_id = match &*view.read() {
+                                View::Session(id) => Some(id.clone()),
+                                _ => None,
+                            };
+                            let can_del = del_id.is_some();
+                            let did = del_id.unwrap_or_default();
+                            let eng_del = engine.clone();
+                            rsx! {
+                                div { class: "summary compressed",
+                                    div { class: "summary-head",
+                                        button {
+                                            class: "panel-toggle",
+                                            onclick: move |_| {
+                                                let v = *show_compressed.peek();
+                                                show_compressed.set(!v);
+                                            },
+                                            span { class: "chev", if expanded { "▾" } else { "▸" } }
+                                            span { "Compressed (dense)" }
+                                        }
+                                        button {
+                                            class: "row-btn",
+                                            onclick: move |_| {
+                                                osutil::copy_to_clipboard(&text_copy);
+                                                notice.set(Some("Compressed text copied to clipboard".to_string()));
+                                            },
+                                            "Copy"
+                                        }
+                                        if can_del {
+                                            button {
+                                                class: "row-btn",
+                                                title: "Delete this compression (the transcript is kept)",
+                                                onclick: move |_| {
+                                                    let _ = eng_del.db_tx.send(DbCmd::ClearCompressed(did.clone()));
+                                                    notice.set(Some("Compressed text deleted".to_string()));
+                                                },
+                                                {icon("trash")}
+                                            }
+                                        }
+                                    }
+                                    if expanded {
+                                        div { class: "summary-body", "{text}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+    }
+}
+
+/// Speaker legend for a saved session with diarized speakers: one rename
+/// input per speaker index.
+#[component]
+fn SpeakerLegend(
+    id: String,
+    segments: Signal<Vec<Segment>>,
+    speaker_names: Signal<std::collections::HashMap<i32, String>>,
+    engine: Engine,
+) -> Element {
+    rsx! {
+        {
+                        let mut spk: Vec<i32> =
+                            segments.read().iter().filter_map(|s| s.speaker).collect();
+                        spk.sort_unstable();
+                        spk.dedup();
+                        if spk.is_empty() {
+                            rsx! {}
+                        } else {
+                            rsx! {
+                                div { class: "speaker-legend",
+                                    span { class: "legend-label", "Speakers:" }
+                                    for idx in spk {
+                                        {
+                                            let val = speaker_names.read().get(&idx).cloned().unwrap_or_default();
+                                            let engine = engine.clone();
+                                            let id = id.clone();
+                                            rsx! {
+                                                input {
+                                                    key: "{idx}",
+                                                    class: "speaker-name spk-{idx}",
+                                                    value: "{val}",
+                                                    placeholder: "Speaker {idx + 1}",
+                                                    onchange: move |e: FormEvent| {
+                                                        let _ = engine.db_tx.send(DbCmd::RenameSpeaker {
+                                                            id: id.clone(),
+                                                            speaker: idx,
+                                                            name: e.value(),
+                                                        });
+                                                    },
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+        }
+    }
+}
+
+/// Right-side session-notes drawer (tab + textarea). Targets the viewed
+/// session, or the live one while recording.
+#[component]
+fn NotesDrawer(
+    view: Signal<View>,
+    recording: bool,
+    live_session_id: Signal<Option<String>>,
+    show_notes: Signal<bool>,
+    notes: Signal<Option<String>>,
+    notes_draft: Signal<String>,
+    engine: Engine,
+) -> Element {
+    rsx! {
         {
             let notes_target = match &*view.read() {
                 View::Session(id) => Some(id.clone()),
@@ -1808,8 +2024,20 @@ fn MainApp() -> Element {
                 }
             })
         }
+    }
+}
 
-        // ---- Confirm-delete dialog ----
+/// Confirm-delete dialog for a session (set `confirm_delete` to show it).
+#[component]
+fn ConfirmDeleteDialog(
+    confirm_delete: Signal<Option<String>>,
+    view: Signal<View>,
+    segments: Signal<Vec<Segment>>,
+    summary: Signal<Option<String>>,
+    compressed: Signal<Option<String>>,
+    engine: Engine,
+) -> Element {
+    rsx! {
         if let Some(did) = confirm_delete.read().clone() {
             {
                 let engine = engine.clone();
@@ -1840,8 +2068,19 @@ fn MainApp() -> Element {
                 }
             }
         }
+    }
+}
 
-        // ---- Confirm-retranscribe dialog (Phase 25c) ----
+/// Confirm-re-transcribe dialog (Phase 25c; set `confirm_retranscribe`).
+#[component]
+fn ConfirmRetranscribeDialog(
+    confirm_retranscribe: Signal<Option<String>>,
+    settings: Signal<Settings>,
+    retranscribing: Signal<bool>,
+    notice: Signal<Option<String>>,
+    engine: Engine,
+) -> Element {
+    rsx! {
         if let Some(rid) = confirm_retranscribe.read().clone() {
             {
                 let engine = engine.clone();
@@ -1871,13 +2110,28 @@ fn MainApp() -> Element {
                 }
             }
         }
+    }
+}
 
-        // ---- Full-screen settings overlay ----
-        if *show_settings.read() {
-            {
-                let current = settings.read().model.clone();
-                let progress = model_progress.read().clone();
-                rsx! {
+/// Full-screen settings overlay: tab nav on the left, one pane per tab. The
+/// heavyweight inline panes (Transcription / AI / Speakers) are their own
+/// components below; the others were already separate components.
+#[component]
+fn SettingsOverlay(
+    mut show_settings: Signal<bool>,
+    settings: Signal<Settings>,
+    mut settings_tab: Signal<String>,
+    download_help: Signal<Option<String>>,
+    models: Signal<Vec<ModelInfo>>,
+    model_progress: Signal<Option<(String, u8)>>,
+    remote_models: Signal<Vec<String>>,
+    notice: Signal<Option<String>>,
+    devices: Vec<String>,
+    engine: Engine,
+) -> Element {
+    let current = settings.read().model.clone();
+    let progress = model_progress.read().clone();
+    rsx! {
                     div { class: "overlay",
                         div { class: "overlay-card",
                             div { class: "overlay-head",
@@ -1888,6 +2142,84 @@ fn MainApp() -> Element {
                                 // Manual-download fallback when an in-app fetch fails
                                 // (e.g. behind a corporate proxy). Show the direct
                                 // URL(s) + a jump to the models folder.
+                                DownloadHelp { download_help, models, notice }
+                                div { class: "settings-layout",
+                                div { class: "settings-nav",
+                                    button { class: if *settings_tab.read() == "transcription" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("transcription".into()), "Transcription" }
+                                    button { class: if *settings_tab.read() == "ai" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("ai".into()), "AI" }
+                                    button { class: if *settings_tab.read() == "speakers" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("speakers".into()), "Speakers" }
+                                    button { class: if *settings_tab.read() == "recording" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("recording".into()), "Recording" }
+                                    button { class: if *settings_tab.read() == "integrations" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("integrations".into()), "Integrations" }
+                                    button { class: if *settings_tab.read() == "files" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("files".into()), "Files" }
+                                    button { class: if *settings_tab.read() == "security" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("security".into()), "Security" }
+                                    button { class: if *settings_tab.read() == "theme" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("theme".into()), "Theme" }
+                                    button { class: if *settings_tab.read() == "about" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("about".into()), "About" }
+                                }
+                                div { class: "settings-pane",
+                                if *settings_tab.read() == "theme" {
+                                ThemeSettings { settings }
+                                }
+                                if *settings_tab.read() == "transcription" {
+                                TranscriptionSettings {
+                                    settings,
+                                    models,
+                                    current: current.clone(),
+                                    progress: progress.clone(),
+                                    engine: engine.clone(),
+                                }
+                                }
+                                if *settings_tab.read() == "recording" {
+                                AudioInputSettings { settings, devices: devices.clone() }
+                                LevelSettings { settings }
+                                RetentionSettings { settings }
+                                }
+                                if *settings_tab.read() == "ai" {
+                                AiSettings {
+                                    settings,
+                                    models,
+                                    progress: progress.clone(),
+                                    remote_models,
+                                    notice,
+                                    engine: engine.clone(),
+                                }
+                                }
+                                if *settings_tab.read() == "speakers" {
+                                SpeakersSettings {
+                                    settings,
+                                    models,
+                                    progress: progress.clone(),
+                                    engine: engine.clone(),
+                                }
+                                }
+                                if *settings_tab.read() == "security" {
+                                EncryptionSettings { settings, notice }
+                                }
+                                if *settings_tab.read() == "integrations" {
+                                IntegrationsSettings { settings, notice }
+                                }
+                                if *settings_tab.read() == "files" {
+                                FilesSettings { settings, notice }
+                                }
+                                if *settings_tab.read() == "about" {
+                                AboutSettings { settings, notice }
+                                }
+                                } // settings-pane
+                                } // settings-layout
+                            }
+                        }
+                    }
+    }
+}
+
+/// Manual-download fallback shown when an in-app model fetch fails (e.g.
+/// behind a corporate proxy): the direct URL(s) + a jump to the models folder.
+#[component]
+fn DownloadHelp(
+    download_help: Signal<Option<String>>,
+    models: Signal<Vec<ModelInfo>>,
+    notice: Signal<Option<String>>,
+) -> Element {
+    rsx! {
                                 if let Some(failed) = download_help.read().clone() {
                                     {
                                         let urls = models.read().iter()
@@ -1937,23 +2269,20 @@ fn MainApp() -> Element {
                                         }
                                     }
                                 }
-                                div { class: "settings-layout",
-                                div { class: "settings-nav",
-                                    button { class: if *settings_tab.read() == "transcription" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("transcription".into()), "Transcription" }
-                                    button { class: if *settings_tab.read() == "ai" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("ai".into()), "AI" }
-                                    button { class: if *settings_tab.read() == "speakers" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("speakers".into()), "Speakers" }
-                                    button { class: if *settings_tab.read() == "recording" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("recording".into()), "Recording" }
-                                    button { class: if *settings_tab.read() == "integrations" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("integrations".into()), "Integrations" }
-                                    button { class: if *settings_tab.read() == "files" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("files".into()), "Files" }
-                                    button { class: if *settings_tab.read() == "security" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("security".into()), "Security" }
-                                    button { class: if *settings_tab.read() == "theme" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("theme".into()), "Theme" }
-                                    button { class: if *settings_tab.read() == "about" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("about".into()), "About" }
-                                }
-                                div { class: "settings-pane",
-                                if *settings_tab.read() == "theme" {
-                                ThemeSettings { settings }
-                                }
-                                if *settings_tab.read() == "transcription" {
+    }
+}
+
+/// Settings → Transcription: live/auto toggles + the transcription model list
+/// (Live/Re role chips, download / delete / progress).
+#[component]
+fn TranscriptionSettings(
+    settings: Signal<Settings>,
+    models: Signal<Vec<ModelInfo>>,
+    current: String,
+    progress: Option<(String, u8)>,
+    engine: Engine,
+) -> Element {
+    rsx! {
                                 section { class: "settings-section",
                                     h3 { "Transcription" }
                                     p { class: "field-note", "One model catalog, two jobs: the Live model transcribes while you record (small = fewer CPU spikes); the Re model runs afterwards — Re-transcribe and automatic post-passes — where bigger is usually worth it. Models download on first use." }
@@ -2053,14 +2382,21 @@ fn MainApp() -> Element {
                                         }
                                     }
                                 }
+    }
+}
 
-                                }
-                                if *settings_tab.read() == "recording" {
-                                AudioInputSettings { settings, devices: devices.clone() }
-                                LevelSettings { settings }
-                                RetentionSettings { settings }
-                                }
-                                if *settings_tab.read() == "ai" {
+/// Settings → AI: LLM backend choice, external-server config, the summary
+/// model list, auto-title and context-window options.
+#[component]
+fn AiSettings(
+    settings: Signal<Settings>,
+    models: Signal<Vec<ModelInfo>>,
+    progress: Option<(String, u8)>,
+    remote_models: Signal<Vec<String>>,
+    notice: Signal<Option<String>>,
+    engine: Engine,
+) -> Element {
+    rsx! {
                                 section { class: "settings-section",
                                     h3 { "AI" }
                                     {
@@ -2260,9 +2596,19 @@ fn MainApp() -> Element {
                                         }
                                     }
                                 }
+    }
+}
 
-                                }
-                                if *settings_tab.read() == "speakers" {
+/// Settings → Speakers: diarization embedding-model list, segmentation model,
+/// clustering threshold, and the auto/live toggles.
+#[component]
+fn SpeakersSettings(
+    settings: Signal<Settings>,
+    models: Signal<Vec<ModelInfo>>,
+    progress: Option<(String, u8)>,
+    engine: Engine,
+) -> Element {
+    rsx! {
                                 section { class: "settings-section",
                                     h3 { "Speakers" }
                                     {
@@ -2399,28 +2745,6 @@ fn MainApp() -> Element {
                                         }
                                     }
                                 }
-
-                                }
-                                if *settings_tab.read() == "security" {
-                                EncryptionSettings { settings, notice }
-                                }
-                                if *settings_tab.read() == "integrations" {
-                                IntegrationsSettings { settings, notice }
-                                }
-                                if *settings_tab.read() == "files" {
-                                FilesSettings { settings, notice }
-                                }
-                                if *settings_tab.read() == "about" {
-                                AboutSettings { settings, notice }
-                                }
-                                } // settings-pane
-                                } // settings-layout
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
