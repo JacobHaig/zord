@@ -8,9 +8,12 @@ see [`docs/diagrams/integrations.md`](diagrams/integrations.md).
 > **Status (June 2026).** The receive/decrypt path is **proven** (Phase 27 spike,
 > live call), and the engine, storage seam, the **real `DiscordProvider`**, and
 > the **Settings → Integrations UI** (token/user-id, test-connection, one-click
-> invite, "Discord" capture mode), the in-channel **recording announcement**,
-> and the **merged-audio export** are **built** (Phases 28–30e). One live
-> end-to-end GUI test is still pending.
+> invite), the dedicated **Record Discord button** (30f), the in-channel
+> **recording announcement**, and the **merged-audio export** are **built**
+> (Phases 28–30f). First live tests surfaced and fixed three bugs (a songbird
+> scheduler lifetime panic, an SSRC-mapping race that lost audio, and a missing
+> post-stop transcription pass); a clean end-to-end re-verification is the
+> remaining step.
 
 ---
 
@@ -107,7 +110,7 @@ permission (audio comes from Discord), or label speakers by hand (names are real
 
 ### Connecting & following you in
 ```
-You: Record (capture mode = Discord)
+You: press Record Discord
   │
   ▼
 DiscordProvider.start()
@@ -220,7 +223,7 @@ of them:
 | `serenity` | Discord gateway: login, guild/voice-state events, REST |
 | `zord-gui` `run_integration_session` | spawns per-speaker procs, owns the session lifecycle |
 | `spawn_proc` | shared resample→VAD→transcribe per track (mic/desktop/Discord alike) |
-| `zord-config` | `discord_bot_token`, `discord_user_id`, capture mode |
+| `zord-config` | `discord_bot_token`, `discord_user_id`, announce + button toggles |
 | `zord-store` | segments + `speaker_names` + full-text search |
 | `zord-net` | the bot-invite / test-connection REST call (`/oauth2/applications/@me`) |
 | `zord-audio` `mix_wavs` | merged-audio export (streamed sample-wise sum of aligned tracks) |

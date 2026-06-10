@@ -1,8 +1,10 @@
-# Releasing Zord (macOS)
+# Releasing Zord
 
-Zord ships as a native macOS `.app` (Apple Silicon, macOS 13+). Local
-development never needs any of this — `cargo run -p zord-gui` is enough. This
-doc covers producing a **distributable, signed, notarized** build.
+Zord ships as a native macOS `.app` (Apple Silicon, macOS 13+) and a Windows
+x64 installer/portable EXE. Local development never needs any of this —
+see [`KICKSTART.md`](../KICKSTART.md) for building and running. This doc
+covers producing **distributable** builds: signing, notarization, the CI
+release workflow, and distribution channels.
 
 ## 1. Build a bundle locally
 
@@ -126,12 +128,14 @@ git push origin v0.1.0
 
 ## Windows
 
-The Windows backend (WASAPI loopback + cpal mic) is implemented and the
-`windows` job in `.github/workflows/release.yml` builds + bundles a `.msi` on a
-`windows-latest` runner for every tag. Runtime testing on a real Windows machine
-is still pending (no Windows host in the dev environment). Authenticode signing
-is not yet wired up — add a signing step analogous to the macOS one when you
-have a code-signing certificate.
+The Windows backend (WASAPI loopback + per-app process-loopback + cpal mic) is
+implemented and the `windows` job in `.github/workflows/release.yml` bundles an
+installer (NSIS `-setup.exe`, or `.msi` depending on the dx bundler) plus the
+portable GUI/CLI EXEs on a `windows-latest` runner for every tag. Runtime
+testing on a real Windows machine is still pending (no Windows host in the dev
+environment) — that includes the per-app capture path and the in-place
+self-update swap. Authenticode signing is not yet wired up — add a signing
+step analogous to the macOS one when you have a code-signing certificate.
 
 ## Not yet covered
 

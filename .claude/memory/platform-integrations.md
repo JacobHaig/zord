@@ -162,5 +162,20 @@ single-file** export (mix session-aligned tracks — cheap since aligned).
   — id (bundle id / exe name) persisted, pid resolved at record time. Capture
   mode "app" + picker (never enumerates eagerly — triggers macOS Screen
   Recording prompt). `discord` is now in the release FEATURES set.
-- ⚠ Still pending: live end-to-end GUI test of the Discord path; SSRC
-  mapping hardening (seed from voice states); 5-min pad cap revisit.
+- **30f ✅ (June 2026)** dedicated **Record Discord** button (sidebar foot;
+  needs discord build + saved creds + an Integrations toggle);
+  `RecorderCmd::Start { integration: bool }` replaces the capture-mode
+  inference; `"discord"` capture mode removed (configs migrate to "both").
+- **30g ✅ (June 2026) live-test hardening** — three real bugs found+fixed in
+  first GUI tests: (1) songbird's process-global default scheduler dies with
+  session #1's runtime → per-session `Scheduler` in songbird Config; (2)
+  Speaking events (SSRC→user) arrive immediately on join and were raced by
+  late handler registration → handlers registered BEFORE join + unmapped-SSRC
+  fallback announce after ~1 s ("Speaker N", renamed on late mapping) + 20 s
+  join timeout + leave-channel-before-gateway-shutdown; (3) integration
+  sessions had NO post-stop transcription and post_transcribe_inner ignored
+  spk-N tracks (the folded 28e gap) → both wired, ground-truth speaker idx
+  re-applied on re-transcribe.
+- ⚠ Still pending: clean live end-to-end re-verification; 5-min pad cap
+  revisit; unmapped-fallback can land the followed user on a speaker track
+  instead of Me (rare; safety net only).

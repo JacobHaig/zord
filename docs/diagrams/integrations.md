@@ -15,14 +15,19 @@ exports / transcript UI need almost no change. Integration sessions are never
 diarized.
 
 ```
-                 today                          with an integration
-   mic ──► Me                          mic ──► Me   (unchanged)
-   system-loopback ──► Others ─┐       Discord ─┬─► Others + speaker=0 ("Alex")
-                               │                ├─► Others + speaker=1 ("Sam")
-                  diarization ─┘                └─► Others + speaker=2 ("Jo")
-                  (cluster → Speaker N)         name map written directly,
+                 local capture                  with an integration
+   mic ──► Me                          Discord ─┬─► Me  (your own stream;
+   system-loopback ──► Others ─┐       (no mic) │        no local capture)
+                               │                ├─► Others + speaker=0 ("Alex")
+                  diarization ─┘                ├─► Others + speaker=1 ("Sam")
+                  (cluster → Speaker N)         └─► Others + speaker=2 ("Jo")
+                                                name map written directly,
                                                 NO diarization pass
 ```
+
+> Phase 30b decision: in an integration session **"Me" is your own Discord
+> stream too** — Discord's noise suppression applies to every track and there
+> is no second clock to align.
 
 ---
 
@@ -113,18 +118,18 @@ the proven recording path. `drive_session` assigns a stable speaker index per
 participant; each becomes a per-speaker track.
 
 ```
-ZORD_FAKE_INTEGRATION=1 + Record
+Record Discord button            (dev: ZORD_FAKE_INTEGRATION=1 + Record)
         │
         ▼
-run_integration_session            (separate from run_session)
+run_integration_session          (separate from run_session; NO local mic)
         │
-        ├─ mic ──► spawn_proc(Me)                ──► me.wav       ─┐
-        │                                                          │
-        └─ drive_session(FakeProvider)                             ├─► transcribe
-              on ParticipantJoined(idx, name, audio):              │   (Job.speaker
-                 set_speaker_name(idx, name)    ──► speaker_names   │    → segment)
-                 spawn_proc(Others, speaker=idx)──► spk-<idx>.wav  ─┘
-              on Ended / user Stop ──► finalize, no diarization
+        └─ drive_session(provider)
+              on ParticipantJoined(role, name, audio):
+                 is_me ──► spawn_proc(Me)          ──► me.wav       ─┐
+                 else  ──► set_speaker_name(idx)   ──► speaker_names │─► transcribe
+                           spawn_proc(Others, idx) ──► spk-<idx>.wav ┘  (Job.speaker
+              on Ended / user Stop ──► finalize, no diarization,         → segment)
+                 then the post-stop transcription pass (when live is off)
 ```
 
 ---

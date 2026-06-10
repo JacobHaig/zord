@@ -1035,7 +1035,7 @@ Sub-phases (all shipped):
 
 ---
 
-## Platform integrations (Phases 27–31) — major initiative
+## 8. Platform integrations (Phases 27–31) — major initiative
 
 > 📐 ASCII reference diagrams for this initiative live in
 > [`docs/diagrams/integrations.md`](diagrams/integrations.md). A user + service
@@ -1363,9 +1363,29 @@ code, plus the Settings UI.
   from the dropdown and old configs migrate to `"both"`. Mute buttons no
   longer render during integration sessions (nothing local to mute). Spec:
   `docs/superpowers/specs/2026-06-10-discord-record-button-design.md`.
+- **30g ✅ — live-test hardening (June 2026).** First real GUI tests surfaced
+  three bugs, all fixed:
+  1. **songbird scheduler lifetime** — its default scheduler is a process
+     global whose core task spawns on the first tokio runtime; our
+     runtime-per-session design killed it after session #1 and every later
+     voice join panicked (empty sessions). Each session now passes its own
+     `Scheduler` via songbird `Config`.
+  2. **SSRC-mapping race** — Discord delivers the Speaking events (SSRC→user)
+     immediately on join; handlers were registered *after* `join()` returned
+     and missed them → no `ParticipantJoined`, nothing recorded. Handlers now
+     register **before** the join, and any SSRC producing audio unmapped for
+     ~1 s is announced unnamed ("Speaker N", upgraded on the late mapping) —
+     audio can no longer be lost silently. Joins are bounded by a 20 s
+     timeout, and the bot now **leaves the channel** before gateway shutdown
+     (a lingering voice state timed out the next join).
+  3. **No post-stop transcription** — integration sessions lacked
+     `run_session`'s Phase 25 post pass *and* `post_transcribe_inner` ignored
+     `spk-N` tracks (the folded 28e gap). Both fixed: the post pass runs for
+     integration sessions and every per-speaker track transcribes with its
+     ground-truth index.
+  A clean end-to-end re-verification on a live call is the remaining step.
 - Heavy deps (`serenity`/`songbird`/`opus`/`davey`) stay behind the `discord`
-  feature; releases add it once mature (✅ in the release feature set since
-  Phase 34/35).
+  feature; releases ship it (✅ in the release feature set since Phase 34/35).
 
 ### Phase 31 — Per-app capture (Approach B, bot-free universal fallback)
 ✅ **DONE (June 2026; macOS build-verified + Windows cross-compile-verified —
@@ -1473,7 +1493,7 @@ feeds.
 
 ---
 
-## Productionization & official release (Phases 32–35) — major initiative
+## 9. Productionization & official release (Phases 32–35) — major initiative
 
 Goal (June 2026): stabilize the app and prepare an **official public release**.
 The stability audit (June 2026) found the app solid for the happy path but with
@@ -1577,7 +1597,7 @@ pre-existing clippy warnings ahead of the `-D warnings` CI gate.
 
 ---
 
-## 7. Open questions to revisit during build
+## 10. Open questions to revisit during build
 1. ~~**macOS minimum version**~~ — **DECIDED:** target whatever runs on Apple
    Silicon M1–M5. We'll set the deployment target to macOS 13 (the first version
    with ScreenCaptureKit system-audio support that all M-series machines run),
@@ -1592,7 +1612,7 @@ pre-existing clippy warnings ahead of the `-D warnings` CI gate.
 
 ---
 
-## 8. Sources (research, May 2026)
+## 11. Sources (research, May 2026)
 - whisper-rs (bindings, GPU features): https://github.com/tazz4843/whisper-rs · https://crates.io/crates/whisper-rs
 - screencapturekit crate (macOS system+mic audio): https://crates.io/crates/screencapturekit · https://github.com/svtlabs/screencapturekit-rs
 - cpal & WASAPI loopback caveats: https://github.com/RustAudio/cpal · issues #251/#476/#516

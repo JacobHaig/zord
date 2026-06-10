@@ -67,11 +67,36 @@ against zip-slip by `tar 0.4.46`.
   pipeline, so a crafted/corrupt file errors cleanly instead of panicking.
   `zord-audio/src/wav.rs`, `zord-transcribe/src/offline.rs`.
 
+## Surfaces added after the review (June 2026) — to fold into the next pass
+
+These shipped with Phases 30–35 and have *not* yet had the adversarial
+re-verification treatment above:
+
+- **Discord integration (`discord` feature).** The bot token is a real
+  credential stored in plaintext `config.json` (same posture and `0600`
+  treatment as the LLM bearer token; keychain storage is a candidate
+  improvement). The bot connects out to Discord's gateway/voice
+  infrastructure — the one persistent outbound connection in the app, active
+  only during a Discord recording. Voice payloads are decrypted via songbird's
+  DAVE (MLS + AES-256-GCM) implementation; `serenity`/`songbird`/`davey` join
+  the supply-chain surface.
+- **Update check (`self-update` feature, GitHub/dev channel only).** One HTTPS
+  request to the GitHub releases API at launch, opt-out in Settings → About.
+  Store-channel builds compile it out entirely.
+- **Windows in-place update.** Downloads the release asset over HTTPS (OS
+  trust store) and swaps the running EXE via rename. **Gap: the binary is not
+  signature- or digest-verified beyond TLS** — acceptable while releases are
+  unsigned, but Authenticode (or at minimum a published digest check) should
+  land together with code signing before this is the primary update path.
+
 ## Deferred
 
 - **Zeroizing the DB passphrase in memory** (`DB_KEY` is a plain `String`).
   Defense-in-depth only — exploitation presupposes process-memory / core-dump /
   swap access, i.e. the machine is already compromised. Tracked, not yet done.
+- **Update-binary digest/signature verification** (see above) — pairs with
+  acquiring signing certificates.
+- **Bot token in the OS keychain** instead of `config.json`.
 
 ## Reporting
 
