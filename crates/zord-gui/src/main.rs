@@ -3038,6 +3038,22 @@ fn IntegrationsSettings(settings: Signal<Settings>, notice: Signal<Option<String
             p { class: "field-note",
                 "The bot posts a \"recording started\" message in the voice channel's text chat when it joins — the consent signal Discord's developer policy expects."
             }
+            div { class: "field-row",
+                label { class: "field-label", "Show the Record Discord button" }
+                button {
+                    class: if settings.read().discord_record_button { "toggle on" } else { "toggle" },
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.discord_record_button = !s.discord_record_button;
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    if settings.read().discord_record_button { "On" } else { "Off" }
+                }
+            }
+            p { class: "field-note",
+                "The sidebar button appears once a bot token and user ID are saved."
+            }
             div { class: "field",
                 button {
                     class: "mbtn",
@@ -4204,9 +4220,6 @@ fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> E
                     option { value: "mic", selected: settings.read().capture_mode == "mic", "Microphone only (Me)" }
                     option { value: "system", selected: settings.read().capture_mode == "system", "System audio only (Others)" }
                     option { value: "app", selected: settings.read().capture_mode == "app", "Microphone + one app's audio" }
-                    if cfg!(feature = "discord") {
-                        option { value: "discord", selected: settings.read().capture_mode == "discord", "Discord call (via your bot)" }
-                    }
                 }
             }
             if settings.read().capture_mode == "app" {
@@ -4247,11 +4260,6 @@ fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> E
                 }
                 p { class: "field-note",
                     "Records your microphone plus only this app's audio (music and notifications stay out). The app must be running when you press Record. Speakers in its audio are identified by diarization, as with system capture."
-                }
-            }
-            if settings.read().capture_mode == "discord" {
-                p { class: "field-note",
-                    "All audio (including you) comes from Discord — no mic or desktop capture. Set up the bot under Settings → Integrations."
                 }
             }
         }
