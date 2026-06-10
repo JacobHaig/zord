@@ -180,6 +180,40 @@ pub fn post_sse(
     }
 }
 
+/// Fetch the latest GitHub release of `repo` ("owner/name"): the tag plus each
+/// asset's `(file_name, download_url)`. Drives the in-app update check
+/// (Phase 34, `self-update` builds).
+pub fn latest_github_release(
+    repo: &str,
+    timeout: Duration,
+) -> Result<(String, Vec<(String, String)>), ApiError> {
+    let v = get_json(
+        &format!("https://api.github.com/repos/{repo}/releases/latest"),
+        None,
+        timeout,
+    )?;
+    let tag = v
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let assets = v
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    Some((
+                        a.get("name")?.as_str()?.to_string(),
+                        a.get("browser_download_url")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((tag, assets))
+}
+
 /// Validate a Discord bot token and fetch its application `(id, name)` via
 /// `GET /oauth2/applications/@me` (Discord uses `Authorization: Bot …`, not
 /// Bearer). Drives the Integrations tab's Test-connection and the invite link

@@ -8,6 +8,41 @@ use serde::{Deserialize, Serialize};
 /// Sample rate that whisper.cpp requires for all input audio.
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
+/// Distribution channel baked in at build time via the `ZORD_CHANNEL` env var
+/// (Phase 34): `github` (self-updating), `steam` / `msstore` / `macappstore`
+/// (the store owns updates), or `dev` (local builds; behaves like `github` so
+/// the update path is testable). Stores forbid self-updating binaries, so all
+/// update machinery keys off this.
+pub const DIST_CHANNEL: &str = match option_env!("ZORD_CHANNEL") {
+    Some(c) => c,
+    None => "dev",
+};
+
+/// Is `latest` a strictly newer version than `current`? Accepts `v`-prefixed
+/// and bare dotted-numeric versions ("v0.3.1", "0.2.18"); non-numeric parts
+/// end the comparison (treated as equal from there on).
+pub fn is_newer_version(current: &str, latest: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim()
+            .trim_start_matches(['v', 'V'])
+            .split('.')
+            .map_while(|p| p.parse::<u64>().ok())
+            .collect()
+    }
+    let (cur, new) = (parts(current), parts(latest));
+    if new.is_empty() {
+        return false; // unparseable tag — never nag
+    }
+    for i in 0..cur.len().max(new.len()) {
+        let c = cur.get(i).copied().unwrap_or(0);
+        let n = new.get(i).copied().unwrap_or(0);
+        if n != c {
+            return n > c;
+        }
+    }
+    false
+}
+
 /// Which side of the conversation a segment came from.
 ///
 /// We separate audio at the *capture* layer (microphone vs. system loopback)
@@ -304,6 +339,18 @@ mod tests {
         assert!(ItemStatus::Blocked.is_active());
         assert!(ItemStatus::Waiting.is_active());
         assert!(!ItemStatus::Done.is_active());
+    }
+
+    #[test]
+    fn version_comparison() {
+        assert!(is_newer_version("0.2.18", "v0.2.19"));
+        assert!(is_newer_version("v0.2.18", "0.3.0"));
+        assert!(is_newer_version("0.2.18", "1.0.0"));
+        assert!(is_newer_version("0.2", "0.2.1")); // longer = newer when equal so far
+        assert!(!is_newer_version("0.2.18", "0.2.18"));
+        assert!(!is_newer_version("0.2.18", "v0.2.17"));
+        assert!(!is_newer_version("1.0.0", "0.9.9"));
+        assert!(!is_newer_version("0.2.18", "not-a-version")); // never nag on junk
     }
 
     #[test]

@@ -1534,22 +1534,35 @@ pre-existing clippy warnings ahead of the `-D warnings` CI gate.
   pad_to_wallclock, smooth_level). Live audio/ASR stays manual per
   `verification-limits`.
 
-### Phase 34 — Release readiness
-- **34a — Channel seam + update check**: build-time distribution channel
-  (compile-time env/feature); About surface (version + channel + releases
-  link); `self-update` feature: GitHub releases check w/ opt-out toggle,
-  toast on new version, Windows portable rename-swap, macOS notify-only.
-- **34b — Docs pass**: README install + troubleshooting (incl. unsigned-app
-  bypass per OS), RELEASE.md checklist refresh, store-channel notes.
-- **34c — First-run & error-state polish**: mic/screen permission denied,
-  model download failure, no audio device — each must show a clear actionable
-  error, never a silent hang.
+### Phase 34 — Release readiness ✅ DONE (June 2026)
+- **34a ✅ — Channel seam + update check**: `zord_core::DIST_CHANNEL` baked at
+  compile time from `ZORD_CHANNEL` (github | steam | msstore | dev);
+  `is_newer_version` (unit-tested); `zord_net::latest_github_release`;
+  zord-gui **`self-update` feature** (github-channel builds only): launch
+  check (opt-out `check_updates` setting), toast on hit, Settings → About
+  shows version + channel + manual check + **Windows one-click
+  download-and-install** (portable-EXE rename-swap via `self-replace`;
+  Windows path compile-verified only). macOS = notify + open download page
+  (unsigned downloads get re-quarantined, so no silent swap until signing).
+- **34b ✅ — Docs pass**: README "Installing a release" (unsigned Gatekeeper /
+  SmartScreen bypasses, update behavior per channel), Discord + per-app
+  troubleshooting, release-feature line fixed; RELEASE.md channel table +
+  asset-names-are-an-API warning + stale notes cleaned.
+- **34c ✅ — Error-state polish**: mic-permission denial now carries an
+  actionable hint per OS; model-download / no-device / DB failures verified
+  to surface via Status::Error (32a/32c made the remaining silent paths
+  visible).
 
-### Phase 35 — Store distribution (may trail the first release)
-- **35a — Steam**: steamworks depot + build pipeline; channel build without
-  `self-update`.
-- **35b — Microsoft Store**: MSIX packaging (store-signed — solves SmartScreen
-  on that channel).
+### Phase 35 — Store distribution (scaffolded; publishing may trail)
+- **Scaffold ✅ (June 2026)**: release.yml gained a `channel` dispatch input
+  (github | steam | msstore) — store builds bake their channel id, OMIT
+  `self-update`, carry the channel in artifact names, and upload as workflow
+  artifacts for manual store submission. `discord` joined the release
+  feature set.
+- **35a — Steam**: steamworks depot config + upload pipeline (needs a Steam
+  partner account).
+- **35b — Microsoft Store**: MSIX packaging (store-signed — solves
+  SmartScreen on that channel; needs a Partner Center account).
 - **35c — Mac App Store / own store**: needs Apple Developer account; audit
   sandbox constraints (ScreenCaptureKit loopback under sandbox) before
   committing.

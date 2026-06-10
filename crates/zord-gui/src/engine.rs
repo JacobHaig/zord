@@ -2314,7 +2314,14 @@ fn run_session(
                 Some(m)
             }
             Err(e) => {
-                let _ = ev.send(Event::Status(Status::Error(format!("microphone: {e}"))));
+                let hint = if cfg!(target_os = "macos") {
+                    " (check Microphone permission in System Settings → Privacy & Security)"
+                } else {
+                    " (check the OS microphone privacy settings and that a mic is connected)"
+                };
+                let _ = ev.send(Event::Status(Status::Error(format!(
+                    "microphone: {e}{hint}"
+                ))));
                 return false;
             }
         }

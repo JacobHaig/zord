@@ -133,6 +133,12 @@ pub struct Settings {
     /// signal Discord's developer policy expects.
     #[serde(default = "default_true")]
     pub discord_announce: bool,
+    /// Check GitHub for a newer release at launch (Phase 34; only in
+    /// `self-update` builds on the github/dev channel — store builds never
+    /// check regardless of this setting). The check is the one network call
+    /// the app makes besides user-initiated downloads.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
     /// Per-app capture target (Phase 31, capture_mode == "app"): a stable app
     /// identity — macOS bundle id, Windows executable name. Empty = unset.
     #[serde(default)]
@@ -489,6 +495,7 @@ impl Default for Settings {
             discord_bot_token: String::new(),
             discord_user_id: String::new(),
             discord_announce: true,
+            check_updates: true,
             capture_app_id: String::new(),
             capture_app_name: String::new(),
             badge_tint: false,

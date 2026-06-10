@@ -4,6 +4,8 @@
 
 mod engine;
 mod osutil;
+#[cfg(feature = "self-update")]
+mod update;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
@@ -695,6 +697,23 @@ fn MainApp() -> Element {
             } else if *rec_secs.peek() != 0 {
                 rec_secs.set(0);
             }
+        }
+    });
+
+    // Launch-time update check (Phase 34): `self-update` builds on the
+    // github/dev channel only, opt-out via Settings → About. One request to
+    // the GitHub releases API; a hit becomes a toast pointing at About.
+    #[cfg(feature = "self-update")]
+    use_future(move || async move {
+        if !update::channel_self_updates() || !zord_config::Settings::load().check_updates {
+            return;
+        }
+        if let Ok(Ok(Some(info))) = tokio::task::spawn_blocking(update::check).await {
+            notice.set(Some(format!(
+                "Update available: v{} (you have v{}) — install from Settings → About",
+                info.version,
+                update::CURRENT_VERSION
+            )));
         }
     });
 
@@ -2392,7 +2411,7 @@ fn MainApp() -> Element {
                                 FilesSettings { settings, notice }
                                 }
                                 if *settings_tab.read() == "about" {
-                                AboutSettings {}
+                                AboutSettings { settings, notice }
                                 }
                                 } // settings-pane
                                 } // settings-layout
@@ -2481,11 +2500,125 @@ fn ThemeSettings(settings: Signal<Settings>) -> Element {
 
 /// Settings → About: a one-line local-only blurb.
 #[component]
-fn AboutSettings() -> Element {
+fn AboutSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
+    // Update controls exist only in `self-update` builds (the GitHub channel);
+    // store builds neither check nor install — the store does.
+    let update_ui: Option<Element> = {
+        #[cfg(feature = "self-update")]
+        {
+            Some(rsx! {
+                UpdateSettings { settings, notice }
+            })
+        }
+        #[cfg(not(feature = "self-update"))]
+        {
+            let _ = (&settings, &notice);
+            None
+        }
+    };
     rsx! {
         section { class: "settings-section",
             h3 { "About" }
             p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
+            p { class: "field-note",
+                "Version {env!(\"CARGO_PKG_VERSION\")} · {zord_core::DIST_CHANNEL} channel"
+            }
+            {update_ui}
+        }
+    }
+}
+
+/// Settings → About update controls (Phase 34, `self-update` builds): the
+/// launch-check toggle, a manual check, and — on Windows, where the portable
+/// EXE can be swapped in place — one-click install.
+#[cfg(feature = "self-update")]
+#[component]
+fn UpdateSettings(settings: Signal<Settings>, mut notice: Signal<Option<String>>) -> Element {
+    let mut found = use_signal(|| None::<update::UpdateInfo>);
+    let mut busy = use_signal(|| false);
+    if !update::channel_self_updates() {
+        return rsx! {
+            p { class: "field-note", "This build is distributed through a store — updates arrive through the store." }
+        };
+    }
+    rsx! {
+        div { class: "field-row",
+            label { class: "field-label", "Check for updates at launch" }
+            button {
+                class: if settings.read().check_updates { "toggle on" } else { "toggle" },
+                onclick: move |_| {
+                    let mut s = settings.peek().clone();
+                    s.check_updates = !s.check_updates;
+                    let _ = s.save();
+                    settings.set(s);
+                },
+                if settings.read().check_updates { "On" } else { "Off" }
+            }
+        }
+        div { class: "field",
+            button {
+                class: "mbtn",
+                disabled: *busy.read(),
+                onclick: move |_| {
+                    busy.set(true);
+                    spawn(async move {
+                        let res = tokio::task::spawn_blocking(update::check).await;
+                        busy.set(false);
+                        match res {
+                            Ok(Ok(Some(info))) => {
+                                notice.set(Some(format!("Update available: v{}", info.version)));
+                                found.set(Some(info));
+                            }
+                            Ok(Ok(None)) => {
+                                notice.set(Some(format!("You're up to date (v{}).", update::CURRENT_VERSION)));
+                                found.set(None);
+                            }
+                            Ok(Err(e)) => notice.set(Some(e.to_string())),
+                            Err(_) => notice.set(Some("update check failed".into())),
+                        }
+                    });
+                },
+                if *busy.read() { "Checking…" } else { "Check for updates" }
+            }
+        }
+        if let Some(info) = found.read().clone() {
+            div { class: "field",
+                if let Some(url) = info.asset_url.clone() {
+                    button {
+                        class: "mbtn",
+                        disabled: *busy.read(),
+                        onclick: move |_| {
+                            busy.set(true);
+                            let url = url.clone();
+                            spawn(async move {
+                                let res = tokio::task::spawn_blocking(move || {
+                                    update::download_and_install(&url)
+                                })
+                                .await;
+                                busy.set(false);
+                                match res {
+                                    Ok(Ok(())) => notice.set(Some(
+                                        "Update installed — restart Zord to finish.".into(),
+                                    )),
+                                    Ok(Err(e)) => notice.set(Some(format!("update failed: {e}"))),
+                                    Err(_) => notice.set(Some("update failed".into())),
+                                }
+                            });
+                        },
+                        "Download & install v{info.version}"
+                    }
+                } else {
+                    button {
+                        class: "mbtn ghost",
+                        onclick: move |_| {
+                            if let Some(i) = found.peek().as_ref() {
+                                let _ = open::that(&i.page_url);
+                            }
+                        },
+                        "Open download page (v{info.version})"
+                    }
+                }
+            }
         }
     }
 }

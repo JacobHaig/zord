@@ -24,6 +24,10 @@ llm-remote = ["dep:zord-summarize", "zord-summarize/remote", "dep:zord-overview"
 diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 # Discord voice integration (per-participant capture via songbird; heavy build).
 discord = ["zord-integrations/discord"]
+# In-app update check + Windows in-place install (Phase 34). Compiled ONLY into
+# the GitHub / own-store channel — store builds (Steam/MS Store) must not
+# self-update (the store does it), so their release jobs omit this feature.
+self-update = ["dep:self-replace"]
 
 [dependencies]
 zord-core = { workspace = true }
@@ -48,6 +52,8 @@ arboard = "3"
 # system browser.
 open = "5"
 zord-net = { workspace = true }
+# Windows portable-EXE update swap (rename running exe aside, write the new one).
+self-replace = { version = "1", optional = true }
 # Per-line transcript playback (Sink + SamplesBuffer only — we read WAVs with
 # hound ourselves, so no decoder features needed).
 rodio = { version = "0.22", default-features = false, features = ["playback"] }

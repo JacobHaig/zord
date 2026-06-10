@@ -93,10 +93,34 @@ transcripts in a browser. Both are local-only.
 
 ---
 
+## Installing a release
+
+Grab the latest build from the
+[releases page](https://github.com/JacobHaig/zord/releases): a `.dmg`
+(macOS, Apple Silicon) or a `-setup.exe` / portable `-gui.exe` / `.zip`
+(Windows x64). Releases ship every optional engine (Parakeet, diarization,
+local + remote AI, Discord).
+
+**The builds are currently unsigned**, so the OS warns on first launch:
+
+- **macOS** — right-click the app → **Open** → **Open** (needed once), or
+  `xattr -dr com.apple.quarantine /Applications/ZordGui.app`.
+- **Windows** — SmartScreen: **More info → Run anyway**. The `.zip` artifact
+  usually skips the prompt entirely (extract, then run).
+
+**Updates.** GitHub builds check the releases page at launch (turn it off in
+Settings → About) and show a notice when a newer version exists. On Windows
+the portable EXE can **download & install the update in place** from
+Settings → About (the running EXE is renamed aside and replaced — the swap
+takes effect on relaunch). On macOS the notice links to the download page.
+Store builds (Steam / Microsoft Store, when they exist) update through their
+store and never self-update.
+
+---
+
 ## Getting started (building from source)
 
-> Zord is currently distributed as source. These steps build the desktop app
-> and the command-line tool.
+> These steps build the desktop app and the command-line tool from source.
 
 ### 1. Prerequisites
 
@@ -117,8 +141,8 @@ git clone <your-fork-url> zord && cd zord
 cargo build            # debug
 cargo build --release  # optimized (recommended for real use)
 
-# What we use for release
-cargo build -p zord-gui --release --features parakeet --features diarization --features llm-remote --features llm-local
+# What we use for release (the github channel additionally enables self-update)
+cargo build -p zord-gui --release --features parakeet,diarization,llm-remote,llm-local,discord
 ```
 
 That produces two binaries:
@@ -173,6 +197,20 @@ speaker-embedding model). Diarization runs offline after recording and on
 demand; an optional live mode shows rough labels while recording (recomputed
 accurately at stop). The segmentation model is selectable in Settings →
 Speakers (stock pyannote, or Rev's more-accurate Reverb fine-tunes).
+
+#### Discord integration
+
+Record Discord calls with **one separated audio track per speaker** (real
+names, no diarization) via your own bot:
+
+```bash
+cargo run -p zord-gui --features discord
+```
+
+Set the bot token + your user ID in Settings → Integrations, invite the bot
+from there, set capture mode to "Discord", and record — the bot follows you
+into whatever voice channel you join. Full guide:
+[`docs/discord-integration.md`](docs/discord-integration.md).
 
 #### Database encryption (SQLCipher)
 
@@ -375,3 +413,12 @@ Full design, decisions, and phase history: [`docs/PLAN.md`](docs/PLAN.md).
   OS certificate store and proxy environment variables; if a download still
   fails, Zord shows the direct URL and a ModelScope mirror so you can fetch it in
   a browser and drop it in the models folder.
+- **"app isn't running" when recording one app** — per-app capture resolves the
+  chosen app at record time; launch the target app first (on Windows it must
+  have played audio at least once to appear in the picker).
+- **Discord record does nothing** — the bot must be invited to the server
+  you're calling in (Settings → Integrations → "Invite bot to a server") and
+  you must be in a voice channel when you press Record. "Test connection"
+  verifies the token.
+- **macOS warns "unidentified developer"** — builds are unsigned for now:
+  right-click → Open (once), see [Installing a release](#installing-a-release).

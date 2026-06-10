@@ -71,10 +71,30 @@ All artifacts follow one scheme — `Zord-<version>-<os>-<arch>[-<kind>].<ext>`:
 shipped — use the installer.)
 
 Both are built with the `FEATURES` set at the top of the workflow
-(`diarization,summaries,parakeet`). `encryption` is intentionally excluded from
-CI because its vendored OpenSSL needs Perl + NASM on the Windows runner — build
-locally with `--features encryption` if you need it. To change what ships, edit
-the single `FEATURES` env value.
+(`diarization,llm-local,llm-remote,parakeet,discord`). `encryption` is
+intentionally excluded from CI because its vendored OpenSSL needs Perl + NASM
+on the Windows runner — build locally with `--features encryption` if you need
+it. To change what ships, edit the single `FEATURES` env value.
+
+> ⚠ **Asset names are an API.** The in-app updater downloads
+> `Zord-<ver>-windows-x64-gui.exe` by exact name — renaming the artifacts
+> breaks one-click updates for every already-shipped build.
+
+### Distribution channels (Phase 34/35)
+
+Every build bakes in a channel id (`ZORD_CHANNEL` at compile time, surfaced in
+Settings → About):
+
+| Channel | How it's built | Updates |
+|---|---|---|
+| `github` | tag push (default) | in-app check + Windows one-click install (`self-update` feature) |
+| `steam` / `msstore` | manual `workflow_dispatch` with `channel=…` | the store updates the app; **no** self-update compiled in |
+| `dev` | any local build | behaves like `github` so the update path is testable |
+
+Store-channel artifacts carry the channel in the file name and are uploaded as
+workflow artifacts (not attached to a GitHub release) for manual store
+submission. Actual store publishing (Steam depot config, MSIX packaging,
+store accounts) is still to come — see PLAN Phase 35.
 
 The sign + notarize steps (macOS only) run **only if** these repository secrets
 are present — otherwise CI still uploads an unsigned artifact:
@@ -122,5 +142,5 @@ have a code-signing certificate.
   OpenSSL/perl build).
 - **App icon** — done (PLAN Phase 12): `crates/zord-gui/icons/` + `Dioxus.toml`
   `[bundle] icon`. Regenerate with `swift tools/make_icon.swift out.png`.
-- **NVIDIA Parakeet** — build with `--features parakeet` (PLAN Phase 10); the
-  release workflow currently builds the default (Whisper-only) configuration.
+- **Store publishing** — channel *builds* exist (see Distribution channels
+  above) but Steam/MS Store submission (accounts, depots, MSIX) is not wired.

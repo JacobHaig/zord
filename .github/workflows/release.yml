@@ -2,11 +2,23 @@ name: Release
 
 # Build the macOS + Windows apps (GUI bundle + `zord` CLI) on a version tag,
 # optionally sign/notarize macOS, then attach everything to a GitHub Release.
+#
+# Distribution channels (Phase 34/35): a tag push builds the default `github`
+# channel (self-updating). Store builds — which must NOT self-update, the
+# store does that — are produced by dispatching this workflow manually with
+# channel=steam|msstore; their artifacts get the channel in the name and are
+# uploaded as workflow artifacts for manual store submission.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Distribution channel baked into the build"
+        type: choice
+        default: github
+        options: [github, steam, msstore]
 
 permissions:
   contents: write
@@ -15,7 +27,8 @@ env:
   # Optional engines bundled into the released apps. Kept in one place so both
   # the GUI bundle and the CLI build stay in sync. (encryption is intentionally
   # omitted — its vendored OpenSSL would need Perl + NASM on the Windows runner.)
-  FEATURES: "diarization,llm-local,llm-remote,parakeet"
+  FEATURES: "diarization,llm-local,llm-remote,parakeet,discord"
+  CHANNEL: ${{ inputs.channel || 'github' }}
 
 jobs:
   macos:
@@ -50,6 +63,15 @@ jobs:
 
       - name: Install dioxus-cli
         run: cargo install dioxus-cli --version 0.7.9 --locked
+
+      # Bake the channel into the binary (zord-core reads ZORD_CHANNEL at
+      # compile time); only the github channel gets the self-update feature.
+      - name: Resolve channel
+        run: |
+          F="${{ env.FEATURES }}"
+          if [ "${{ env.CHANNEL }}" = "github" ]; then F="$F,self-update"; fi
+          echo "FEATURES=$F" >> "$GITHUB_ENV"
+          echo "ZORD_CHANNEL=${{ env.CHANNEL }}" >> "$GITHUB_ENV"
 
       - name: Bundle app
         run: dx bundle --release --package zord-gui --platform desktop --features "${{ env.FEATURES }}"
@@ -100,6 +122,8 @@ jobs:
           # otherwise "dev"). Four macOS artifacts mirroring Windows: installer
           # (.dmg), portable GUI (.app zipped), CLI, and a GUI+CLI zip.
           VER="${GITHUB_REF_NAME#v}"; [ "$GITHUB_REF_TYPE" = "tag" ] || VER="dev"
+          # Store-channel artifacts carry the channel in the name.
+          [ "${{ env.CHANNEL }}" = "github" ] || VER="$VER-${{ env.CHANNEL }}"
           # GUI installer (dx-produced .dmg).
           DMG=$(find target -name "*.dmg" -maxdepth 6 | head -1)
           if [ -n "$DMG" ]; then cp "$DMG" "dist/Zord-$VER-macos-arm64.dmg"; fi
@@ -161,6 +185,16 @@ jobs:
       - name: Install dioxus-cli
         run: cargo install dioxus-cli --version 0.7.9 --locked
 
+      # Bake the channel into the binary (zord-core reads ZORD_CHANNEL at
+      # compile time); only the github channel gets the self-update feature.
+      - name: Resolve channel
+        shell: bash
+        run: |
+          F="${{ env.FEATURES }}"
+          if [ "${{ env.CHANNEL }}" = "github" ]; then F="$F,self-update"; fi
+          echo "FEATURES=$F" >> "$GITHUB_ENV"
+          echo "ZORD_CHANNEL=${{ env.CHANNEL }}" >> "$GITHUB_ENV"
+
       - name: Bundle app (WASAPI loopback + cpal mic, CPU whisper)
         run: dx bundle --release --package zord-gui --platform desktop --features "${{ env.FEATURES }}"
 
@@ -175,6 +209,8 @@ jobs:
           # otherwise "dev"). Four Windows artifacts: GUI installer, portable GUI
           # .exe, CLI, and a zip of the two portable EXEs.
           VER="${GITHUB_REF_NAME#v}"; [ "$GITHUB_REF_TYPE" = "tag" ] || VER="dev"
+          # Store-channel artifacts carry the channel in the name.
+          [ "${{ env.CHANNEL }}" = "github" ] || VER="$VER-${{ env.CHANNEL }}"
           # GUI installer: prefer the NSIS "-setup.exe", else an .msi.
           SETUP=$(find target -maxdepth 8 -path "*bundle*" -name "*setup*.exe" | head -1)
           [ -z "$SETUP" ] && SETUP=$(find target -maxdepth 8 -path "*bundle*" -name "*.msi" | head -1)
