@@ -2825,12 +2825,97 @@ fn SummaryPromptSettings(settings: Signal<Settings>) -> Element {
     }
 }
 
-/// Settings → Theme: monochrome vs meaning-tinted session badges.
+/// Curated accent presets: (name, hex). Cyan first = the built-in default.
+const ACCENT_PRESETS: [(&str, &str); 6] = [
+    ("Cyan", "#4cc2ff"),
+    ("Blurple", "#5865f2"),
+    ("Coral", "#ff7059"),
+    ("Green", "#3ecf8e"),
+    ("Violet", "#a78bfa"),
+    ("Amber", "#ffb454"),
+];
+
+/// One row of theme control: a label, preset swatches, and a hex input.
+/// `current` empty = the built-in default (its swatch shows as selected).
+#[component]
+fn ColorRow(
+    label: String,
+    default_hex: String,
+    current: String,
+    presets: Vec<(&'static str, &'static str)>,
+    on_pick: EventHandler<String>,
+) -> Element {
+    let effective = if current.is_empty() {
+        default_hex.clone()
+    } else {
+        current.clone()
+    };
+    rsx! {
+        div { class: "field-row",
+            label { class: "field-label", "{label}" }
+            div { class: "swatch-row",
+                for (name, hex) in presets {
+                    button {
+                        key: "{hex}",
+                        class: if effective.eq_ignore_ascii_case(hex) { "swatch on" } else { "swatch" },
+                        style: "background: {hex};",
+                        title: "{name}",
+                        onclick: move |_| on_pick.call(hex.to_string()),
+                    }
+                }
+                input {
+                    class: "swatch-hex",
+                    placeholder: "{default_hex}",
+                    value: "{current}",
+                    oninput: move |e: FormEvent| {
+                        let v = e.value().trim().to_string();
+                        if v.is_empty() || zord_config::is_valid_hex_color(&v) {
+                            on_pick.call(v);
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Settings → Theme: accent / Me / Others colors (presets + custom hex,
+/// applied live via the root's custom properties), badge tint, and reset.
 #[component]
 fn ThemeSettings(settings: Signal<Settings>) -> Element {
+    let mut set = move |apply: fn(&mut Settings, String), v: String| {
+        let mut s = settings.peek().clone();
+        apply(&mut s, v);
+        let _ = s.save();
+        settings.set(s);
+    };
     rsx! {
         section { class: "settings-section",
             h3 { "Theme" }
+            p { class: "field-note",
+                "Colors apply instantly. The hex fields accept any #rrggbb; text on your color stays readable automatically. Record stays red — that one means something."
+            }
+            ColorRow {
+                label: "Accent".to_string(),
+                default_hex: "#4cc2ff".to_string(),
+                current: settings.read().theme_accent.clone(),
+                presets: ACCENT_PRESETS.to_vec(),
+                on_pick: move |v| set(|s, v| s.theme_accent = v, v),
+            }
+            ColorRow {
+                label: "Me (your channel)".to_string(),
+                default_hex: "#4cc2ff".to_string(),
+                current: settings.read().theme_me.clone(),
+                presets: ACCENT_PRESETS.to_vec(),
+                on_pick: move |v| set(|s, v| s.theme_me = v, v),
+            }
+            ColorRow {
+                label: "Others (their channel)".to_string(),
+                default_hex: "#ffb454".to_string(),
+                current: settings.read().theme_others.clone(),
+                presets: ACCENT_PRESETS.to_vec(),
+                on_pick: move |v| set(|s, v| s.theme_others = v, v),
+            }
             div { class: "field-row",
                 label { class: "field-label", "Session badges: tint by meaning" }
                 button {
@@ -2845,6 +2930,20 @@ fn ThemeSettings(settings: Signal<Settings>) -> Element {
                 }
             }
             p { class: "field-note", "The summary / compressed / speakers badges in the sidebar are color-coded by meaning (cyan / amber / green) so you can read a session at a glance. Turn off for a calmer, monochrome look." }
+            div { class: "field",
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.theme_accent = String::new();
+                        s.theme_me = String::new();
+                        s.theme_others = String::new();
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    "Reset colors to defaults"
+                }
+            }
         }
     }
 }
