@@ -133,6 +133,11 @@ pub struct Settings {
     /// signal Discord's developer policy expects.
     #[serde(default = "default_true")]
     pub discord_announce: bool,
+    /// Show the dedicated "Record Discord" button in the sidebar (Phase 30f).
+    /// The button additionally requires the `discord` build feature and saved
+    /// credentials; this toggle lets users hide it outright.
+    #[serde(default = "default_true")]
+    pub discord_record_button: bool,
     /// Check GitHub for a newer release at launch (Phase 34; only in
     /// `self-update` builds on the github/dev channel — store builds never
     /// check regardless of this setting). The check is the one network call
@@ -495,6 +500,7 @@ impl Default for Settings {
             discord_bot_token: String::new(),
             discord_user_id: String::new(),
             discord_announce: true,
+            discord_record_button: true,
             check_updates: true,
             capture_app_id: String::new(),
             capture_app_name: String::new(),
@@ -615,17 +621,28 @@ impl Settings {
             }),
             Err(_) => Settings::default(),
         };
+        s.apply_migrations();
+        s
+    }
+
+    /// One-time migrations for values left behind by removed features, applied
+    /// on every load (idempotent).
+    fn apply_migrations(&mut self) {
         // Migrate away from models removed for non-commercial licensing so an
         // upgraded install doesn't keep pointing at one. (Reverb segmentation is
         // handled by SegmentationModel::parse_or_default falling back to pyannote.)
-        if REMOVED_SUMMARY_MODELS.contains(&s.summary_model.as_str()) {
+        if REMOVED_SUMMARY_MODELS.contains(&self.summary_model.as_str()) {
             tracing::info!(
                 "summary model '{}' is non-commercial and was removed; resetting to default",
-                s.summary_model
+                self.summary_model
             );
-            s.summary_model = default_summary_model();
+            self.summary_model = default_summary_model();
         }
-        s
+        // The "discord" capture mode became the Record Discord button
+        // (June 2026); leftover configs fall back to default local capture.
+        if self.capture_mode == "discord" {
+            self.capture_mode = "both".to_string();
+        }
     }
 
     /// Persist settings to disk (creates the app data dir if needed). The file
@@ -810,5 +827,20 @@ mod tests {
         assert_eq!(resolve_track(ap, "others"), Some(PathBuf::from(&others)));
         assert_eq!(resolve_track(ap, "me"), None);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discord_capture_mode_migrates_to_both() {
+        // The "discord" capture mode was replaced by the Record Discord
+        // button; leftover configs must fall back to local capture.
+        let mut s: Settings = serde_json::from_str(r#"{ "capture_mode": "discord" }"#).unwrap();
+        s.apply_migrations();
+        assert_eq!(s.capture_mode, "both");
+        // Other modes pass through untouched.
+        let mut s: Settings = serde_json::from_str(r#"{ "capture_mode": "mic" }"#).unwrap();
+        s.apply_migrations();
+        assert_eq!(s.capture_mode, "mic");
+        // The new button toggle defaults on.
+        assert!(s.discord_record_button);
     }
 }
