@@ -2992,6 +2992,22 @@ fn IntegrationsSettings(settings: Signal<Settings>, notice: Signal<Option<String
             p { class: "field-note",
                 "Bring your own bot: create an application at discord.com/developers/applications, add a Bot, and paste its token below. When you record, the bot joins your voice channel as a visible participant and captures one track per speaker — real names, no diarization. Everything stays on this machine."
             }
+            div { class: "field-row",
+                label { class: "field-label", "Show the Record Discord button" }
+                button {
+                    class: if settings.read().discord_record_button { "toggle on" } else { "toggle" },
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.discord_record_button = !s.discord_record_button;
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    if settings.read().discord_record_button { "On" } else { "Off" }
+                }
+            }
+            p { class: "field-note",
+                "The sidebar button appears once a bot token and user ID are saved."
+            }
             div { class: "field",
                 label { "Bot token" }
                 input {
@@ -3037,22 +3053,6 @@ fn IntegrationsSettings(settings: Signal<Settings>, notice: Signal<Option<String
             }
             p { class: "field-note",
                 "The bot posts a \"recording started\" message in the voice channel's text chat when it joins — the consent signal Discord's developer policy expects."
-            }
-            div { class: "field-row",
-                label { class: "field-label", "Show the Record Discord button" }
-                button {
-                    class: if settings.read().discord_record_button { "toggle on" } else { "toggle" },
-                    onclick: move |_| {
-                        let mut s = settings.peek().clone();
-                        s.discord_record_button = !s.discord_record_button;
-                        let _ = s.save();
-                        settings.set(s);
-                    },
-                    if settings.read().discord_record_button { "On" } else { "Off" }
-                }
-            }
-            p { class: "field-note",
-                "The sidebar button appears once a bot token and user ID are saved."
             }
             div { class: "field",
                 button {
