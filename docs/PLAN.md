@@ -1609,9 +1609,17 @@ pre-existing clippy warnings ahead of the `-D warnings` CI gate.
   foregrounds, live apply via root custom properties, reset. Default palette
   pixel-identical. Spec:
   `docs/superpowers/specs/2026-06-10-ui-polish-theming-design.md`.
-- **36b — First-run guided setup wizard** (next): intent questions, mic
-  check, permissions walk-through, optional Discord/integrations setup.
-  To be specced.
+- **36b ✅ DONE (June 2026) — First-run guided setup wizard.** Fully-skippable
+  overlay shown until completed/skipped (`setup_complete` setting),
+  re-runnable from Settings → About. Steps adapt to intent: welcome → intent
+  cards (meetings / Discord / voice + low-power, tuning real defaults via the
+  unit-tested `apply_intents`) → mic device + **live level test** (new
+  `RecorderCmd::MicTestStart/Stop`: meter events, no session; the OS mic
+  prompt fires here) → macOS Screen Recording walkthrough (System Settings
+  deep-link) → recommended model + in-wizard download → embedded Discord
+  setup (reuses `IntegrationsSettings`) → ready summary with the right CTA.
+  Lives in `crates/zord-gui/src/wizard.rs`; styled from the 36a tokens.
+  Spec: `docs/superpowers/specs/2026-06-10-setup-wizard-design.md`.
 
 ---
 
