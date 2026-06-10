@@ -240,6 +240,125 @@ pub fn read_wav_mono_f32(path: impl AsRef<Path>) -> Result<Vec<f32>> {
         .collect())
 }
 
+/// Mix several **session-aligned** mono/stereo WAVs into one mono WAV (the
+/// Phase 30e "merged audio" export). Every Zord track is anchored at the
+/// session start and silence-padded (the storage invariant), so mixing is a
+/// sample-wise sum at a common rate — the highest input rate; lower-rate
+/// tracks are resampled up. Streams in ~1 s blocks so an hours-long session
+/// never loads whole. Overlap is clamped rather than normalized: meeting
+/// speech rarely overlaps, and keeping single-speaker level intact beats
+/// guarding rare peaks.
+pub fn mix_wavs(paths: &[std::path::PathBuf], out: &Path) -> Result<()> {
+    anyhow::ensure!(!paths.is_empty(), "no audio tracks to mix");
+
+    struct Track {
+        reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+        channels: usize,
+        rate: u32,
+        float: bool,
+        scale: f32,
+        resampler: Option<crate::MonoResampler>,
+        /// Target-rate mono samples decoded but not yet mixed.
+        carry: Vec<f32>,
+        done: bool,
+    }
+
+    impl Track {
+        /// Read up to `frames` native frames, downmixed to mono (native rate).
+        fn read_native(&mut self, frames: usize) -> Result<Vec<f32>> {
+            let want = frames * self.channels;
+            let mut inter = Vec::with_capacity(want);
+            if self.float {
+                for s in self.reader.samples::<f32>().take(want) {
+                    inter.push(s?);
+                }
+            } else {
+                for s in self.reader.samples::<i32>().take(want) {
+                    inter.push(s? as f32 * self.scale);
+                }
+            }
+            if self.channels <= 1 {
+                return Ok(inter);
+            }
+            Ok(inter
+                .chunks(self.channels)
+                .map(|f| f.iter().sum::<f32>() / f.len() as f32)
+                .collect())
+        }
+
+        /// Top `carry` up to ≥ `want` target-rate samples (or until the file
+        /// ends — a sub-chunk resampler tail of a few ms is dropped).
+        fn fill(&mut self, want: usize) -> Result<()> {
+            while !self.done && self.carry.len() < want {
+                let block = self.read_native(self.rate as usize)?; // ~1 s
+                if block.is_empty() {
+                    self.done = true;
+                    break;
+                }
+                match self.resampler.as_mut() {
+                    Some(r) => self.carry.extend(r.process(&block)?),
+                    None => self.carry.extend(block),
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut tracks = Vec::new();
+    for p in paths {
+        let _ = repair_wav_header(p); // crash recovery, as in the readers
+        let reader =
+            hound::WavReader::open(p).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+        let spec = reader.spec();
+        validate_wav_spec(spec)?;
+        tracks.push((reader, spec));
+    }
+    let target_rate = tracks
+        .iter()
+        .map(|(_, s)| s.sample_rate)
+        .max()
+        .unwrap_or(48_000);
+    let mut tracks: Vec<Track> = tracks
+        .into_iter()
+        .map(|(reader, spec)| -> Result<Track> {
+            Ok(Track {
+                channels: spec.channels.max(1) as usize,
+                rate: spec.sample_rate,
+                float: spec.sample_format == hound::SampleFormat::Float,
+                scale: 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32,
+                resampler: (spec.sample_rate != target_rate)
+                    .then(|| crate::MonoResampler::to_rate(spec.sample_rate, 1, target_rate))
+                    .transpose()?,
+                carry: Vec::new(),
+                done: false,
+                reader,
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    let mut writer = WavWriter::create(out, target_rate)?;
+    let block = target_rate as usize; // mix 1 s at a time
+    loop {
+        let mut mix: Vec<f32> = Vec::new();
+        for t in &mut tracks {
+            t.fill(block)?;
+            let take = t.carry.len().min(block);
+            if mix.len() < take {
+                mix.resize(take, 0.0);
+            }
+            for (m, s) in mix.iter_mut().zip(t.carry.drain(..take)) {
+                *m += s; // WavWriter::write clamps to [-1, 1]
+            }
+        }
+        if mix.is_empty() {
+            break; // every track exhausted
+        }
+        writer.write(&mix)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +404,34 @@ mod tests {
         drop(f);
         assert!(repair_wav_header(&path).unwrap());
         assert_eq!(read_wav_mono_f32(&path).unwrap().len(), 16_001);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Mixing session-aligned tracks: sum where they overlap, the longer
+    /// track's tail passes through, output spans the longest input.
+    #[test]
+    fn mix_sums_aligned_tracks() {
+        let dir = std::env::temp_dir().join(format!("zord-mix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, out) = (dir.join("a.wav"), dir.join("b.wav"), dir.join("m.wav"));
+
+        let mut w = WavWriter::create(&a, 16_000).unwrap();
+        w.write(&vec![0.25f32; 1_600]).unwrap(); // 0.1 s
+        w.finalize().unwrap();
+        let mut w = WavWriter::create(&b, 16_000).unwrap();
+        w.write(&vec![0.25f32; 3_200]).unwrap(); // 0.2 s
+        w.finalize().unwrap();
+
+        mix_wavs(&[a, b], &out).unwrap();
+        let mixed = read_wav_mono_f32(&out).unwrap();
+        assert_eq!(mixed.len(), 3_200);
+        assert!((mixed[0] - 0.5).abs() < 0.02, "overlap sums: {}", mixed[0]);
+        assert!(
+            (mixed[2_000] - 0.25).abs() < 0.02,
+            "tail passes: {}",
+            mixed[2_000]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

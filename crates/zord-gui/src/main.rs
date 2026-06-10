@@ -1323,6 +1323,8 @@ fn MainApp() -> Element {
                         let eng_diar = engine.clone();
                         let sid_diar = id.clone();
                         let sid_rt = id.clone();
+                        let eng_maudio = engine.clone();
+                        let sid_maudio = id.clone();
                         let mk = move |fmt: Format| {
                             let id = id.clone();
                             let engine = engine.clone();
@@ -1473,6 +1475,17 @@ fn MainApp() -> Element {
                                             button { class: "export-menu-item", onclick: mk(Format::Markdown), "Markdown (.md)" }
                                             button { class: "export-menu-item", onclick: mk(Format::Srt), "Subtitles (.srt)" }
                                             button { class: "export-menu-item", onclick: mk(Format::Json), "JSON (.json)" }
+                                            if has_any_audio {
+                                                button {
+                                                    class: "export-menu-item",
+                                                    title: "Mix every kept track into a single WAV",
+                                                    onclick: move |_| {
+                                                        let _ = eng_maudio.db_tx.send(DbCmd::ExportAudio(sid_maudio.clone()));
+                                                        show_export_menu.set(false);
+                                                    },
+                                                    "Merged audio (.wav)"
+                                                }
+                                            }
                                         }
                                     }
                                 }

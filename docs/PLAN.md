@@ -1336,17 +1336,26 @@ code, plus the Settings UI.
     from voice states + `ParticipantRenamed` backfill is the planned hardening.
     The **5-min silence-pad cap** still needs revisiting for very-late joiners
     (drive padding from the session clock).
-- **30d — Settings → Integrations tab.** New `stab` "integrations"; Discord
-  section: token field (masked) + user-id field + "how to find your user id" help;
-  **"Invite bot to a server"** button (REST `GET /oauth2/applications/@me` →
-  `oauth2/authorize?client_id=<id>&scope=bot&permissions=…` → open in browser; add
-  Send-Messages to the perms for the announcement); **"Test connection"** (bot
-  name + which servers it's in, reusing the spike diagnostics). Capability-aware
-  ("build with `--features discord`" when not built). Add "Discord" to the
-  capture-mode selector. Status/notices: "not in any server", "join a voice
-  channel", "following you in".
-- **30e — announcement + merged-file.** In-channel "recording started" post on
-  join; a "Download merged audio" action that mixes the session-aligned tracks.
+- **30d — Settings → Integrations tab.** ✅ **DONE (June 2026).** New `stab`
+  "integrations"; Discord section: token field (masked) + user-id field +
+  "how to find your user id" help + announce toggle; **"Invite bot to a
+  server"** (REST `GET /oauth2/applications/@me` via new `zord_net::discord_bot_app`
+  → `oauth2/authorize?client_id=<id>&scope=bot&permissions=1051648` (View
+  Channel + Send Messages + Connect) → system browser via `open`);
+  **"Test connection"** (validates the token, shows the bot name).
+  Capability-aware ("install a release build / build with `--features discord`"
+  note when not built). "Discord" added to the capture-mode selector (discord
+  builds only) with an explainer. Guards: discord capture mode in a featureless
+  build → clear error (no silent fake session); missing credentials → error
+  *before* the session row is created (`build_integration_provider` → `Result`,
+  provider resolved up front).
+- **30e — announcement + merged-file.** ✅ **DONE (June 2026).** In-channel
+  "recording started" post on join (`DiscordProvider::with_announce`,
+  best-effort `channel.say`, default ON via `discord_announce` setting);
+  **Export ▾ → "Merged audio (.wav)"** mixes the session-aligned tracks via
+  `zord_audio::mix_wavs` (streamed 1 s blocks, highest input rate wins,
+  lower-rate tracks resampled up via `MonoResampler::to_rate`, overlap
+  clamped) → `exports/<id>.merged.wav`, off the db thread with a job spinner.
 - Heavy deps (`serenity`/`songbird`/`opus`/`davey`) stay behind the `discord`
   feature; releases add it once mature.
 

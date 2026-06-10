@@ -24,9 +24,15 @@ pub struct MonoResampler {
 
 impl MonoResampler {
     pub fn new(input_rate: u32, channels: u16) -> Result<Self> {
+        Self::to_rate(input_rate, channels, WHISPER_SAMPLE_RATE)
+    }
+
+    /// Same streaming downmix+resample, but to an arbitrary `target_rate`
+    /// (Phase 30e merged-audio mixing, where tracks may disagree on rate).
+    pub fn to_rate(input_rate: u32, channels: u16, target_rate: u32) -> Result<Self> {
         let channels = channels.max(1) as usize;
 
-        if input_rate == WHISPER_SAMPLE_RATE {
+        if input_rate == target_rate {
             return Ok(Self {
                 channels,
                 resampler: None,
@@ -42,7 +48,7 @@ impl MonoResampler {
             oversampling_factor: 256,
             window: WindowFunction::BlackmanHarris2,
         };
-        let ratio = WHISPER_SAMPLE_RATE as f64 / input_rate as f64;
+        let ratio = target_rate as f64 / input_rate as f64;
         // 1024-frame input chunks: a good latency/throughput balance.
         let chunk = 1024;
         // FixedAsync::Input keeps the fixed-input-size behavior the streaming

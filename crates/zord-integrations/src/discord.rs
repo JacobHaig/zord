@@ -37,6 +37,9 @@ use crate::integration::{Integration, IntegrationEvent, Participant};
 pub struct DiscordProvider {
     token: String,
     follow_user_id: u64,
+    /// Posted in the voice channel's text chat on join (the consent /
+    /// transparency signal, Phase 30e). `None` = announce off.
+    announce: Option<String>,
     shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -46,9 +49,16 @@ impl DiscordProvider {
         Self {
             token: token.into(),
             follow_user_id,
+            announce: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             handle: None,
         }
+    }
+
+    /// Post `message` in the channel when the bot joins (`None` disables).
+    pub fn with_announce(mut self, message: Option<String>) -> Self {
+        self.announce = message;
+        self
     }
 }
 
@@ -61,6 +71,7 @@ impl Integration for DiscordProvider {
         let (ev_tx, ev_rx) = mpsc::channel();
         let token = self.token.clone();
         let follow = self.follow_user_id;
+        let announce = self.announce.clone();
         let shutdown = self.shutdown.clone();
 
         self.handle = Some(
@@ -79,7 +90,7 @@ impl Integration for DiscordProvider {
                             return;
                         }
                     };
-                    rt.block_on(run_client(token, follow, ev_tx, shutdown));
+                    rt.block_on(run_client(token, follow, announce, ev_tx, shutdown));
                 })
                 .context("spawn discord thread")?,
         );
@@ -105,6 +116,7 @@ impl Drop for DiscordProvider {
 async fn run_client(
     token: String,
     follow: u64,
+    announce: Option<String>,
     ev_tx: Sender<IntegrationEvent>,
     shutdown: Arc<AtomicBool>,
 ) {
@@ -114,6 +126,7 @@ async fn run_client(
 
     let bot = Bot {
         follow,
+        announce,
         ev_tx: ev_tx.clone(),
         joined: Arc::new(AtomicBool::new(false)),
     };
@@ -158,6 +171,7 @@ async fn run_client(
 /// the voice receiver; end the session when they leave.
 struct Bot {
     follow: u64,
+    announce: Option<String>,
     ev_tx: Sender<IntegrationEvent>,
     joined: Arc<AtomicBool>,
 }
@@ -182,6 +196,17 @@ impl Bot {
                 call.add_global_event(CoreEvent::VoiceTick.into(), recv.clone());
                 call.add_global_event(CoreEvent::ClientDisconnect.into(), recv);
                 tracing::info!("discord: joined voice + receiving");
+                // Consent/transparency: post in the voice channel's text chat
+                // (30e). Best-effort — a missing Send-Messages permission must
+                // not break the recording.
+                if let Some(msg) = self.announce.clone() {
+                    let http = ctx.http.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = channel.say(&http, msg).await {
+                            tracing::warn!("discord: recording announcement failed: {e}");
+                        }
+                    });
+                }
             }
             Err(e) => {
                 let _ = self.ev_tx.send(IntegrationEvent::Ended {

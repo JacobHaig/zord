@@ -8,9 +8,9 @@ see [`docs/diagrams/integrations.md`](diagrams/integrations.md).
 > **Status (June 2026).** The receive/decrypt path is **proven** (Phase 27 spike,
 > live call), and the engine, storage seam, the **real `DiscordProvider`**, and
 > the **Settings → Integrations UI** (token/user-id, test-connection, one-click
-> invite, "Discord" capture mode) are **built** (Phases 28–30d). The in-channel
-> announcement + merged-file export (30e) follow. One live end-to-end GUI test
-> is still pending. Steps not yet wired are marked _(planned: 30x)_.
+> invite, "Discord" capture mode), the in-channel **recording announcement**,
+> and the **merged-audio export** are **built** (Phases 28–30e). One live
+> end-to-end GUI test is still pending.
 
 ---
 
@@ -49,15 +49,16 @@ everything runs on your machine.
 5. Set the capture mode (Settings → Recording) to **"Discord"** and **join a
    voice channel** in a server the bot is in.
 6. Press **Record**. The bot finds the channel you're in, **joins it**, and
-   (optionally) posts a "recording started" message in the channel _(planned: 30e)_.
+   posts a "recording started" message in the channel (on by default; toggle in
+   Settings → Integrations).
 7. **Talk.** As each person speaks they appear as a labeled speaker (their Discord
    name); you're shown as **Me**. The transcript streams in if live transcription
    is on, or is produced when you stop.
 8. Press **Stop** (or just leave the voice channel — the bot follows *you*, so it
    leaves when you do). The session lands in the sidebar with per-speaker labels,
    searchable and exportable like any other.
-9. *Optional:* **Download merged audio** _(planned: 30e)_ — one WAV mixing every
-   track.
+9. *Optional:* **Export ▾ → Merged audio (.wav)** — one WAV mixing every track,
+   written to the exports folder.
 
 What you **don't** do: pick a guild or channel (the bot follows you), grant a mic
 permission (audio comes from Discord), or label speakers by hand (names are real).
@@ -186,8 +187,8 @@ of them:
       ├── spk-1.wav     ← "Sam"
       └── …
 ```
-- Because the tracks are aligned, the **merged single file** _(planned: 30e)_ is
-  just a sample-wise sum + soft-limiter — derived on demand, not stored.
+- Because the tracks are aligned, the **merged single file** (Export ▾ →
+  Merged audio) is just a sample-wise sum — derived on demand, not stored.
 - Transcript segments (text + timing + `source`/`speaker`), full-text search, and
   `speaker_names` (index → real name) live in `zord.db`, exactly like every other
   session — which is why search/export/replay work unchanged.
@@ -200,8 +201,8 @@ of them:
   connects to Discord (to receive the call) but Zord sends nothing elsewhere.
 - **Consent.** Discord's developer policy requires recording consent. Zord's
   signal is transparency: the bot joins as a **visible participant**, and
-  _(planned: 30e)_ posts a "recording started" message in the channel so everyone
-  sees it live.
+  posts a "recording started" message in the channel so everyone sees it live
+  (on by default; toggle in Settings → Integrations).
 - **The bot token is a credential.** It's stored in `config.json` in plaintext
   (same as the optional LLM API key); keep it private. (Keychain storage is a
   possible later addition.)
@@ -213,11 +214,12 @@ of them:
 | Piece | Role |
 |---|---|
 | `zord-integrations` (`Integration`, `drive_session`, `FakeProvider`) | backend-agnostic seam; default build, no heavy deps |
-| `DiscordProvider` (feature `discord`) | songbird/serenity → per-user PCM + identity _(30c)_ |
+| `DiscordProvider` (feature `discord`) | songbird/serenity → per-user PCM + identity + join announcement |
 | `songbird` | Discord voice: DAVE decrypt + Opus decode, per-SSRC receive |
 | `serenity` | Discord gateway: login, guild/voice-state events, REST |
 | `zord-gui` `run_integration_session` | spawns per-speaker procs, owns the session lifecycle |
 | `spawn_proc` | shared resample→VAD→transcribe per track (mic/desktop/Discord alike) |
 | `zord-config` | `discord_bot_token`, `discord_user_id`, capture mode |
 | `zord-store` | segments + `speaker_names` + full-text search |
-| `zord-net` | the bot-invite REST call (`/oauth2/applications/@me`) _(30d)_ |
+| `zord-net` | the bot-invite / test-connection REST call (`/oauth2/applications/@me`) |
+| `zord-audio` `mix_wavs` | merged-audio export (streamed sample-wise sum of aligned tracks) |

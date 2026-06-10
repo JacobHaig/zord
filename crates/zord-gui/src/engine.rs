@@ -350,6 +350,8 @@ pub enum DbCmd {
         id: String,
         format: zord_export::Format,
     },
+    /// Mix the session's per-speaker tracks into one WAV (Phase 30e).
+    ExportAudio(String),
     Rename {
         id: String,
         title: String,
@@ -1464,6 +1466,27 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     let _ = ev.send(Event::Notice(format!("export failed: {e}")));
                 }
             },
+            DbCmd::ExportAudio(id) => {
+                // Mixing reads every track of the session — off the db thread.
+                let ev = ev.clone();
+                let db_path = db_path.clone();
+                let jobs = jobs.clone();
+                thread::spawn(move || {
+                    let jid = format!("exportaudio:{id}");
+                    let _token = jobs.begin(&ev, &jid, "export", "Merging session audio");
+                    supervise("audio export", &ev, || {
+                        match export_merged_audio(&db_path, &id) {
+                            Ok(path) => {
+                                let _ = ev.send(Event::Exported(path));
+                            }
+                            Err(e) => {
+                                let _ = ev.send(Event::Notice(format!("merged audio failed: {e}")));
+                            }
+                        }
+                    });
+                    jobs.end(&ev, &jid);
+                });
+            }
             DbCmd::Rename { id, title } => {
                 let _ = store.set_session_title(&id, &title);
                 emit_sessions(&store, &ev);
@@ -1970,6 +1993,17 @@ fn overlap_ms(a0: u64, a1: u64, b0: u64, b1: u64) -> u64 {
     hi.saturating_sub(lo)
 }
 
+/// The app data `exports/` directory (created on demand).
+fn exports_dir() -> anyhow::Result<PathBuf> {
+    let dir = zord_transcribe::model_cache_dir()?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("exports");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 /// Render a session and write it to the app data `exports/` directory.
 fn export_session(store: &Store, id: &str, format: zord_export::Format) -> anyhow::Result<String> {
     let session = store
@@ -1979,15 +2013,41 @@ fn export_session(store: &Store, id: &str, format: zord_export::Format) -> anyho
     let names = store.speaker_names(id).unwrap_or_default();
     let rendered = zord_export::render(&session, &segments, &names, format);
 
-    let dir = zord_transcribe::model_cache_dir()?
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("exports");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{id}.{}", format.extension()));
+    let path = exports_dir()?.join(format!("{id}.{}", format.extension()));
     std::fs::write(&path, rendered)?;
     Ok(path.display().to_string())
+}
+
+/// Mix every retained track of a session into `exports/<id>.merged.wav`
+/// (Phase 30e). Tracks are session-aligned by construction, so the mix is a
+/// plain sample-wise sum (see [`zord_audio::mix_wavs`]). Works for both the
+/// folder layout (me/others/spk-N) and the legacy flat prefix.
+fn export_merged_audio(db_path: &PathBuf, id: &str) -> anyhow::Result<String> {
+    let store = Store::open(db_path)?;
+    let prefix = store
+        .get_session(id)?
+        .and_then(|s| s.audio_path)
+        .ok_or_else(|| anyhow::anyhow!("this session kept no audio"))?;
+
+    let dir = PathBuf::from(&prefix);
+    let mut paths: Vec<PathBuf> = if dir.is_dir() {
+        std::fs::read_dir(&dir)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "wav"))
+            .collect()
+    } else {
+        ["me", "others"]
+            .iter()
+            .filter_map(|role| zord_config::resolve_track(&prefix, role))
+            .collect()
+    };
+    paths.sort(); // me.wav, spk-0.wav, … — deterministic mix order
+    anyhow::ensure!(!paths.is_empty(), "this session kept no audio");
+
+    let out = exports_dir()?.join(format!("{id}.merged.wav"));
+    zord_audio::mix_wavs(&paths, &out)?;
+    Ok(out.display().to_string())
 }
 
 /// Turn free-text into a safe FTS5 MATCH expression: each whitespace token
@@ -2503,6 +2563,7 @@ fn run_integration_session(
     let provider = match build_integration_provider(
         settings.discord_bot_token.clone(),
         settings.discord_user_id.trim().parse::<u64>().ok(),
+        settings.discord_announce,
         std::env::var("ZORD_FAKE_INTEGRATION").is_ok(),
     ) {
         Ok(p) => p,
@@ -2706,6 +2767,7 @@ fn run_integration_session(
 fn build_integration_provider(
     _token: String,
     _user: Option<u64>,
+    _announce: bool,
     force_fake: bool,
 ) -> Result<Box<dyn zord_integrations::Integration + Send>, String> {
     if force_fake {
@@ -2735,9 +2797,14 @@ fn build_integration_provider(
             );
         };
         tracing::info!("integration: using Discord provider (following user {uid})");
-        Ok(Box::new(zord_integrations::DiscordProvider::new(
-            token, uid,
-        )))
+        let announce = _announce.then(|| {
+            "🔴 Zord is recording this voice channel — audio is captured per participant \
+             for a private, local transcript."
+                .to_string()
+        });
+        Ok(Box::new(
+            zord_integrations::DiscordProvider::new(token, uid).with_announce(announce),
+        ))
     }
     #[cfg(not(feature = "discord"))]
     {
