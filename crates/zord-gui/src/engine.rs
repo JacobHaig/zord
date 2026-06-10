@@ -2035,7 +2035,17 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 // Integration session when the capture mode is "discord" (Phase
                 // 30d UI) or a dev trigger is set — `ZORD_DISCORD` (real provider)
                 // / `ZORD_FAKE_INTEGRATION` (fake). Else a normal recording.
-                let integration = zord_config::Settings::load().capture_mode == "discord"
+                let discord_mode = zord_config::Settings::load().capture_mode == "discord";
+                if discord_mode && !cfg!(feature = "discord") {
+                    // Config written by a discord build, opened in one without
+                    // the engine: refuse rather than silently record a fake
+                    // (empty) session.
+                    let _ = ev.send(Event::Status(Status::Error(
+                        "capture mode is Discord but this build doesn't include the Discord engine — pick another capture mode in Settings → Recording".into(),
+                    )));
+                    continue;
+                }
+                let integration = discord_mode
                     || std::env::var("ZORD_DISCORD").is_ok()
                     || std::env::var("ZORD_FAKE_INTEGRATION").is_ok();
                 let ended = if integration {
@@ -2488,6 +2498,19 @@ fn run_integration_session(
     let started_at = now_ms();
     let session_id = format!("sess-{started_at}");
     let settings = zord_config::Settings::load();
+    // Resolve the backend up front: a session that can never connect (missing
+    // bot token / user id) must fail here, visibly — not record empty audio.
+    let provider = match build_integration_provider(
+        settings.discord_bot_token.clone(),
+        settings.discord_user_id.trim().parse::<u64>().ok(),
+        std::env::var("ZORD_FAKE_INTEGRATION").is_ok(),
+    ) {
+        Ok(p) => p,
+        Err(msg) => {
+            let _ = ev.send(Event::Status(Status::Error(msg)));
+            return false;
+        }
+    };
     // Integration sessions always persist per-speaker tracks (their WAVs are the
     // transcription input + feed future re-transcription).
     let session_dir = settings
@@ -2567,14 +2590,9 @@ fn run_integration_session(
         );
         let (others_mode, others_gain) =
             (settings.others_level_mode.clone(), settings.others_gain_db);
-        let (discord_token, discord_user, force_fake) = (
-            settings.discord_bot_token.clone(),
-            settings.discord_user_id.trim().parse::<u64>().ok(),
-            std::env::var("ZORD_FAKE_INTEGRATION").is_ok(),
-        );
+        let mut provider = provider;
         thread::spawn(move || {
             let store = Store::open(&db_path).ok();
-            let mut provider = build_integration_provider(discord_token, discord_user, force_fake);
             let announce = |idx: i32, name: &str| {
                 if let Some(s) = store.as_ref() {
                     let _ = s.set_speaker_name(&session_id, idx, name);
@@ -2680,36 +2698,52 @@ fn run_integration_session(
 }
 
 /// Pick the integration backend: the real Discord provider when built with the
-/// `discord` feature and a token + user id are configured (and the fake isn't
-/// forced); otherwise the dependency-free `FakeProvider` (dev / no-feature).
+/// `discord` feature (token + user id required — missing credentials are an
+/// error, not a silent fake), or the dependency-free `FakeProvider` when the
+/// fake is forced (`ZORD_FAKE_INTEGRATION`) / the feature isn't compiled in
+/// (dev-only paths — a featureless build can't reach integration mode from the
+/// UI).
 fn build_integration_provider(
     _token: String,
     _user: Option<u64>,
-    _force_fake: bool,
-) -> Box<dyn zord_integrations::Integration> {
+    force_fake: bool,
+) -> Result<Box<dyn zord_integrations::Integration + Send>, String> {
+    if force_fake {
+        tracing::info!("integration: using fake provider (forced)");
+        return Ok(Box::new(zord_integrations::FakeProvider::default()));
+    }
     #[cfg(feature = "discord")]
     {
-        if !_force_fake {
-            // Settings first; fall back to env vars (same as the spike's
-            // config.temp) so the real provider is testable before the 30d UI.
-            let token = if _token.is_empty() {
-                std::env::var("DISCORD_TOKEN").unwrap_or_default()
-            } else {
-                _token
-            };
-            let user = _user.or_else(|| {
-                std::env::var("DISCORD_USER_ID")
-                    .ok()
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-            });
-            if let (false, Some(uid)) = (token.is_empty(), user) {
-                tracing::info!("integration: using Discord provider (following user {uid})");
-                return Box::new(zord_integrations::DiscordProvider::new(token, uid));
-            }
+        // Settings first; fall back to env vars (same as the spike's
+        // config.temp) so the real provider is testable from a shell.
+        let token = if _token.is_empty() {
+            std::env::var("DISCORD_TOKEN").unwrap_or_default()
+        } else {
+            _token
+        };
+        let user = _user.or_else(|| {
+            std::env::var("DISCORD_USER_ID")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        });
+        if token.is_empty() {
+            return Err("no Discord bot token — paste one in Settings → Integrations".to_string());
         }
+        let Some(uid) = user else {
+            return Err(
+                "no Discord user ID to follow (or it isn't a number) — set it in Settings → Integrations".to_string()
+            );
+        };
+        tracing::info!("integration: using Discord provider (following user {uid})");
+        Ok(Box::new(zord_integrations::DiscordProvider::new(
+            token, uid,
+        )))
     }
-    tracing::info!("integration: using fake provider");
-    Box::new(zord_integrations::FakeProvider::default())
+    #[cfg(not(feature = "discord"))]
+    {
+        tracing::info!("integration: using fake provider (no discord feature)");
+        Ok(Box::new(zord_integrations::FakeProvider::default()))
+    }
 }
 
 /// On-demand re-transcription of a past session (the 🔁 button / Phase 25):

@@ -180,6 +180,25 @@ pub fn post_sse(
     }
 }
 
+/// Validate a Discord bot token and fetch its application `(id, name)` via
+/// `GET /oauth2/applications/@me` (Discord uses `Authorization: Bot …`, not
+/// Bearer). Drives the Integrations tab's Test-connection and the invite link
+/// (the authorize URL needs the application id).
+pub fn discord_bot_app(token: &str, timeout: Duration) -> Result<(String, String), ApiError> {
+    let agent = agent(Some(timeout));
+    let req = agent
+        .get("https://discord.com/api/v10/oauth2/applications/@me")
+        .header("Authorization", format!("Bot {}", token.trim()));
+    let v = json_response(req.call())?;
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    Ok((field("id"), field("name")))
+}
+
 fn json_response(
     result: Result<Response<Body>, ureq::Error>,
 ) -> Result<serde_json::Value, ApiError> {

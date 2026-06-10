@@ -128,6 +128,11 @@ pub struct Settings {
     /// channel to configure). Empty = not configured.
     #[serde(default)]
     pub discord_user_id: String,
+    /// Post a "recording started" message in the voice channel's text chat when
+    /// the bot joins (Phase 30e). Default ON — it's the consent/transparency
+    /// signal Discord's developer policy expects.
+    #[serde(default = "default_true")]
+    pub discord_announce: bool,
     /// Transcribe while recording (Phase 25). Off = capture-only: meters + WAV
     /// writing only (~no CPU, no model RAM — for low-power machines where live
     /// whisper bursts stutter the webcam); transcription runs when you stop.
@@ -476,6 +481,7 @@ impl Default for Settings {
             llm_timeout_secs: default_llm_timeout_secs(),
             discord_bot_token: String::new(),
             discord_user_id: String::new(),
+            discord_announce: true,
             badge_tint: false,
             mic_level_mode: default_level_mode(),
             mic_gain_db: 0.0,

@@ -44,6 +44,10 @@ zord-summarize = { workspace = true, optional = true }
 zord-overview = { workspace = true, optional = true }
 zord-diarize = { workspace = true, optional = true }
 arboard = "3"
+# Open external URLs (bot-invite authorize page, release downloads) in the
+# system browser.
+open = "5"
+zord-net = { workspace = true }
 # Per-line transcript playback (Sink + SamplesBuffer only — we read WAVs with
 # hound ourselves, so no decoder features needed).
 rodio = { version = "0.22", default-features = false, features = ["playback"] }

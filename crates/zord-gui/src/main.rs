@@ -1911,6 +1911,7 @@ fn MainApp() -> Element {
                                     button { class: if *settings_tab.read() == "ai" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("ai".into()), "AI" }
                                     button { class: if *settings_tab.read() == "speakers" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("speakers".into()), "Speakers" }
                                     button { class: if *settings_tab.read() == "recording" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("recording".into()), "Recording" }
+                                    button { class: if *settings_tab.read() == "integrations" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("integrations".into()), "Integrations" }
                                     button { class: if *settings_tab.read() == "files" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("files".into()), "Files" }
                                     button { class: if *settings_tab.read() == "security" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("security".into()), "Security" }
                                     button { class: if *settings_tab.read() == "theme" { "stab active" } else { "stab" }, onclick: move |_| settings_tab.set("theme".into()), "Theme" }
@@ -2371,6 +2372,9 @@ fn MainApp() -> Element {
                                 if *settings_tab.read() == "security" {
                                 EncryptionSettings { settings, notice }
                                 }
+                                if *settings_tab.read() == "integrations" {
+                                IntegrationsSettings { settings, notice }
+                                }
                                 if *settings_tab.read() == "files" {
                                 FilesSettings { settings, notice }
                                 }
@@ -2469,6 +2473,125 @@ fn AboutSettings() -> Element {
         section { class: "settings-section",
             h3 { "About" }
             p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
+        }
+    }
+}
+
+/// Settings → Integrations (Phase 30d): the Discord bot credentials, inline
+/// how-to help, a Test-connection probe, and the one-click invite link. The
+/// recording itself is started by switching Capture (Recording tab) to
+/// "Discord" in a `--features discord` build.
+#[component]
+fn IntegrationsSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
+    // View Channels (1024) + Send Messages (2048) + Connect (1048576): enough
+    // to find you, join, and post the recording announcement — nothing more.
+    const INVITE_PERMISSIONS: u64 = 1024 + 2048 + 1_048_576;
+    let discord_built = cfg!(feature = "discord");
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Discord" }
+            if !discord_built {
+                p { class: "field-note",
+                    "⚠ This build doesn't include the Discord engine — install a release build (or build with --features discord) to record calls. Settings entered here are kept."
+                }
+            }
+            p { class: "field-note",
+                "Bring your own bot: create an application at discord.com/developers/applications, add a Bot, and paste its token below. When you record, the bot joins your voice channel as a visible participant and captures one track per speaker — real names, no diarization. Everything stays on this machine."
+            }
+            div { class: "field",
+                label { "Bot token" }
+                input {
+                    r#type: "password", class: "days",
+                    value: "{settings.read().discord_bot_token}",
+                    oninput: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.discord_bot_token = e.value().trim().to_string();
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                }
+            }
+            div { class: "field",
+                label { "Your Discord user ID (who the bot follows into voice)" }
+                input {
+                    class: "days",
+                    placeholder: "e.g. 268473310986240001",
+                    value: "{settings.read().discord_user_id}",
+                    oninput: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.discord_user_id = e.value().trim().to_string();
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                }
+            }
+            p { class: "field-note",
+                "To find it: Discord → Settings → Advanced → turn on Developer Mode, then right-click your own name and pick \"Copy User ID\". No server or channel to configure — the bot finds whichever voice channel you're in."
+            }
+            div { class: "field-row",
+                label { class: "field-label", "Announce recording in the channel" }
+                button {
+                    class: if settings.read().discord_announce { "toggle on" } else { "toggle" },
+                    onclick: move |_| {
+                        let mut s = settings.peek().clone();
+                        s.discord_announce = !s.discord_announce;
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    if settings.read().discord_announce { "On" } else { "Off" }
+                }
+            }
+            p { class: "field-note",
+                "The bot posts a \"recording started\" message in the voice channel's text chat when it joins — the consent signal Discord's developer policy expects."
+            }
+            div { class: "field",
+                button {
+                    class: "mbtn",
+                    onclick: move |_| {
+                        let token = settings.peek().discord_bot_token.clone();
+                        if token.is_empty() {
+                            notice.set(Some("Paste a bot token first.".into()));
+                            return;
+                        }
+                        match zord_net::discord_bot_app(&token, std::time::Duration::from_secs(8)) {
+                            Ok((_, name)) => notice.set(Some(format!("Connected — bot \"{name}\" is valid ✓"))),
+                            Err(e) => notice.set(Some(format!("Discord rejected the token: {e}"))),
+                        }
+                    },
+                    "Test connection"
+                }
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        let token = settings.peek().discord_bot_token.clone();
+                        if token.is_empty() {
+                            notice.set(Some("Paste a bot token first.".into()));
+                            return;
+                        }
+                        match zord_net::discord_bot_app(&token, std::time::Duration::from_secs(8)) {
+                            Ok((id, _)) => {
+                                let url = format!(
+                                    "https://discord.com/oauth2/authorize?client_id={id}&scope=bot&permissions={INVITE_PERMISSIONS}"
+                                );
+                                if open::that(&url).is_ok() {
+                                    notice.set(Some("Opened the invite page — pick your server and approve.".into()));
+                                } else {
+                                    notice.set(Some(format!("Couldn't open a browser — visit: {url}")));
+                                }
+                            }
+                            Err(e) => notice.set(Some(format!("Couldn't read the bot's application id: {e}"))),
+                        }
+                    },
+                    "Invite bot to a server…"
+                }
+            }
+            p { class: "field-note",
+                "To record a call: set Capture (Recording tab) to \"Discord\", join a voice channel in a server the bot is in, and press Record. The bot follows you in — and leaves when you do."
+            }
+        }
+        section { class: "settings-section",
+            h3 { "Microsoft Teams · Zoom" }
+            p { class: "field-note", "Planned. Desktop/system capture with diarization covers them today." }
         }
     }
 }
@@ -3571,6 +3694,14 @@ fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> E
                     option { value: "both", selected: settings.read().capture_mode == "both", "Microphone + system audio" }
                     option { value: "mic", selected: settings.read().capture_mode == "mic", "Microphone only (Me)" }
                     option { value: "system", selected: settings.read().capture_mode == "system", "System audio only (Others)" }
+                    if cfg!(feature = "discord") {
+                        option { value: "discord", selected: settings.read().capture_mode == "discord", "Discord call (via your bot)" }
+                    }
+                }
+            }
+            if settings.read().capture_mode == "discord" {
+                p { class: "field-note",
+                    "All audio (including you) comes from Discord — no mic or desktop capture. Set up the bot under Settings → Integrations."
                 }
             }
         }

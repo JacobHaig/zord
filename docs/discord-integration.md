@@ -5,13 +5,12 @@ How Zord records a Discord voice call: what the **user** does, and what happens
 [`docs/PLAN.md`](PLAN.md) → "Platform integrations (Phases 27–31)"; for diagrams
 see [`docs/diagrams/integrations.md`](diagrams/integrations.md).
 
-> **Status (June 2026).** The receive/decrypt path is **proven** (Phase 27 spike),
-> and the engine, storage seam, and the **real `DiscordProvider`** are **built**
-> (Phases 28–30c) — compile-verified; runtime-verified by you on a live call. The
-> **Settings → Integrations UI** and the announcement / merged-file extras
-> (Phases 30d–e) are **in progress**; until the UI lands, configure via
-> `config.json` (or the `DISCORD_TOKEN`/`DISCORD_USER_ID` env vars) + capture mode
-> "discord". Steps not yet wired are marked _(planned: 30x)_.
+> **Status (June 2026).** The receive/decrypt path is **proven** (Phase 27 spike,
+> live call), and the engine, storage seam, the **real `DiscordProvider`**, and
+> the **Settings → Integrations UI** (token/user-id, test-connection, one-click
+> invite, "Discord" capture mode) are **built** (Phases 28–30d). The in-channel
+> announcement + merged-file export (30e) follow. One live end-to-end GUI test
+> is still pending. Steps not yet wired are marked _(planned: 30x)_.
 
 ---
 
@@ -36,18 +35,19 @@ everything runs on your machine.
    (The default build omits the heavy Discord libraries.)
 2. **Create a bot** in the [Discord Developer Portal](https://discord.com/developers/applications)
    and copy its **bot token**.
-3. **In Zord → Settings → Integrations → Discord** _(planned: 30d)_, paste:
+3. **In Zord → Settings → Integrations → Discord**, paste:
    - the **bot token**, and
    - **your own Discord user ID** (Discord → Settings → Advanced → Developer Mode
      on, then right-click your name → *Copy User ID*).
-4. **Invite the bot to your server** — click **"Invite bot to a server"**
-   _(planned: 30d)_. Zord reads the bot's application id from the token and opens
-   the Discord authorize page; pick your server and approve. (The bot only needs
-   *View Channel*, *Connect*, and *Send Messages*.)
+4. **Invite the bot to your server** — click **"Invite bot to a server"**.
+   Zord reads the bot's application id from the token and opens the Discord
+   authorize page; pick your server and approve. (The bot only needs
+   *View Channel*, *Connect*, and *Send Messages*.) **Test connection** checks
+   the token without leaving settings.
 
 ### Each recording
-5. Set the capture mode to **"Discord"** _(planned: 30d)_ and **join a voice
-   channel** in a server the bot is in.
+5. Set the capture mode (Settings → Recording) to **"Discord"** and **join a
+   voice channel** in a server the bot is in.
 6. Press **Record**. The bot finds the channel you're in, **joins it**, and
    (optionally) posts a "recording started" message in the channel _(planned: 30e)_.
 7. **Talk.** As each person speaks they appear as a labeled speaker (their Discord
