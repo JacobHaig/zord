@@ -1595,6 +1595,24 @@ pre-existing clippy warnings ahead of the `-D warnings` CI gate.
   sandbox constraints (ScreenCaptureKit loopback under sandbox) before
   committing.
 
+### Phase 37 — Audio compression for kept recordings ✅ DONE (June 2026)
+Kept WAVs (~350 MB/hour/track) now age into **Opus-in-Ogg** (~14 MB/hour at
+the default 32 kbps): `record → WAV (exact, crash-repairable) → after
+`compress_after_days` (default 7; 0 = immediately; blank = never) → .opus →
+deleted at the retention limit`. Every consumer keeps working — replay
+(page-granule seek + 80 ms pre-roll), re-transcribe (streaming opus branch in
+`transcribe_wav_file`), diarize, merged export (`mix_tracks`) — via the
+extension-dispatching `read_audio_*` readers and an opus-aware
+`resolve_track`. The engine sweep (`DbCmd::CompressAudio`, visible/cancellable
+job, 90 s after startup then 6-hourly) encodes to `.partial`, **verifies the
+decoded length against the WAV header, promotes, and only then deletes**;
+"Compress all kept recordings now" (Settings → Files) handles existing
+libraries. Encoder detail caught by the verify test: resampling encodes flush
+the resampler's latency tail with silence and end-trim via the final granule,
+so durations match exactly. Deps: `opus2` (libopus — shared with songbird) +
+pure-Rust `ogg`, in the default build. Quality presets: 24/32/48 kbps.
+Spec: `docs/superpowers/specs/2026-06-10-audio-compression-design.md`.
+
 ### Phase 36 — Premium UX pass
 - **36a ✅ DONE (June 2026) — UI polish + theming.** Token layer in
   `style.css` (spacing/radius/elevation/motion/focus + color roles split:

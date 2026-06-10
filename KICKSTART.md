@@ -186,7 +186,8 @@ Zord/
 ├── config.json     # settings (model, retention, device, storage dir, …)
 ├── zord.db         # SQLite: sessions + transcript segments + full-text index
 ├── models/         # downloaded models (Whisper, Parakeet, summary, speaker)
-├── audio/          # kept recordings (one date-named folder per session)
+├── audio/          # kept recordings (one date-named folder per session;
+│                   #   WAV when fresh, .opus once aged — see Settings → Recording)
 ├── logs/           # zord.log + crash.log
 └── exports/        # files written by the export buttons
 ```

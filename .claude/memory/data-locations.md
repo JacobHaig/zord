@@ -23,8 +23,10 @@ Layout: `config.json` (settings), `zord.db` (SQLite: sessions + segments +
 FTS5; `summary` column on sessions; `speaker` column on segments +
 `speaker_names` table), `models/` (Whisper `.bin`, Parakeet dirs, summary
 GGUFs, diarization ONNX), `logs/` (Phase 17: `zord.log` via tracing-appender,
-alongside stderr; always in app-data), `audio/` (kept per-channel WAVs when
-keep-audio is on; diarization also writes a temp `<id>.others.wav`, deleted after
+alongside stderr; always in app-data), `audio/` (kept per-channel tracks when
+keep-audio is on — WAV while fresh, compressed to `.opus` after
+`compress_after_days` (Phase 37, default 7; readers dispatch on extension);
+diarization also writes a temp `<id>.others.wav`, deleted after
 the pass when audio isn't retained), `exports/` (GUI export output). `storage_dir`
 in settings can relocate db/audio/exports (NOT models, config, or logs). Models
 download on first use — never embedded; a failed in-app download shows the direct
