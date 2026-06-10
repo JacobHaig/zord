@@ -239,3 +239,82 @@ pub struct ProjectItem {
     /// automatic folds (only an explicit rebuild-from-history clears it).
     pub manual: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn seg(source: Source, speaker: Option<i32>) -> Segment {
+        Segment {
+            id: None,
+            source,
+            t_start_ms: 0,
+            t_end_ms: 1000,
+            text: "hi".into(),
+            words: Vec::new(),
+            speaker,
+        }
+    }
+
+    #[test]
+    fn speaker_labels() {
+        let mut names = HashMap::new();
+        assert_eq!(seg(Source::Me, None).speaker_label(&names), "Me");
+        assert_eq!(seg(Source::Others, None).speaker_label(&names), "Others");
+        // Unnamed diarized speakers display 1-based.
+        assert_eq!(
+            seg(Source::Others, Some(0)).speaker_label(&names),
+            "Speaker 1"
+        );
+        names.insert(0, "Alex".into());
+        assert_eq!(seg(Source::Others, Some(0)).speaker_label(&names), "Alex");
+        // A name for one index doesn't leak onto another.
+        assert_eq!(
+            seg(Source::Others, Some(1)).speaker_label(&names),
+            "Speaker 2"
+        );
+    }
+
+    #[test]
+    fn enum_str_roundtrips() {
+        for s in [ProjectStatus::Active, ProjectStatus::Archived] {
+            assert_eq!(ProjectStatus::parse(s.as_str()), s);
+        }
+        for k in [ItemKind::Action, ItemKind::Question, ItemKind::Decision] {
+            assert_eq!(ItemKind::parse(k.as_str()), k);
+        }
+        for st in [
+            ItemStatus::Open,
+            ItemStatus::Blocked,
+            ItemStatus::Waiting,
+            ItemStatus::Done,
+        ] {
+            assert_eq!(ItemStatus::parse(st.as_str()), st);
+        }
+        // Unknown strings fall back to the safe default instead of erroring.
+        assert_eq!(ProjectStatus::parse("garbage"), ProjectStatus::Active);
+        assert_eq!(ItemKind::parse("garbage"), ItemKind::Action);
+        assert_eq!(ItemStatus::parse("garbage"), ItemStatus::Open);
+    }
+
+    #[test]
+    fn only_done_is_inactive() {
+        assert!(ItemStatus::Open.is_active());
+        assert!(ItemStatus::Blocked.is_active());
+        assert!(ItemStatus::Waiting.is_active());
+        assert!(!ItemStatus::Done.is_active());
+    }
+
+    #[test]
+    fn segment_serde_shape() {
+        // Stored JSON must keep the lowercase source tags and omit empty fields
+        // (the DB and exports both rely on this shape).
+        let json = serde_json::to_string(&seg(Source::Others, None)).unwrap();
+        assert!(json.contains("\"source\":\"others\""));
+        assert!(!json.contains("words"));
+        assert!(!json.contains("speaker"));
+        let back: Segment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, seg(Source::Others, None));
+    }
+}

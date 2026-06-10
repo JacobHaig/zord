@@ -3098,3 +3098,61 @@ fn spawn_proc(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_fts_quotes_and_joins() {
+        assert_eq!(sanitize_fts("hello world"), "\"hello\"* \"world\"*");
+        // Embedded quotes can't escape the term.
+        assert_eq!(sanitize_fts("a\"b"), "\"ab\"*");
+        assert_eq!(sanitize_fts("   "), "");
+        assert_eq!(sanitize_fts("\" \""), "");
+    }
+
+    #[test]
+    fn pad_to_wallclock_fills_gap_to_elapsed() {
+        let rate = 1_000u32; // 1 sample == 1 ms, keeps the math readable
+        let start = Instant::now() - std::time::Duration::from_secs(2);
+        let frame = vec![0.5f32; 100];
+        let out = pad_to_wallclock(start, 0, frame.clone(), rate);
+        // ~2000 ms elapsed → ~1900 samples of leading silence + the frame.
+        assert!(out.len() >= 1_900, "padded to {} samples", out.len());
+        assert_eq!(&out[out.len() - frame.len()..], &frame[..]);
+        assert!(out[..out.len() - frame.len()].iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn pad_to_wallclock_ignores_jitter_and_keeps_up_to_date_streams() {
+        let rate = 48_000u32;
+        let start = Instant::now() - std::time::Duration::from_secs(1);
+        let frame = vec![0.5f32; 480];
+        // Producer already at (or ahead of) wall-clock: frame passes through.
+        let out = pad_to_wallclock(start, 10 * 48_000, frame.clone(), rate);
+        assert_eq!(out, frame);
+        // Sub-30ms shortfall is jitter, not a gap.
+        let out = pad_to_wallclock(start, 48_000 - 480 - 100, frame.clone(), rate);
+        assert_eq!(out, frame);
+    }
+
+    #[test]
+    fn smooth_level_tracks_loudness() {
+        let rate = 48_000u32;
+        // A second of full-scale signal drives the level up from silence…
+        let mut level = 0.0f32;
+        for _ in 0..10 {
+            level = smooth_level(1.0, 4_800, rate, level);
+        }
+        assert!(level > 0.5, "level after loud second: {level}");
+        // …and a second of silence releases it back down.
+        let peak = level;
+        for _ in 0..10 {
+            level = smooth_level(0.0, 4_800, rate, level);
+        }
+        assert!(level < peak * 0.7, "level after silent second: {level}");
+        // Always normalized.
+        assert!((0.0..=1.0).contains(&level));
+    }
+}

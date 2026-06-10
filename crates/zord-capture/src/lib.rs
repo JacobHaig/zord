@@ -33,3 +33,17 @@ pub(crate) fn bytes_as_f32(data: &[u8]) -> Vec<f32> {
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    #[test]
+    fn bytes_as_f32_roundtrip() {
+        let samples = [1.0f32, -0.5, 0.0, 0.25];
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        assert_eq!(super::bytes_as_f32(&bytes), samples);
+        // A trailing partial sample is dropped, not misread.
+        let mut short = bytes.clone();
+        short.pop();
+        assert_eq!(super::bytes_as_f32(&short).len(), samples.len() - 1);
+    }
+}

@@ -240,3 +240,40 @@ pub fn delete_model(model: ModelId) -> Result<()> {
     tracing::info!(?path, "deleted model");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_roundtrips_every_model() {
+        for m in EVERY {
+            assert_eq!(ModelId::parse(m.name()), Some(*m), "{}", m.name());
+        }
+        assert_eq!(ModelId::parse("not-a-model"), None);
+    }
+
+    #[test]
+    fn listed_matches_build_features() {
+        let listed = ModelId::listed();
+        let has_parakeet = listed.contains(&ModelId::ParakeetTdtV3);
+        assert_eq!(has_parakeet, cfg!(feature = "parakeet"));
+        // Everything listed must be parseable back from its name (settings
+        // round-trip through config.json as strings).
+        for m in listed {
+            assert_eq!(ModelId::parse(m.name()), Some(*m));
+        }
+    }
+
+    #[test]
+    fn download_urls_are_wellformed() {
+        for m in EVERY {
+            let url = m.download_url();
+            assert!(url.starts_with("https://"), "{url}");
+            match m.engine() {
+                Engine::Whisper => assert!(url.ends_with(m.filename()), "{url}"),
+                Engine::Parakeet => assert!(url.ends_with(".tar.bz2"), "{url}"),
+            }
+        }
+    }
+}

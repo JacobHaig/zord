@@ -1,0 +1,82 @@
+name: CI
+
+# Quality gate for every push/PR: fmt + clippy(-D warnings) + tests on the
+# default (lean) build, plus a compile check of the `discord` feature. The
+# heavy optional engines (diarization/llm/parakeet — long native builds) are
+# checked weekly + on demand, and always at release time (release.yml builds
+# them all on a tag).
+on:
+  push:
+    branches: [develop, main]
+  pull_request: {}
+  schedule:
+    - cron: "17 6 * * 1" # weekly heavy-feature check (Mondays)
+  workflow_dispatch: {}
+
+env:
+  # macOS 13 deployment target for the ScreenCaptureKit Swift bridge.
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  test:
+    name: Lint + test (macOS, default features)
+    runs-on: macos-15 # Xcode 26 SDK for the screencapturekit Swift bridge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Check the discord feature
+        run: cargo check -p zord-gui --features discord
+
+  heavy-features:
+    name: Heavy feature check (weekly / manual)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors release.yml's FEATURES, checked one at a time so a break
+        # names its feature. (encryption stays out, as in release.yml.)
+        feature: [diarization, llm-local, llm-remote, parakeet]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.feature }}
+
+      - name: Install build tools
+        run: brew install cmake
+
+      - name: Check
+        run: cargo check -p zord-gui --features ${{ matrix.feature }}

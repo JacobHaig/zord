@@ -1465,8 +1465,10 @@ they stay closed, and builds the release/distribution machinery.
 - **Discord 30d/30e land BEFORE the release** (headline feature).
 - **Order: 32 → 33 → 30d/30e → 34 → release; 35 (stores) can trail.**
 
-### Phase 32 — Crash & data-integrity hardening
+### Phase 32 — Crash & data-integrity hardening ✅ DONE (June 2026)
 Findings from the audit, impact-ordered; each lands with a test where testable.
+All six sub-phases landed in one pass (32a–f below), plus clearing the four
+pre-existing clippy warnings ahead of the `-D warnings` CI gate.
 - **32a — SQLite robustness**: set `busy_timeout` (none today → concurrent
   db_loop + transcription writes can fail instantly with `SQLITE_BUSY`); make
   multi-statement write paths transactional; surface a corrupt/locked DB at
@@ -1489,15 +1491,20 @@ Findings from the audit, impact-ordered; each lands with a test where testable.
   paths across `zord-store`/`zord-overview`/`zord-summarize`/`zord-net`/GUI
   (incl. `SystemTime` unwraps, the LLM-cache `.expect` in engine.rs).
 
-### Phase 33 — CI & quality gates
-- **33a — PR workflow**: `cargo fmt --check`, `clippy -D warnings`,
-  `cargo test` (default features) on every PR/push to develop+main, plus a
-  `cargo check` feature matrix (`discord`, `diarization`, `llm-local`,
-  `llm-remote`, `parakeet`; `encryption` skipped, as in release.yml).
-- **33b — Coverage for untested crates**: `zord-gui`, `zord-capture`,
-  `zord-core`, `zord-transcribe` have zero tests; add unit tests for their
-  headless-testable logic (pure helpers, state machines — not live audio/ASR,
-  per `verification-limits`).
+### Phase 33 — CI & quality gates ✅ DONE (June 2026)
+- **33a ✅ — PR workflow** (`.github/workflows/ci.yml`): `cargo fmt --check`,
+  `clippy --all-targets -D warnings`, `cargo test` (default features) +
+  `cargo check --features discord` on every PR/push to develop+main, on
+  macos-15 (Xcode 26, mirrors release.yml). The heavy native engines
+  (`diarization`, `llm-local`, `llm-remote`, `parakeet`) are a weekly +
+  manual-dispatch check matrix instead of blocking every PR (they're also
+  fully built on every release tag; `encryption` skipped, as in release.yml).
+- **33b ✅ — Coverage for untested crates**: added unit tests for the
+  headless-testable logic — zord-core (speaker labels, enum parse
+  round-trips, segment serde shape), zord-transcribe (model catalog/parse/
+  URLs), zord-capture (byte→f32 PCM), zord-gui engine (sanitize_fts,
+  pad_to_wallclock, smooth_level). Live audio/ASR stays manual per
+  `verification-limits`.
 
 ### Phase 34 — Release readiness
 - **34a — Channel seam + update check**: build-time distribution channel
