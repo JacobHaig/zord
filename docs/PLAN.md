@@ -1490,6 +1490,17 @@ feeds.
 - ~~Multilingual UX~~ / ~~CUDA release builds~~ — **declined** (not wanted).
 - Windows code-signing (Authenticode) so SmartScreen/managed machines don't
   block the binaries (CI step ready to wire once a cert/signing service exists).
+- **Parallel post-stop transcription** (analysis June 2026, backlogged).
+  Today the post pass / Re-transcribe walks tracks sequentially with one
+  model instance (live mode is also one transcribe thread fed by all
+  channels). Total work already scales with *speech*, not track count —
+  session-aligned tracks are sparse and VAD skips silence — so sequential is
+  cheaper than it sounds. A bounded 2-worker pool (shared whisper weights,
+  separate decoder states) for the post pass, engaged only when >1 track has
+  speech, would cut wall-clock ~1.5–1.8× on multi-speaker (Discord) sessions
+  for a few hundred MB of extra state RAM; ~no gain for ordinary mic+desktop
+  sessions on Metal (a single inference already saturates the GPU). Parakeet
+  (CPU-bound) would benefit most.
 
 ---
 
@@ -1638,6 +1649,23 @@ Spec: `docs/superpowers/specs/2026-06-10-audio-compression-design.md`.
   setup (reuses `IntegrationsSettings`) → ready summary with the right CTA.
   Lives in `crates/zord-gui/src/wizard.rs`; styled from the 36a tokens.
   Spec: `docs/superpowers/specs/2026-06-10-setup-wizard-design.md`.
+
+### Phase 38 — Voiceprints: cross-session speaker identity (planned)
+Zord remembers voices: per-cluster speaker embeddings (the sherpa-onnx
+extractor we already ship — a few-KB vector, never audio) are persisted per
+session and matched against a local **voiceprint library** by plain cosine
+similarity (presets strict 0.78 / standard 0.72 / relaxed 0.66, 0.05
+runner-up margin, ≥3 s speech floor, rolling 8 samples/person). Enrollment
+is implicit: renaming a speaker enrolls them; Discord sessions auto-enroll
+from ground-truth per-participant tracks. New **Speakers** rail view (under
+Overview/Search) lists known people with per-person **Forget this voice**;
+runtime opt-in via a one-time consent dialog, and the whole capability sits
+behind the **`voiceprints` Cargo feature** (requires `diarization`) as a
+build-time kill-switch. Legal posture: `docs/voiceprints-legal.md`.
+Sub-phases: 38a store schema + matcher → 38b `SpeakerEmbedder` → 38c engine
+matching/enrollment → 38d Speakers view + consent → 38e docs/CI.
+Spec: `docs/superpowers/specs/2026-06-10-voiceprints-design.md` ·
+Plan: `docs/superpowers/plans/2026-06-10-voiceprints.md`.
 
 ---
 
