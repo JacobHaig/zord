@@ -135,11 +135,14 @@ async fn run_client(
         .scheduler(Scheduler::new(SchedulerConfig::default()));
     let intents = GatewayIntents::non_privileged(); // GUILDS + GUILD_VOICE_STATES
 
+    let joined_guild: Arc<std::sync::Mutex<Option<GuildId>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let bot = Bot {
         follow,
         announce,
         ev_tx: ev_tx.clone(),
         joined: Arc::new(AtomicBool::new(false)),
+        joined_guild: joined_guild.clone(),
     };
 
     let mut client = match Client::builder(&token, intents)
@@ -156,11 +159,24 @@ async fn run_client(
         }
     };
 
-    // Watchdog: shut the gateway down when stop() is called.
+    // Watchdog: on stop(), leave voice first (so Discord drops our voice
+    // state immediately — killing just the gateway leaves it lingering and
+    // the next session's join can time out against it), then shut the
+    // gateway down.
     let manager = client.shard_manager.clone();
+    let voice = client
+        .data
+        .read()
+        .await
+        .get::<songbird::SongbirdKey>()
+        .cloned();
     tokio::spawn(async move {
         while !shutdown.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let guild = joined_guild.lock().map(|g| *g).unwrap_or(None);
+        if let (Some(voice), Some(guild)) = (voice, guild) {
+            let _ = tokio::time::timeout(Duration::from_secs(5), voice.remove(guild)).await;
         }
         manager.shutdown_all().await;
     });
@@ -185,6 +201,10 @@ struct Bot {
     announce: Option<String>,
     ev_tx: Sender<IntegrationEvent>,
     joined: Arc<AtomicBool>,
+    /// Which guild's voice the bot joined — read by the shutdown watchdog so
+    /// it can *leave* before killing the gateway (a voice state that's never
+    /// left lingers server-side and can time out the NEXT session's join).
+    joined_guild: Arc<std::sync::Mutex<Option<GuildId>>>,
 }
 
 impl Bot {
@@ -198,23 +218,43 @@ impl Bot {
             });
             return;
         };
+        // Register the voice handlers BEFORE joining: Discord delivers the
+        // Speaking events that carry the SSRC→user mapping in the first
+        // moments of the connection. Registering after `join` returned (the
+        // old order) raced them — and a lost mapping was a session that
+        // captured nothing (live-test finding). Mirrors Songbird::join, with
+        // the handlers added between `get_or_insert` and `Call::join`.
+        let recv = VoiceReceiver::new(self.follow, self.ev_tx.clone(), ctx.http.clone(), guild);
+        let call = manager.get_or_insert(guild);
+        {
+            let mut c = call.lock().await;
+            c.add_global_event(CoreEvent::SpeakingStateUpdate.into(), recv.clone());
+            c.add_global_event(CoreEvent::VoiceTick.into(), recv.clone());
+            c.add_global_event(CoreEvent::ClientDisconnect.into(), recv);
+        }
         // Bound the join: a wedged driver otherwise leaves the session "live"
         // while capturing nothing, and the user only finds out afterwards.
-        let joined =
-            tokio::time::timeout(Duration::from_secs(20), manager.join(guild, channel)).await;
+        let joined = tokio::time::timeout(Duration::from_secs(20), async {
+            let stage_1 = {
+                let mut c = call.lock().await;
+                c.join(channel).await
+            };
+            match stage_1 {
+                Ok(chan) => chan.await,
+                Err(e) => Err(e),
+            }
+        })
+        .await;
         match joined {
             Err(_) => {
                 let _ = self.ev_tx.send(IntegrationEvent::Ended {
                     reason: "joining the voice channel timed out — try recording again".into(),
                 });
             }
-            Ok(Ok(call)) => {
-                let recv =
-                    VoiceReceiver::new(self.follow, self.ev_tx.clone(), ctx.http.clone(), guild);
-                let mut call = call.lock().await;
-                call.add_global_event(CoreEvent::SpeakingStateUpdate.into(), recv.clone());
-                call.add_global_event(CoreEvent::VoiceTick.into(), recv.clone());
-                call.add_global_event(CoreEvent::ClientDisconnect.into(), recv);
+            Ok(Ok(())) => {
+                if let Ok(mut g) = self.joined_guild.lock() {
+                    *g = Some(guild);
+                }
                 tracing::info!("discord: joined voice + receiving");
                 // Consent/transparency: post in the voice channel's text chat
                 // (30e). Best-effort — a missing Send-Messages permission must
@@ -292,6 +332,9 @@ struct Inner {
     streams: DashMap<u32, Sender<Vec<f32>>>,
     /// Resolved display names, by user id (avoids repeat REST lookups).
     names: DashMap<u64, String>,
+    /// Audio ticks seen for SSRCs that have no user mapping yet — after a
+    /// grace period they're announced unnamed (see `announce_unmapped`).
+    pending: DashMap<u32, u32>,
 }
 
 impl VoiceReceiver {
@@ -303,6 +346,7 @@ impl VoiceReceiver {
             guild,
             streams: DashMap::new(),
             names: DashMap::new(),
+            pending: DashMap::new(),
         }))
     }
 
@@ -330,8 +374,19 @@ impl VoiceReceiver {
     /// Announce a participant for `ssrc`/`user_id` once, creating its stream.
     async fn announce(&self, ssrc: u32, user_id: u64) {
         if self.0.streams.contains_key(&ssrc) {
+            // Already streaming. If it was announced *unmapped* (audio beat
+            // this speaking event), upgrade its label now that we know who —
+            // `names` remembers which users we've already resolved/renamed.
+            if !self.0.names.contains_key(&user_id) {
+                let name = self.resolve_name(user_id).await;
+                let _ = self.0.ev_tx.send(IntegrationEvent::ParticipantRenamed {
+                    key: format!("ssrc-{ssrc}"),
+                    name,
+                });
+            }
             return;
         }
+        self.0.pending.remove(&ssrc);
         let name = self.resolve_name(user_id).await;
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         self.0.streams.insert(ssrc, tx);
@@ -340,6 +395,29 @@ impl VoiceReceiver {
                 key: user_id.to_string(),
                 name,
                 is_me: user_id == self.0.follow,
+            },
+            sample_rate: 48_000,
+            audio: rx,
+        });
+    }
+
+    /// Audio arrived for an SSRC whose speaking event (the user mapping) never
+    /// came: announce an unnamed participant so the audio is captured anyway.
+    /// The empty name falls back to "Speaker N" in the UI and is upgraded by
+    /// [`Self::announce`] when the mapping does show up. (Trade-off: if this
+    /// fires for the followed user, their audio lands on a speaker track, not
+    /// "Me" — better than the silent loss it replaces.)
+    fn announce_unmapped(&self, ssrc: u32) {
+        if self.0.streams.contains_key(&ssrc) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<Vec<f32>>();
+        self.0.streams.insert(ssrc, tx);
+        let _ = self.0.ev_tx.send(IntegrationEvent::ParticipantJoined {
+            participant: Participant {
+                key: format!("ssrc-{ssrc}"),
+                name: String::new(),
+                is_me: false,
             },
             sample_rate: 48_000,
             audio: rx,
@@ -370,8 +448,23 @@ impl VoiceEventHandler for VoiceReceiver {
                     if pcm.is_empty() {
                         continue;
                     }
+                    if !self.0.streams.contains_key(ssrc) {
+                        // No user mapping yet. Give the speaking event ~1 s
+                        // (50 ticks) to deliver it — it usually lands right at
+                        // join — then announce unnamed rather than ever
+                        // dropping a speaker's audio outright.
+                        let ticks = {
+                            let mut p = self.0.pending.entry(*ssrc).or_insert(0);
+                            *p += 1;
+                            *p
+                        };
+                        if ticks < 50 {
+                            continue;
+                        }
+                        self.announce_unmapped(*ssrc);
+                    }
                     let Some(tx) = self.0.streams.get(ssrc) else {
-                        continue; // not yet mapped to a user — dropped (rare)
+                        continue;
                     };
                     // Discord decodes to interleaved stereo i16 → mono f32.
                     let mono: Vec<f32> = pcm
