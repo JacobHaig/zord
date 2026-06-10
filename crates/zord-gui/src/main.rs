@@ -2245,7 +2245,7 @@ fn SettingsOverlay(
                                 IntegrationsSettings { settings, notice }
                                 }
                                 if *settings_tab.read() == "files" {
-                                FilesSettings { settings, notice }
+                                FilesSettings { settings, notice, engine: engine.clone() }
                                 }
                                 if *settings_tab.read() == "about" {
                                 AboutSettings { settings, notice, show_settings, show_wizard }
@@ -4082,11 +4082,31 @@ fn reset_chat(
 /// open, individual files to reveal, and log helpers — kept distinct so the
 /// folders aren't mixed in with the database/config files.
 #[component]
-fn FilesSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
+fn FilesSettings(
+    settings: Signal<Settings>,
+    mut notice: Signal<Option<String>>,
+    engine: Engine,
+) -> Element {
     rsx! {
         section { class: "settings-section",
             h3 { "Files & folders" }
             p { class: "field-note", "Jump to Zord's files on disk — handy for dropping in a manually-downloaded model, or grabbing logs when something fails." }
+
+            div { class: "subhead", "Storage" }
+            div { class: "btn-row",
+                button {
+                    class: "mbtn",
+                    title: "Convert every kept WAV recording to Opus now, regardless of age",
+                    onclick: move |_| {
+                        let _ = engine.db_tx.send(DbCmd::CompressAudio { ignore_age: true });
+                        notice.set(Some(
+                            "Compressing kept recordings in the background — progress in the jobs panel.".to_string(),
+                        ));
+                    },
+                    "Compress all kept recordings now"
+                }
+            }
+            p { class: "field-note", "Frees ~96% of the space at the quality set under Recording & retention. Replay, re-transcribe, and export keep working on compressed recordings." }
 
             // --- Folders (open in the file manager) ---
             div { class: "subhead", "Folders" }
@@ -4303,6 +4323,41 @@ fn RetentionSettings(mut settings: Signal<Settings>) -> Element {
                         settings.set(s);
                     },
                 }
+            }
+            div { class: "field",
+                label { "Compress kept audio after (days)" }
+                input {
+                    r#type: "number", min: "0", class: "days", placeholder: "never",
+                    value: settings.read().compress_after_days.map(|n| n.to_string()).unwrap_or_default(),
+                    oninput: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        let v = e.value();
+                        s.compress_after_days = if v.trim().is_empty() {
+                            None
+                        } else {
+                            v.trim().parse::<u32>().ok()
+                        };
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                }
+            }
+            div { class: "field",
+                label { "Compression quality" }
+                select {
+                    onchange: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.compress_quality = e.value();
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                    option { value: "space", selected: settings.read().compress_quality == "space", "Space saver (24 kbps · ~11 MB/hour)" }
+                    option { value: "standard", selected: settings.read().compress_quality == "standard", "Standard (32 kbps · ~14 MB/hour)" }
+                    option { value: "high", selected: settings.read().compress_quality == "high", "High (48 kbps · ~21 MB/hour)" }
+                }
+            }
+            p { class: "field-note",
+                "Recordings older than this are converted from WAV (~350 MB/hour per track) to Opus — replay, re-transcribe, speaker identification, and export all keep working. 0 = compress as soon as a recording ends; blank = never."
             }
         }
     }
