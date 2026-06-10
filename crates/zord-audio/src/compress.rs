@@ -424,11 +424,11 @@ mod tests {
         let rate = 44_100u32;
         let mut w = WavWriter::create(path, rate).unwrap();
         let mut samples = Vec::new();
-        samples.extend(std::iter::repeat(0.0f32).take(rate as usize));
+        samples.extend(std::iter::repeat_n(0.0f32, rate as usize));
         samples.extend(
             (0..rate).map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5),
         );
-        samples.extend(std::iter::repeat(0.0f32).take(rate as usize));
+        samples.extend(std::iter::repeat_n(0.0f32, rate as usize));
         w.write(&samples).unwrap();
         w.finalize().unwrap();
         samples.len()
