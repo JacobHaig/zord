@@ -12,7 +12,8 @@ use crate::engine::{Engine, ModelCmd, ModelInfo, RecorderCmd};
 use crate::{icon, IntegrationsSettings, Meter};
 
 /// Tune defaults from the intent answers (pure; the discord flag only routes
-/// a wizard step, it configures nothing by itself).
+/// a wizard step, it configures nothing by itself — and the model choice
+/// belongs to the model step's picker, not here).
 pub fn apply_intents(
     s: &mut Settings,
     meetings: bool,
@@ -28,13 +29,16 @@ pub fn apply_intents(
     }
     if low_power {
         s.live_transcription = false;
-        s.model = "small.en".to_string();
     }
 }
 
-/// The transcription model the wizard recommends for the hardware answer.
+/// The transcription model the wizard recommends. Parakeet first when the
+/// build carries it — fast and accurate even on CPU; otherwise the hardware
+/// answer picks between the turbo default and a small model.
 fn recommended_model(low_power: bool) -> &'static str {
-    if low_power {
+    if cfg!(feature = "parakeet") {
+        "parakeet-tdt-0.6b-v3"
+    } else if low_power {
         "small.en"
     } else {
         "large-v3-turbo-q5_0"
@@ -59,6 +63,9 @@ pub fn SetupWizard(
     let mut want_voice = use_signal(|| false);
     let mut low_power = use_signal(|| false);
     let mut testing_mic = use_signal(|| false);
+    // The model picked on the model step. Empty = "the recommendation" (which
+    // can shift with the low-power answer until the user touches the picker).
+    let mut chosen_model = use_signal(String::new);
 
     // The step list adapts to the choices (recomputed every render).
     let mut steps: Vec<&'static str> = vec!["welcome", "intent", "mic"];
@@ -118,8 +125,13 @@ pub fn SetupWizard(
                     settings.set(s);
                 }
                 "model" if apply => {
+                    let chosen = chosen_model.peek().clone();
                     let mut s = settings.peek().clone();
-                    s.model = recommended_model(*low_power.peek()).to_string();
+                    s.model = if chosen.is_empty() {
+                        recommended_model(*low_power.peek()).to_string()
+                    } else {
+                        chosen
+                    };
                     let _ = s.save();
                     settings.set(s);
                 }
@@ -140,12 +152,27 @@ pub fn SetupWizard(
         }
     };
 
-    let rec_model = recommended_model(*low_power.read());
-    let rec_info = models.read().iter().find(|m| m.name == rec_model).cloned();
-    let rec_progress = match &*model_progress.read() {
-        Some((n, p)) if n == rec_model => Some(*p),
+    // The model step's effective selection: the user's pick, else the
+    // recommendation (Parakeet-first when the build carries it).
+    let sel_model = {
+        let chosen = chosen_model.read().clone();
+        if chosen.is_empty() {
+            recommended_model(*low_power.read()).to_string()
+        } else {
+            chosen
+        }
+    };
+    let sel_info = models.read().iter().find(|m| m.name == sel_model).cloned();
+    let sel_progress = match &*model_progress.read() {
+        Some((n, p)) if *n == sel_model => Some(*p),
         _ => None,
     };
+    let transcription_models: Vec<ModelInfo> = models
+        .read()
+        .iter()
+        .filter(|m| m.kind == "transcription")
+        .cloned()
+        .collect();
     let eng_test = engine.clone();
     let eng_dl = engine.clone();
 
@@ -153,12 +180,29 @@ pub fn SetupWizard(
         div { class: "overlay",
             div { class: "wizard-card",
                 if name == "welcome" {
-                    div { class: "wizard-title", "Welcome to Zord" }
-                    p { class: "wizard-sub",
-                        "Private meeting transcription that never leaves this machine — no cloud, no account, nothing uploaded. A minute of setup and you're ready to record."
+                    div { class: "wizard-hero",
+                        div { class: "wizard-brand", "Z" }
+                        div {
+                            div { class: "wizard-title", "Welcome to Zord" }
+                            p { class: "wizard-sub", "Your conversations, transcribed — and they never leave this machine." }
+                        }
                     }
                     div { class: "wizard-body",
-                        p { class: "field-note", "Everything here is skippable and can be changed later in Settings. You can re-run this from Settings → About at any time." }
+                        ul { class: "wizard-summary",
+                            li {
+                                {icon("mic")}
+                                "Hears both sides — your mic and this computer's audio, on one timeline."
+                            }
+                            li {
+                                {icon("sparkles")}
+                                "Summaries, action items, and \"what did we decide?\" answers — all on-device."
+                            }
+                            li {
+                                {icon("search")}
+                                "Every word searchable and exportable. No cloud. No account. No uploads."
+                            }
+                        }
+                        p { class: "field-note", "A minute of setup and you're ready to record. Everything is skippable and lives in Settings afterwards — re-run this any time from Settings → About." }
                     }
                 }
                 if name == "intent" {
@@ -170,8 +214,8 @@ pub fn SetupWizard(
                                 class: if *want_meetings.read() { "intent-card on" } else { "intent-card" },
                                 onclick: move |_| { let v = *want_meetings.peek(); want_meetings.set(!v); },
                                 {icon("speaker")}
-                                span { "Meetings on this computer" }
-                                span { class: "intent-desc", "Teams, Zoom, browser calls — both sides, one timeline." }
+                                span { "Mic + desktop audio" }
+                                span { class: "intent-desc", "Plain recording: you and whatever this computer plays — Teams, Zoom, browser calls, videos. No bots involved." }
                             }
                             button {
                                 class: if *want_discord.read() { "intent-card on" } else { "intent-card" },
@@ -256,14 +300,32 @@ pub fn SetupWizard(
                 if name == "model" {
                     div { class: "wizard-title", "Your transcription model" }
                     p { class: "wizard-sub",
-                        if *low_power.read() {
+                        if cfg!(feature = "parakeet") {
+                            "We recommend Parakeet — fast and accurate across 25 languages, even on CPU. Or pick any model; you can re-transcribe with a different one later."
+                        } else if *low_power.read() {
                             "For this machine we recommend a small, fast model — you can re-transcribe anything with a bigger one later."
                         } else {
                             "We recommend the turbo model: near best-in-class accuracy at a fraction of the size."
                         }
                     }
                     div { class: "wizard-body",
-                        if let Some(m) = rec_info {
+                        div { class: "field",
+                            label { "Model" }
+                            select {
+                                onchange: move |e: FormEvent| {
+                                    let v = e.value();
+                                    chosen_model.set(v.clone());
+                                    let mut s = settings.peek().clone();
+                                    s.model = v;
+                                    let _ = s.save();
+                                    settings.set(s);
+                                },
+                                for m in transcription_models.iter() {
+                                    option { value: "{m.name}", selected: m.name == sel_model, "{m.name}" }
+                                }
+                            }
+                        }
+                        if let Some(m) = sel_info {
                             div { class: "model-row sel",
                                 div { class: "model-main",
                                     div { class: "model-name", "{m.name}" }
@@ -272,7 +334,7 @@ pub fn SetupWizard(
                                 div { class: "model-actions",
                                     if m.downloaded {
                                         span { class: "gen-state ok", {icon("check")} }
-                                    } else if let Some(p) = rec_progress {
+                                    } else if let Some(p) = sel_progress {
                                         div { class: "dl-prog",
                                             div { class: "dl-bar", style: "width: {p}%" }
                                             span { class: "dl-txt", "Downloading… {p}%" }
@@ -280,12 +342,15 @@ pub fn SetupWizard(
                                     } else {
                                         button {
                                             class: "mbtn",
-                                            onclick: move |_| {
-                                                let mut s = settings.peek().clone();
-                                                s.model = rec_model.to_string();
-                                                let _ = s.save();
-                                                settings.set(s);
-                                                let _ = eng_dl.model_tx.send(ModelCmd::Download(rec_model.to_string()));
+                                            onclick: {
+                                                let name = m.name.clone();
+                                                move |_| {
+                                                    let mut s = settings.peek().clone();
+                                                    s.model = name.clone();
+                                                    let _ = s.save();
+                                                    settings.set(s);
+                                                    let _ = eng_dl.model_tx.send(ModelCmd::Download(name.clone()));
+                                                }
                                             },
                                             "Download now"
                                         }
@@ -386,11 +451,13 @@ mod tests {
         apply_intents(&mut s, true, false, true, false);
         assert_eq!(s.capture_mode, "both");
 
-        // Low power → deferred transcription + small model.
+        // Low power → deferred transcription; the model is the model step's
+        // call, not intent's.
         let mut s = Settings::default();
+        let model_before = s.model.clone();
         apply_intents(&mut s, true, true, false, true);
         assert!(!s.live_transcription);
-        assert_eq!(s.model, "small.en");
+        assert_eq!(s.model, model_before);
 
         // Discord alone changes no settings (it routes a step).
         let mut s = Settings::default();
@@ -400,8 +467,14 @@ mod tests {
     }
 
     #[test]
-    fn model_recommendation_follows_hardware() {
-        assert_eq!(recommended_model(true), "small.en");
-        assert_eq!(recommended_model(false), "large-v3-turbo-q5_0");
+    fn model_recommendation_follows_build_and_hardware() {
+        if cfg!(feature = "parakeet") {
+            // Parakeet leads whenever the build carries it (CPU-friendly).
+            assert_eq!(recommended_model(true), "parakeet-tdt-0.6b-v3");
+            assert_eq!(recommended_model(false), "parakeet-tdt-0.6b-v3");
+        } else {
+            assert_eq!(recommended_model(true), "small.en");
+            assert_eq!(recommended_model(false), "large-v3-turbo-q5_0");
+        }
     }
 }

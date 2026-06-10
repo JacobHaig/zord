@@ -673,3 +673,10 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .wizard-summary { list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); }
 .wizard-summary li { display: flex; align-items: center; gap: var(--sp-2); font-size: 13px; }
 .wizard-summary .ic { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
+.wizard-hero { display: flex; align-items: center; gap: var(--sp-3); }
+.wizard-brand {
+  width: 48px; height: 48px; flex-shrink: 0; border-radius: var(--r-md);
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 26px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center;
+}
