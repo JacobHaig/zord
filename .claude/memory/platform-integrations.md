@@ -144,6 +144,23 @@ single-file** export (mix session-aligned tracks — cheap since aligned).
   fallback) else fake. Runtime = live-call user step. v1 trade-off: announce-on-
   speaking-state (already-talking-at-join misses first utterance — Phase 27 gap);
   5-min pad cap still to revisit.
-- **30d** Settings → Integrations tab (token/user-id/help, Invite-bot button,
-  Test-connection, capture-mode "Discord", capability-aware).
-- **30e** in-channel announcement + merged-file export.
+- **30d ✅ (June 2026)** Settings → Integrations tab: masked token + user-id +
+  inline help + announce toggle; Test-connection + Invite-bot (REST
+  `/oauth2/applications/@me` via `zord_net::discord_bot_app` → authorize URL,
+  perms 1051648); "Discord" capture-mode option (discord builds only). Guards:
+  featureless build + discord mode → error; missing creds → error BEFORE the
+  session row exists (`build_integration_provider` → Result, resolved up front).
+- **30e ✅ (June 2026)** `DiscordProvider::with_announce` posts "recording
+  started" in the voice channel's text chat on join (best-effort; default ON
+  via `discord_announce`); Export ▾ → "Merged audio (.wav)" mixes the
+  session-aligned tracks (`zord_audio::mix_wavs`, streamed, highest-rate wins,
+  `MonoResampler::to_rate`) → `exports/<id>.merged.wav`.
+- **Phase 31 ✅ (June 2026)** per-app capture: macOS SCK
+  `with_including_applications` (NOT Core Audio taps — simpler, macOS 13+);
+  Windows WASAPI process-loopback (`new_application_loopback_client`, child
+  tree, fixed 20 ms period; compile-verified only). `CapturableApp{id,name,pid}`
+  — id (bundle id / exe name) persisted, pid resolved at record time. Capture
+  mode "app" + picker (never enumerates eagerly — triggers macOS Screen
+  Recording prompt). `discord` is now in the release FEATURES set.
+- ⚠ Still pending: live end-to-end GUI test of the Discord path; SSRC
+  mapping hardening (seed from voice states); 5-min pad cap revisit.
