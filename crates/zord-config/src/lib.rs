@@ -144,6 +144,11 @@ pub struct Settings {
     /// the app makes besides user-initiated downloads.
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// Whether the first-run setup wizard has been completed or skipped
+    /// (Phase 36b). `false` shows the wizard on launch; re-runnable from
+    /// Settings → About.
+    #[serde(default)]
+    pub setup_complete: bool,
     /// Per-app capture target (Phase 31, capture_mode == "app"): a stable app
     /// identity — macOS bundle id, Windows executable name. Empty = unset.
     #[serde(default)]
@@ -511,6 +516,7 @@ impl Default for Settings {
             discord_announce: true,
             discord_record_button: true,
             check_updates: true,
+            setup_complete: false,
             capture_app_id: String::new(),
             capture_app_name: String::new(),
             badge_tint: false,
@@ -876,5 +882,14 @@ mod tests {
         assert!(!is_valid_hex_color("#4cc2f"));
         assert!(!is_valid_hex_color("#4cc2fg"));
         assert!(!is_valid_hex_color("#4cc2ff00"));
+    }
+
+    #[test]
+    fn setup_complete_defaults_false() {
+        // First launch shows the wizard; finishing or skipping flips this.
+        let s = Settings::default();
+        assert!(!s.setup_complete);
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!s.setup_complete);
     }
 }
