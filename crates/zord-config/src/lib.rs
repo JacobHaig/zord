@@ -149,6 +149,14 @@ pub struct Settings {
     /// Settings → About.
     #[serde(default)]
     pub setup_complete: bool,
+    /// Compress kept audio (WAV → Opus) once a session is older than this
+    /// many days (Phase 37). `Some(0)` = as soon as it has ended; `None` =
+    /// never. Default 7 — recent sessions stay bit-exact WAV.
+    #[serde(default = "default_compress_after_days")]
+    pub compress_after_days: Option<u32>,
+    /// Opus quality preset: "space" (24 kbps) | "standard" (32) | "high" (48).
+    #[serde(default = "default_compress_quality")]
+    pub compress_quality: String,
     /// Per-app capture target (Phase 31, capture_mode == "app"): a stable app
     /// identity — macOS bundle id, Windows executable name. Empty = unset.
     #[serde(default)]
@@ -393,6 +401,12 @@ pub fn clean_title(raw: &str) -> String {
 fn default_true() -> bool {
     true
 }
+fn default_compress_after_days() -> Option<u32> {
+    Some(7)
+}
+fn default_compress_quality() -> String {
+    "standard".to_string()
+}
 fn default_embedding_model() -> String {
     "3dspeaker-eres2netv2".to_string()
 }
@@ -517,6 +531,8 @@ impl Default for Settings {
             discord_record_button: true,
             check_updates: true,
             setup_complete: false,
+            compress_after_days: default_compress_after_days(),
+            compress_quality: default_compress_quality(),
             capture_app_id: String::new(),
             capture_app_name: String::new(),
             badge_tint: false,
@@ -755,13 +771,17 @@ pub fn track_path(session_dir: &std::path::Path, role: &str) -> PathBuf {
 /// (`<audio_path>/<role>.wav`) and the legacy flat prefix
 /// (`<audio_path>.<role>.wav`). Returns `None` if neither exists.
 pub fn resolve_track(audio_path: &str, role: &str) -> Option<PathBuf> {
-    let folder = std::path::Path::new(audio_path).join(format!("{role}.wav"));
-    if folder.is_file() {
-        return Some(folder);
-    }
-    let flat = PathBuf::from(format!("{audio_path}.{role}.wav"));
-    if flat.is_file() {
-        return Some(flat);
+    // WAV first (exact, recent), then the compressed form (Phase 37) — in
+    // both the folder and the legacy flat layout.
+    for ext in ["wav", "opus"] {
+        let folder = std::path::Path::new(audio_path).join(format!("{role}.{ext}"));
+        if folder.is_file() {
+            return Some(folder);
+        }
+        let flat = PathBuf::from(format!("{audio_path}.{role}.{ext}"));
+        if flat.is_file() {
+            return Some(flat);
+        }
     }
     None
 }
@@ -838,6 +858,37 @@ mod tests {
         assert_eq!(resolve_track(ap, "spk-0"), Some(dir.join("spk-0.wav")));
         assert_eq!(resolve_track(ap, "others"), None);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolves_opus_fallback() {
+        // A compressed session (Phase 37): WAV gone, role.opus remains.
+        let dir = tmp("opus");
+        fs::write(dir.join("me.opus"), b"x").unwrap();
+        fs::write(dir.join("spk-1.opus"), b"x").unwrap();
+        let ap = dir.to_str().unwrap();
+        assert_eq!(resolve_track(ap, "me"), Some(dir.join("me.opus")));
+        assert_eq!(resolve_track(ap, "spk-1"), Some(dir.join("spk-1.opus")));
+        // WAV wins when both exist (compression not yet verified/promoted).
+        fs::write(dir.join("me.wav"), b"x").unwrap();
+        assert_eq!(resolve_track(ap, "me"), Some(dir.join("me.wav")));
+        // Legacy flat layout compresses too.
+        let prefix = dir.join("sess-9");
+        fs::write(format!("{}.others.opus", prefix.display()), b"x").unwrap();
+        assert_eq!(
+            resolve_track(prefix.to_str().unwrap(), "others"),
+            Some(PathBuf::from(format!("{}.others.opus", prefix.display())))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn compression_settings_defaults() {
+        let s = Settings::default();
+        assert_eq!(s.compress_after_days, Some(7));
+        assert_eq!(s.compress_quality, "standard");
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.compress_after_days, Some(7));
     }
 
     #[test]
