@@ -14,6 +14,15 @@ use anyhow::Result;
 
 use crate::integration::{AudioStream, Integration, IntegrationEvent};
 
+/// Where a participant's audio goes on the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackRole {
+    /// The followed user → the "Me" track (captured via the platform).
+    Me,
+    /// An "Others" participant with a stable 0-based speaker index.
+    Speaker(i32),
+}
+
 /// Why a driven session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndReason {
@@ -26,25 +35,27 @@ pub enum EndReason {
 }
 
 /// Start `integration` and pump its events until it ends:
-/// - each **new** participant (by [`crate::Participant::key`]) is assigned the
-///   next 0-based speaker index and passed to `on_join(index, name, sample_rate,
-///   audio)` — the engine spawns a per-speaker track from `audio`;
-/// - a rename is forwarded to `on_rename(index, name)` (engine updates
-///   `speaker_names`);
+/// - each **new** participant (by [`crate::Participant::key`]) is assigned a
+///   [`TrackRole`] — the followed user → [`TrackRole::Me`], everyone else the
+///   next 0-based [`TrackRole::Speaker`] — and passed to `on_join(role, name,
+///   sample_rate, audio)`; the engine spawns the matching track from `audio`;
+/// - a rename is forwarded to `on_rename(role, name)` (engine updates
+///   `speaker_names` for `Speaker` roles);
 /// - returns when the provider ends, the caller raises `stop`, or the channel
 ///   closes.
 ///
-/// A participant key that re-appears keeps its original index (a rejoin maps to
-/// the same speaker); `on_join` is still called so the engine can attach the new
+/// A participant key that re-appears keeps its original role (a rejoin maps to
+/// the same track); `on_join` is still called so the engine can attach the new
 /// stream.
 pub fn drive_session(
     integration: &mut dyn Integration,
     stop: &Arc<AtomicBool>,
-    mut on_join: impl FnMut(i32, String, u32, AudioStream),
-    mut on_rename: impl FnMut(i32, String),
+    mut on_join: impl FnMut(TrackRole, String, u32, AudioStream),
+    mut on_rename: impl FnMut(TrackRole, String),
 ) -> Result<EndReason> {
     let rx = integration.start()?;
-    let mut index_of: HashMap<String, i32> = HashMap::new();
+    let mut roles: HashMap<String, TrackRole> = HashMap::new();
+    let mut next_speaker = 0i32;
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -57,13 +68,20 @@ pub fn drive_session(
                 sample_rate,
                 audio,
             }) => {
-                let next = index_of.len() as i32;
-                let index = *index_of.entry(participant.key).or_insert(next);
-                on_join(index, participant.name, sample_rate, audio);
+                let role = *roles.entry(participant.key).or_insert_with(|| {
+                    if participant.is_me {
+                        TrackRole::Me
+                    } else {
+                        let r = TrackRole::Speaker(next_speaker);
+                        next_speaker += 1;
+                        r
+                    }
+                });
+                on_join(role, participant.name, sample_rate, audio);
             }
             Ok(IntegrationEvent::ParticipantRenamed { key, name }) => {
-                if let Some(&index) = index_of.get(&key) {
-                    on_rename(index, name);
+                if let Some(&role) = roles.get(&key) {
+                    on_rename(role, name);
                 }
             }
             Ok(IntegrationEvent::Ended { reason }) => {
@@ -82,29 +100,36 @@ mod tests {
     use crate::FakeProvider;
 
     #[test]
-    fn assigns_sequential_indices_and_ends() {
-        let mut fake = FakeProvider::new(3, 1);
+    fn assigns_me_then_sequential_speakers_and_ends() {
+        let mut fake = FakeProvider::new(3, 1); // participant 0 is "me"
         let stop = Arc::new(AtomicBool::new(false));
-        let mut joins: Vec<(i32, String)> = Vec::new();
+        let mut roles: Vec<TrackRole> = Vec::new();
         let mut streams = Vec::new();
 
         let reason = drive_session(
             &mut fake,
             &stop,
-            |idx, name, sr, audio| {
+            |role, _name, sr, audio| {
                 assert_eq!(sr, 48_000);
-                joins.push((idx, name));
+                roles.push(role);
                 streams.push(audio); // keep alive so the provider isn't cut short
             },
-            |_idx, _name| {},
+            |_role, _name| {},
         )
         .unwrap();
 
-        // Three participants, indices assigned 0,1,2 in join order.
-        assert_eq!(joins.len(), 3);
-        let mut indices: Vec<i32> = joins.iter().map(|(i, _)| *i).collect();
-        indices.sort();
-        assert_eq!(indices, vec![0, 1, 2]);
+        // The followed user → Me; the other two → Speaker(0), Speaker(1).
+        assert_eq!(roles.len(), 3);
+        assert_eq!(roles.iter().filter(|r| **r == TrackRole::Me).count(), 1);
+        let mut speakers: Vec<i32> = roles
+            .iter()
+            .filter_map(|r| match r {
+                TrackRole::Speaker(i) => Some(*i),
+                TrackRole::Me => None,
+            })
+            .collect();
+        speakers.sort();
+        assert_eq!(speakers, vec![0, 1]);
         assert!(matches!(reason, EndReason::Provider(_)));
     }
 

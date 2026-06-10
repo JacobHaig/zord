@@ -1106,8 +1106,11 @@ Each participant stream runs the **same** `spawn_proc` resample→VAD→transcri
 path (tagged `Others` + a stable speaker index); the integration writes real
 names into `speaker_names`. FTS / exports / transcript UI therefore need almost
 no change — the work is the integration seam, the Discord connection, the
-auth/consent UX, and an **audio-storage rework** (below). Local-mic "Me" is kept
-for quality; the local user's own SSRC in the bot feed is suppressed (dedupe self).
+auth/consent UX, and an **audio-storage rework** (below). **"Me" is the followed
+user's own Discord stream** (`is_me` → `Source::Me`), not a local mic — everyone
+is captured through the platform, so its noise suppression applies uniformly and
+there's no dedupe or mic-vs-Discord drift (decided Phase 30; superseded the
+earlier local-mic idea).
 
 **Diarization parity (decided).** Diarized desktop audio and integration audio
 must be *structurally identical* once stored — same `source=Others` + `speaker`
@@ -1276,58 +1279,65 @@ dep lands. Designed so a **local vs hosted backend swap** is feasible later.
   Record button, so no separate minimal UI is needed now; the proper start/stop +
   per-speaker live state lands with the Settings → Integrations tab in Phase 30.
 
-### Phase 30 — Discord integration (full)
-The `discord` Integration implementation on the Phase 29 seam, using the Phase 27
-receive code.
+### Phase 30 — Discord integration (full) 🟡 30a–b DONE
+The real `discord` `Integration` on the Phase 29 seam, using the Phase 27 receive
+code, plus the Settings UI.
 
-- **Settings → Integrations (new tab).** A new top-level settings tab that is the
-  home for *all* integrations (Discord now; Teams/Zoom later — **not built now**).
-  Follows the existing string-keyed `stab` button pattern in `main.rs`
-  (transcription/ai/speakers/recording/files/about → add `integrations`). Discord
-  config lives here: **bot token** (plaintext in config like the remote-LLM key;
-  keychain only if demand appears) + **the user's Discord user ID to follow** +
-  test-connection. **Include inline help text** on how to obtain the user ID —
-  enable Discord Developer Mode → right-click your name → *Copy User ID* — right
-  there in the Discord section.
-- **One-click "Invite bot to a server" button (decided — validated during the
-  Phase 27 spike).** The bot must be in the target server before anything works;
-  make that frictionless. From the bot token alone, Zord calls Discord REST
-  `GET /oauth2/applications/@me` (`Authorization: Bot <token>`, via `zord-net`) to
-  read the application `id`, builds
-  `https://discord.com/oauth2/authorize?client_id=<id>&scope=bot&permissions=3146752`
-  (perms = View Channel + Connect + Speak), and opens it in the browser (reuse
-  `osutil::open_*`). No manual Application-ID hunting. Surface a "not in any
-  server yet" hint when a connect attempt finds zero shared guilds (the exact
-  failure the spike hit).
-- **Follow-the-user auto-join — no guild/channel input (decided).** On Connect,
-  the bot resolves the followed user's *current* voice channel itself: with the
-  `GUILDS` + `GUILD_VOICE_STATES` intents it scans the voice states of every
-  guild it shares with that user (by ID or resolved username), finds the one VC
-  they're in (a user can only be in one at a time → unambiguous), and joins it.
-  The user never supplies a guild or channel — they just need the bot **invited
-  to the server they're calling in**. If they're not in a VC, surface "join a
-  voice channel, then Connect" (optionally poll); if the bot shares no guild with
-  them, "invite the bot to that server." **Works with any bot token** (BYO bot).
-  *This `identity → find their live session → join` flow is deliberately the same
-  primitive the future hosted bot uses (see backlog), so it forward-maps cleanly.*
-- **Leave when the user leaves (decided).** The bot follows the *user*, not the
-  channel: a `VOICE_STATE_UPDATE` showing the followed user left (or moved) ends
-  the capture session — the bot leaves the VC and the recording stops/finalizes
-  (a move could optionally follow them; v1 = stop). This is the session-end signal
-  the Phase 29 seam exposes.
-- **Live capture:** per-participant PCM streams routed into the pipeline as
-  `Others` + stable speaker index, each written to its own `spk-N.wav` (Phase 28),
-  sparse-padded to wall-clock; SSRC→user→display-name resolved live and written to
-  `speaker_names`; **self-SSRC suppressed** (Me = local mic). Late joiners handled
-  (name backfilled on first speaking event). **Transcription timing reuses the
-  existing Phase 25 `live_transcription` toggle** — it stays optional and simply
-  **defaults off for integration sessions** (many speakers live is CPU-heavy), so
-  capture-only-then-transcribe is the default while a capable machine can still
-  flip live on. No new mechanism — the capture-only path already exists.
-- **Consent gate:** explicit per-session recording-consent confirmation
-  (Discord ToS); bot-presence is the in-channel transparency signal.
-- Heavy deps (`serenity`/`songbird`/`opus`) stay behind the `discord` Cargo
-  feature; releases ship it alongside `diarization,llm-local,llm-remote,parakeet`.
+**Decisions (June 2026):**
+- **Feature flag = `discord`** (per-platform, not an umbrella) — `zord-gui`/
+  `zord-app` passthrough to `zord-integrations/discord`; releases adopt it when
+  mature. Future Teams/Zoom get their own flags.
+- **Trigger = a `capture_mode` value "Discord"** alongside mic/system/both; the
+  normal Record button runs an integration session. **Mutually exclusive with
+  desktop loopback** — recording Discord *and* system audio would double-capture
+  the call, so "Discord" mode captures neither mic nor system locally.
+- **"Me" = the followed user's own Discord stream (decided), NOT a local mic.**
+  Everyone — including the operator — is captured through Discord, so its noise
+  suppression / echo-cancel / AGC apply uniformly (and Phase 27 already proved a
+  user's own Discord stream transcribes cleanly). The followed user's stream →
+  `Source::Me`; every other participant → `Others` + speaker index. No local mic,
+  no mic permission, no self-dedupe, no mic-vs-Discord clock drift.
+- **Consent = optional in-channel announcement** — when the bot joins, it posts a
+  "recording started" message in the channel's text chat (needs Send-Messages),
+  so participants see it live. (No per-session dialog; the visible bot + the
+  message are the transparency signal.)
+- **Optional merged single audio file** — on request, mix all session-aligned
+  tracks (`me` + every `spk-N`) into one WAV for download. Cheap *because* tracks
+  are session-aligned (Phase 28): sum sample-wise + soft-limit; derived on demand,
+  not stored.
+
+**Sub-steps:**
+- **30a — feature flag + config.** ✅ **DONE.** `discord` feature on `zord-gui`
+  (→ `zord-integrations/discord`); `discord_bot_token` + `discord_user_id`
+  settings (plaintext, mirroring `llm_api_key`). Default + feature builds green.
+- **30b — "Me from platform" seam + engine.** ✅ **DONE.** `Participant.is_me`
+  marks the followed user; `drive_session` maps it to `TrackRole::Me` (others →
+  `TrackRole::Speaker(idx)`); `run_integration_session` routes `Me` →
+  `Source::Me`/`me.wav` and `Speaker(idx)` → `Others`/`spk-N.wav`, **with no local
+  mic** (Me comes from the provider). `FakeProvider` marks participant 0 as `is_me`
+  for testing; unit tests updated + green.
+- **30c — the real `DiscordProvider`** (behind `discord`, built from the spike):
+  connect with the token, **follow-the-user** join (guild-agnostic; leave when the
+  user leaves), per-SSRC PCM → `ParticipantJoined` (the followed user's id →
+  `is_me: true`), and the **SSRC→user→name mapping fix** (seed from voice states +
+  speaking/client-connect events on join; `ParticipantRenamed` for late
+  resolution; fall back to "Speaker N"). Engine picks `DiscordProvider` when
+  `capture_mode == "discord"` (+ feature + token); else the env-var `FakeProvider`
+  for dev. **Revisit the 5-min silence-pad cap** so a participant joining well into
+  a long call still aligns (drive padding from the session clock).
+- **30d — Settings → Integrations tab.** New `stab` "integrations"; Discord
+  section: token field (masked) + user-id field + "how to find your user id" help;
+  **"Invite bot to a server"** button (REST `GET /oauth2/applications/@me` →
+  `oauth2/authorize?client_id=<id>&scope=bot&permissions=…` → open in browser; add
+  Send-Messages to the perms for the announcement); **"Test connection"** (bot
+  name + which servers it's in, reusing the spike diagnostics). Capability-aware
+  ("build with `--features discord`" when not built). Add "Discord" to the
+  capture-mode selector. Status/notices: "not in any server", "join a voice
+  channel", "following you in".
+- **30e — announcement + merged-file.** In-channel "recording started" post on
+  join; a "Download merged audio" action that mixes the session-aligned tracks.
+- Heavy deps (`serenity`/`songbird`/`opus`/`davey`) stay behind the `discord`
+  feature; releases add it once mature.
 
 ### Phase 31 — Per-app capture (Approach B, bot-free universal fallback)
 Upgrade `SystemAudio` to optionally tap a **single chosen process** instead of
@@ -1377,13 +1387,16 @@ platform that can't hand us separated feeds.
   speaker indices, `spk-N.wav` tracks, and `speaker_names` rows are created
   *during* the session (diarization assumed a fixed set discovered at the end).
   The store/UI must handle speakers appearing mid-session.
-- **Self = followed user (local mode)** — the configured identity is both *who to
-  follow* and *whose Discord SSRC to suppress as self*; "Me" comes from the local
-  mic. (In the hosted future the requester isn't at the machine — keep the linkage
-  explicit so it can decouple later.)
-- **Integration replaces system-loopback** — an integration session is Me (mic) +
-  per-speaker Discord tracks; **no mixed `others.wav`** (avoids double-capturing
-  the call). Capture mode gains an "integration" option distinct from
+- **"Me" = followed user's Discord stream** (decided) — the configured identity
+  marks which received stream is `is_me` → `Source::Me` (captured via the
+  platform, noise-suppressed). No local mic, no self-dedupe. Depends on SSRC→user
+  mapping resolving the followed user (reliable — their id is known up front). In
+  the hosted future the requester isn't at the machine, but this still holds (Me
+  is always *their* platform stream).
+- **Integration replaces system-loopback** — a Discord session captures neither
+  mic nor desktop locally: Me + per-speaker tracks all come from Discord; **no
+  mixed `others.wav`** (avoids double-capturing the call). Capture mode gains a
+  "Discord" option distinct from
   mic/system/both.
 - **Clock/latency** — Discord PCM arrives ~tens of ms after the local mic; fine
   locally (same machine clock, wall-clock padding absorbs it), but cross-machine

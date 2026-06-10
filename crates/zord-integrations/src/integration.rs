@@ -23,6 +23,11 @@ pub struct Participant {
     /// [`IntegrationEvent::ParticipantRenamed`] (e.g. a Discord SSRC that only
     /// resolves to a username once the user first speaks).
     pub name: String,
+    /// `true` for the **followed user** (the local operator). Their stream is the
+    /// "Me" track — captured *through the platform* (so Discord's noise
+    /// suppression etc. apply) rather than from a local mic. Everyone else is an
+    /// `Others` speaker. At most one participant should set this.
+    pub is_me: bool,
 }
 
 /// Mono `f32` audio frames at a fixed sample rate — the same shape the capture

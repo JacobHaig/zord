@@ -2217,8 +2217,9 @@ fn run_session(
 /// Run an **integration** recording session (Phase 29b). Instead of the system
 /// loopback, an [`zord_integrations::Integration`] (here the built-in
 /// `FakeProvider`) supplies one identity-labeled audio stream per participant;
-/// each becomes a per-speaker track (`Others` + a ground-truth speaker index →
-/// `spk-N.wav`, wall-clock aligned), while the local mic still drives "Me". The
+/// The **followed user's own stream → the "Me" track** (captured through the
+/// platform, so Discord's noise suppression etc. apply — no local mic), and every
+/// other participant → an `Others` track (`spk-N.wav`, wall-clock aligned). The
 /// session ends on the provider's `Ended` or a user Stop. No diarization runs —
 /// speakers are known. Triggered for now by the `ZORD_FAKE_INTEGRATION` env var;
 /// the real Discord provider + Settings UI land in Phase 30.
@@ -2228,7 +2229,9 @@ fn run_integration_session(
     ev: &UnboundedSender<Event>,
     db_path: &PathBuf,
 ) -> bool {
-    let SessionOpts { model, input_device, record_mic, live, .. } = opts;
+    // No mic/desktop capture in integration mode — all audio (Me included) comes
+    // from the platform's per-participant streams.
+    let SessionOpts { model, live, .. } = opts;
 
     let model_path = if live {
         let _ = ev.send(Event::Status(Status::PreparingModel));
@@ -2278,36 +2281,8 @@ fn run_integration_session(
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let stopping = Arc::new(AtomicBool::new(false));
-    let mic_muted = Arc::new(AtomicBool::new(false));
     let procs: Arc<std::sync::Mutex<Vec<thread::JoinHandle<()>>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    // Microphone ("Me") — the local user; the Discord provider (Phase 30)
-    // suppresses the followed user's own stream so it isn't double-captured.
-    let mic = if record_mic {
-        let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
-        match Microphone::start_with(mic_tx, input_device.as_deref()) {
-            Ok(m) => {
-                let mic_level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
-                    &settings.mic_level_mode,
-                    settings.mic_gain_db,
-                ));
-                let h = spawn_proc(
-                    mic_rx, m.sample_rate(), Source::Me, None, session_start,
-                    job_tx.clone(), ev.clone(), Some(zord_config::track_path(&session_dir, "me")),
-                    Some(mic_muted.clone()), mic_level, stopping.clone(),
-                );
-                procs.lock().unwrap().push(h);
-                Some(m)
-            }
-            Err(e) => {
-                let _ = ev.send(Event::Notice(format!("microphone: {e}")));
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     let _ = ev.send(Event::Status(Status::Recording));
 
@@ -2371,22 +2346,33 @@ fn run_integration_session(
                     let _ = ev.send(Event::Speakers(s.speaker_names(&session_id).unwrap_or_default()));
                 }
             };
-            let on_join = |idx: i32, name: String, sample_rate: u32, audio: zord_integrations::AudioStream| {
-                announce(idx, &name);
+            let on_join = |role: zord_integrations::TrackRole, name: String, sample_rate: u32, audio: zord_integrations::AudioStream| {
+                // The followed user → "Me"; everyone else → an Others speaker.
+                let (source, speaker, track) = match role {
+                    zord_integrations::TrackRole::Me => (Source::Me, None, "me".to_string()),
+                    zord_integrations::TrackRole::Speaker(idx) => {
+                        announce(idx, &name);
+                        (Source::Others, Some(idx), format!("spk-{idx}"))
+                    }
+                };
                 let level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
                     &others_mode,
                     others_gain,
                 ));
-                let wav = Some(zord_config::track_path(&session_dir, &format!("spk-{idx}")));
+                let wav = Some(zord_config::track_path(&session_dir, &track));
                 let h = spawn_proc(
-                    audio, sample_rate, Source::Others, Some(idx), session_start,
+                    audio, sample_rate, source, speaker, session_start,
                     it_job_tx.clone(), ev.clone(), wav, None, level, stopping.clone(),
                 );
                 if let Ok(mut p) = procs.lock() {
                     p.push(h);
                 }
             };
-            let on_rename = |idx: i32, name: String| announce(idx, &name);
+            let on_rename = |role: zord_integrations::TrackRole, name: String| {
+                if let zord_integrations::TrackRole::Speaker(idx) = role {
+                    announce(idx, &name);
+                }
+            };
             match zord_integrations::drive_session(&mut provider, &stopping, on_join, on_rename) {
                 Ok(reason) => tracing::info!("integration session ended: {reason:?}"),
                 Err(e) => {
@@ -2407,8 +2393,7 @@ fn run_integration_session(
                 shutdown = true;
                 break;
             }
-            Ok(RecorderCmd::SetMicMuted(m)) => mic_muted.store(m, Ordering::Relaxed),
-            Ok(_) => {}
+            Ok(_) => {} // mute toggles are N/A in integration mode
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if ended.load(Ordering::Relaxed) {
                     break;
@@ -2419,7 +2404,6 @@ fn run_integration_session(
     }
 
     stopping.store(true, Ordering::Relaxed);
-    drop(mic);
     let _ = integration_thread.join();
     if let Ok(mut p) = procs.lock() {
         for h in p.drain(..) {

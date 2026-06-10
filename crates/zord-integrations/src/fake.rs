@@ -77,6 +77,8 @@ impl Integration for FakeProvider {
                 let participant = Participant {
                     key: format!("fake-{i}"),
                     name: format!("Tester {}", i + 1),
+                    // First participant stands in for the followed user ("Me").
+                    is_me: i == 0,
                 };
                 if ev_tx
                     .send(IntegrationEvent::ParticipantJoined {

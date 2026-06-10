@@ -120,5 +120,23 @@ per-speaker proc per `ParticipantJoined` (`Others` + ground-truth idx →
 mic; ends on `Ended` or Stop; no diarization. Hidden trigger
 `ZORD_FAKE_INTEGRATION=1` reuses the Record button. Runtime check = GUI launch
 (engine work isn't headless-testable). **29c folded into Phase 30** (env trigger
-reuses Record; real UI = Settings → Integrations tab). Next: **Phase 30** Discord
-provider impl (real `Integration` behind `discord`, SSRC→user mapping, consent).
+reuses Record; real UI = Settings → Integrations tab).
+
+**Phase 30 decisions (June 2026):** feature flag = **`discord`** (per-platform,
+zord-gui/app → zord-integrations/discord). Trigger = `capture_mode == "discord"`
+(mutually exclusive with desktop loopback — no double-capture). **"Me" = the
+followed user's own Discord stream (NOT a local mic)** — everyone captured via
+Discord so its noise-suppression applies uniformly; `Participant.is_me` →
+`TrackRole::Me` → `Source::Me`; no mic, no self-dedupe. Consent = **optional
+in-channel announcement** (bot posts "recording started"). **Optional merged
+single-file** export (mix session-aligned tracks — cheap since aligned).
+- **30a ✅** `discord` feature on zord-gui + `discord_bot_token`/`discord_user_id`
+  config.
+- **30b ✅** `is_me`/`TrackRole` seam + engine routes Me/Others, no local mic;
+  FakeProvider marks p0 as me; tests green.
+- **30c** real `DiscordProvider` (songbird, behind feature): follow-user join,
+  per-SSRC → ParticipantJoined (followed id → is_me), SSRC→user mapping fix, leave
+  on user-leave; revisit 5-min pad cap.
+- **30d** Settings → Integrations tab (token/user-id/help, Invite-bot button,
+  Test-connection, capture-mode "Discord", capability-aware).
+- **30e** in-channel announcement + merged-file export.

@@ -26,4 +26,4 @@ mod session;
 
 pub use fake::FakeProvider;
 pub use integration::{AudioStream, Integration, IntegrationEvent, Participant};
-pub use session::{drive_session, EndReason};
+pub use session::{drive_session, EndReason, TrackRole};
