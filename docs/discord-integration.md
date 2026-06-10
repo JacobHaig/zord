@@ -46,9 +46,10 @@ everything runs on your machine.
    the token without leaving settings.
 
 ### Each recording
-5. Set the capture mode (Settings → Recording) to **"Discord"** and **join a
-   voice channel** in a server the bot is in.
-6. Press **Record**. The bot finds the channel you're in, **joins it**, and
+5. **Join a voice channel** in a server the bot is in.
+6. Press **Record Discord** (the blurple button above Record — it appears once
+   the token and user ID are saved; hideable in Settings → Integrations). The
+   bot finds the channel you're in, **joins it**, and
    posts a "recording started" message in the channel (on by default; toggle in
    Settings → Integrations).
 7. **Talk.** As each person speaks they appear as a labeled speaker (their Discord

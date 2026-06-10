@@ -1356,8 +1356,16 @@ code, plus the Settings UI.
   `zord_audio::mix_wavs` (streamed 1 s blocks, highest input rate wins,
   lower-rate tracks resampled up via `MonoResampler::to_rate`, overlap
   clamped) → `exports/<id>.merged.wav`, off the db thread with a job spinner.
+- **30f ✅ DONE (June 2026)** Dedicated **Record Discord** button (sidebar
+  foot, shown when the build + credentials + an Integrations toggle allow it);
+  `RecorderCmd::Start` carries an explicit `integration` flag instead of the
+  engine re-reading `capture_mode`; the `"discord"` capture mode was removed
+  from the dropdown and old configs migrate to `"both"`. Mute buttons no
+  longer render during integration sessions (nothing local to mute). Spec:
+  `docs/superpowers/specs/2026-06-10-discord-record-button-design.md`.
 - Heavy deps (`serenity`/`songbird`/`opus`/`davey`) stay behind the `discord`
-  feature; releases add it once mature.
+  feature; releases add it once mature (✅ in the release feature set since
+  Phase 34/35).
 
 ### Phase 31 — Per-app capture (Approach B, bot-free universal fallback)
 ✅ **DONE (June 2026; macOS build-verified + Windows cross-compile-verified —
