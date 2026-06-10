@@ -24,7 +24,7 @@ use serenity::all::{GatewayIntents, GuildId, UserId, VoiceState};
 use serenity::async_trait;
 use serenity::client::{Client, Context, EventHandler};
 use serenity::http::Http;
-use songbird::driver::{DecodeConfig, DecodeMode};
+use songbird::driver::{DecodeConfig, DecodeMode, Scheduler, SchedulerConfig};
 use songbird::model::payload::Speaking;
 use songbird::{
     Config, CoreEvent, Event as SongbirdEvent, EventContext, EventHandler as VoiceEventHandler,
@@ -121,7 +121,18 @@ async fn run_client(
     shutdown: Arc<AtomicBool>,
 ) {
     // Decrypt (DAVE) + Opus-decode received packets so VoiceTick carries PCM.
-    let config = Config::default().decode_mode(DecodeMode::Decode(DecodeConfig::default()));
+    //
+    // A per-session scheduler is REQUIRED here: songbird's default scheduler
+    // is a process-global `OnceLock` whose core task spawns on the first tokio
+    // runtime that touches it. This provider builds a fresh runtime per
+    // recording, so the global's core dies with session #1's runtime and every
+    // later voice join panics in `Scheduler::new_mixer` (disconnected channel,
+    // songbird scheduler/mod.rs:85) — recordings after the first capture
+    // nothing. A scheduler owned by this session's runtime lives and dies with
+    // it instead.
+    let config = Config::default()
+        .decode_mode(DecodeMode::Decode(DecodeConfig::default()))
+        .scheduler(Scheduler::new(SchedulerConfig::default()));
     let intents = GatewayIntents::non_privileged(); // GUILDS + GUILD_VOICE_STATES
 
     let bot = Bot {
@@ -187,8 +198,17 @@ impl Bot {
             });
             return;
         };
-        match manager.join(guild, channel).await {
-            Ok(call) => {
+        // Bound the join: a wedged driver otherwise leaves the session "live"
+        // while capturing nothing, and the user only finds out afterwards.
+        let joined =
+            tokio::time::timeout(Duration::from_secs(20), manager.join(guild, channel)).await;
+        match joined {
+            Err(_) => {
+                let _ = self.ev_tx.send(IntegrationEvent::Ended {
+                    reason: "joining the voice channel timed out — try recording again".into(),
+                });
+            }
+            Ok(Ok(call)) => {
                 let recv =
                     VoiceReceiver::new(self.follow, self.ev_tx.clone(), ctx.http.clone(), guild);
                 let mut call = call.lock().await;
@@ -208,7 +228,7 @@ impl Bot {
                     });
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let _ = self.ev_tx.send(IntegrationEvent::Ended {
                     reason: format!("join failed: {e} (bot needs Connect permission)"),
                 });
