@@ -152,10 +152,7 @@ pub fn model_cache_dir() -> Result<PathBuf> {
 /// Ensure a model exists locally, downloading it if absent. Returns the path:
 /// a `.bin` file for Whisper, or the extracted model directory for Parakeet.
 /// `progress` is called with (downloaded_bytes, total_bytes_opt).
-pub fn ensure_model(
-    model: ModelId,
-    progress: &mut dyn FnMut(u64, Option<u64>),
-) -> Result<PathBuf> {
+pub fn ensure_model(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<PathBuf> {
     match model.engine() {
         Engine::Whisper => ensure_whisper(model, progress),
         Engine::Parakeet => ensure_parakeet(model, progress),
@@ -194,7 +191,9 @@ fn ensure_parakeet(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) -
     const MAX_UNPACK_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
     let file = std::fs::File::open(&tarball)?;
     let bz = std::io::Read::take(bzip2::read::BzDecoder::new(file), MAX_UNPACK_BYTES);
-    tar::Archive::new(bz).unpack(&dir).context("unpacking Parakeet archive")?;
+    tar::Archive::new(bz)
+        .unpack(&dir)
+        .context("unpacking Parakeet archive")?;
     let _ = std::fs::remove_file(&tarball);
 
     if !target.is_dir() {
@@ -204,7 +203,10 @@ fn ensure_parakeet(model: ModelId, progress: &mut dyn FnMut(u64, Option<u64>)) -
 }
 
 #[cfg(not(feature = "parakeet"))]
-fn ensure_parakeet(_model: ModelId, _progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<PathBuf> {
+fn ensure_parakeet(
+    _model: ModelId,
+    _progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf> {
     anyhow::bail!("Parakeet support is not built in — rebuild with `--features parakeet`")
 }
 
@@ -220,7 +222,9 @@ pub fn is_downloaded(model: ModelId) -> bool {
         return false;
     };
     match model.engine() {
-        Engine::Whisper => std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false),
+        Engine::Whisper => std::fs::metadata(&path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false),
         Engine::Parakeet => path.is_dir() && path.join("tokens.txt").exists(),
     }
 }

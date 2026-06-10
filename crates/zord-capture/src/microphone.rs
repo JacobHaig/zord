@@ -42,7 +42,12 @@ impl Microphone {
         let channels = config.channels as usize;
         let sample_rate = config.sample_rate;
 
-        tracing::info!(sample_rate, channels, ?sample_format, "microphone capture starting");
+        tracing::info!(
+            sample_rate,
+            channels,
+            ?sample_format,
+            "microphone capture starting"
+        );
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => build::<f32>(&device, &config, channels, sink)?,
@@ -51,7 +56,10 @@ impl Microphone {
             other => bail!("unsupported sample format: {other:?}"),
         };
         stream.play()?;
-        Ok(Self { stream, sample_rate })
+        Ok(Self {
+            stream,
+            sample_rate,
+        })
     }
 }
 
@@ -69,7 +77,11 @@ fn resolve_input_device(name: Option<&str>) -> Result<cpal::Device> {
             .input_devices()
             .ok()
             .and_then(|mut devs| {
-                devs.find(|d| d.description().map(|desc| desc.name() == want).unwrap_or(false))
+                devs.find(|d| {
+                    d.description()
+                        .map(|desc| desc.name() == want)
+                        .unwrap_or(false)
+                })
             })
             .or_else(|| host.default_input_device())
             .context("no input (microphone) device")?,
@@ -91,7 +103,7 @@ where
     f32: FromSample<T>,
 {
     let stream = device.build_input_stream(
-        config.clone(),
+        *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             let mono = downmix_to_mono(data, channels);
             let _ = sink.send(mono);

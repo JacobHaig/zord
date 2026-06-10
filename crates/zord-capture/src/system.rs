@@ -60,7 +60,12 @@ mod macos {
                 .with_excludes_current_process_audio(true);
 
             let mut stream = SCStream::new(&filter, &config);
-            stream.add_output_handler(AudioOut { sink: Mutex::new(sink) }, SCStreamOutputType::Audio);
+            stream.add_output_handler(
+                AudioOut {
+                    sink: Mutex::new(sink),
+                },
+                SCStreamOutputType::Audio,
+            );
             stream
                 .start_capture()
                 .context("failed to start system audio capture")?;
@@ -114,7 +119,12 @@ mod macos {
     fn buffers_to_mono(list: &screencapturekit::cm::AudioBufferList) -> Vec<f32> {
         let channels: Vec<Vec<f32>> = list
             .iter()
-            .map(|buf| (bytes_as_f32(buf.data()), buf.number_channels.max(1) as usize))
+            .map(|buf| {
+                (
+                    bytes_as_f32(buf.data()),
+                    buf.number_channels.max(1) as usize,
+                )
+            })
             .map(|(samples, nch)| {
                 if nch <= 1 {
                     samples
@@ -148,9 +158,7 @@ mod windows_impl {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc};
     use std::thread::{self, JoinHandle};
-    use wasapi::{
-        initialize_mta, Direction, DeviceEnumerator, SampleType, StreamMode, WaveFormat,
-    };
+    use wasapi::{initialize_mta, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
     const SYSTEM_SR: u32 = 48_000;
     const CHANNELS: usize = 2;
@@ -170,21 +178,22 @@ mod windows_impl {
             // back over `ready` so `start` can surface errors synchronously.
             let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
-            let handle = thread::spawn(move || {
-                match capture_setup() {
-                    Ok((audio_client, h_event, capture_client)) => {
-                        let _ = ready_tx.send(Ok(()));
-                        capture_loop(audio_client, h_event, capture_client, sink, stop_thread);
-                    }
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e.to_string()));
-                    }
+            let handle = thread::spawn(move || match capture_setup() {
+                Ok((audio_client, h_event, capture_client)) => {
+                    let _ = ready_tx.send(Ok(()));
+                    capture_loop(audio_client, h_event, capture_client, sink, stop_thread);
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e.to_string()));
                 }
             });
 
             match ready_rx.recv() {
                 Ok(Ok(())) => {
-                    tracing::info!(sample_rate = SYSTEM_SR, "system audio (WASAPI loopback) started");
+                    tracing::info!(
+                        sample_rate = SYSTEM_SR,
+                        "system audio (WASAPI loopback) started"
+                    );
                     Ok(Self {
                         stop,
                         handle: Some(handle),
@@ -212,7 +221,11 @@ mod windows_impl {
         }
     }
 
-    type ClientBundle = (wasapi::AudioClient, wasapi::Handle, wasapi::AudioCaptureClient);
+    type ClientBundle = (
+        wasapi::AudioClient,
+        wasapi::Handle,
+        wasapi::AudioCaptureClient,
+    );
 
     /// Initialize a loopback capture client on the default render device.
     fn capture_setup() -> Result<ClientBundle> {
@@ -227,8 +240,17 @@ mod windows_impl {
 
         // 32-bit float, stereo, 48 kHz; autoconvert makes WASAPI match the
         // device mix format to ours.
-        let format = WaveFormat::new(32, 32, &SampleType::Float, SYSTEM_SR as usize, CHANNELS, None);
-        let (_def, min_time) = audio_client.get_device_period().context("get_device_period")?;
+        let format = WaveFormat::new(
+            32,
+            32,
+            &SampleType::Float,
+            SYSTEM_SR as usize,
+            CHANNELS,
+            None,
+        );
+        let (_def, min_time) = audio_client
+            .get_device_period()
+            .context("get_device_period")?;
         let mode = StreamMode::EventsShared {
             autoconvert: true,
             buffer_duration_hns: min_time,
@@ -238,7 +260,9 @@ mod windows_impl {
             .initialize_client(&format, &Direction::Capture, &mode)
             .context("initialize_client (loopback)")?;
 
-        let h_event = audio_client.set_get_eventhandle().context("set_get_eventhandle")?;
+        let h_event = audio_client
+            .set_get_eventhandle()
+            .context("set_get_eventhandle")?;
         let capture_client = audio_client
             .get_audiocaptureclient()
             .context("get_audiocaptureclient")?;
@@ -262,7 +286,10 @@ mod windows_impl {
             if h_event.wait_for_event(200).is_err() {
                 continue;
             }
-            if capture_client.read_from_device_to_deque(&mut queue).is_err() {
+            if capture_client
+                .read_from_device_to_deque(&mut queue)
+                .is_err()
+            {
                 break;
             }
             let frames = queue.len() / frame_bytes;
@@ -278,17 +305,18 @@ mod windows_impl {
     }
 
     /// Pop `frames` interleaved f32 frames off `queue` and downmix to mono.
+    /// Clamped to the whole frames actually queued — a short queue yields fewer
+    /// frames instead of panicking the capture thread.
     fn drain_frames_to_mono(queue: &mut VecDeque<u8>, frames: usize) -> Vec<f32> {
+        let frames = frames.min(queue.len() / (CHANNELS * 4));
         let mut mono = Vec::with_capacity(frames);
         for _ in 0..frames {
             let mut sum = 0.0f32;
             for _ in 0..CHANNELS {
-                let b = [
-                    queue.pop_front().unwrap(),
-                    queue.pop_front().unwrap(),
-                    queue.pop_front().unwrap(),
-                    queue.pop_front().unwrap(),
-                ];
+                let mut b = [0u8; 4];
+                for byte in &mut b {
+                    *byte = queue.pop_front().unwrap_or(0);
+                }
                 sum += f32::from_le_bytes(b);
             }
             mono.push(sum / CHANNELS as f32);

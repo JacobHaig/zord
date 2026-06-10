@@ -39,7 +39,12 @@ impl TranscribeBackend for ParakeetBackend {
         &self.model_name
     }
 
-    fn transcribe(&self, samples: &[f32], source: Source, base_offset_ms: u64) -> Result<Vec<Segment>> {
+    fn transcribe(
+        &self,
+        samples: &[f32],
+        source: Source,
+        base_offset_ms: u64,
+    ) -> Result<Vec<Segment>> {
         let stream = self.recognizer.create_stream();
         stream.accept_waveform(zord_core::WHISPER_SAMPLE_RATE as i32, samples);
         self.recognizer.decode(&stream);

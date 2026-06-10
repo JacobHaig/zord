@@ -195,7 +195,14 @@ pub fn list_embedding_models(
 ) -> Vec<(&'static str, &'static str, &'static str, bool)> {
     EmbeddingModel::ALL
         .iter()
-        .map(|m| (m.name(), m.label(), m.size_label(), diar_models_present(seg, *m)))
+        .map(|m| {
+            (
+                m.name(),
+                m.label(),
+                m.size_label(),
+                diar_models_present(seg, *m),
+            )
+        })
         .collect()
 }
 

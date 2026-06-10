@@ -93,7 +93,12 @@ impl RemoteLlm {
     /// One chat completion over `user_content` with `system_prompt`. Mirrors the
     /// local backend: the same coarse input truncation, and `temperature: 0` to
     /// match its greedy decode.
-    pub fn generate(&self, user_content: &str, system_prompt: &str, opts: GenOpts) -> Result<String> {
+    pub fn generate(
+        &self,
+        user_content: &str,
+        system_prompt: &str,
+        opts: GenOpts,
+    ) -> Result<String> {
         let user = truncate_chars(user_content, opts.max_transcript_chars);
         self.complete(
             vec![message("system", system_prompt), message("user", &user)],
@@ -102,8 +107,16 @@ impl RemoteLlm {
     }
 
     /// Multi-turn grounded chat (Phase 23d shape).
-    pub fn chat(&self, system_prompt: &str, turns: &[(ChatRole, String)], n_ctx: u32) -> Result<String> {
-        self.complete(self.chat_messages(system_prompt, turns), GenOpts::chat(n_ctx))
+    pub fn chat(
+        &self,
+        system_prompt: &str,
+        turns: &[(ChatRole, String)],
+        n_ctx: u32,
+    ) -> Result<String> {
+        self.complete(
+            self.chat_messages(system_prompt, turns),
+            GenOpts::chat(n_ctx),
+        )
     }
 
     /// Like [`chat`], but streams (`stream: true` + SSE), calling `on_delta`
@@ -131,18 +144,24 @@ impl RemoteLlm {
         // byte cap on the SSE reader itself. A chat answer is well under 4 MiB.
         const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
         let mut full = String::new();
-        zord_net::post_sse(&url, self.cfg.bearer(), &body, self.cfg.timeout(), &mut |data| {
-            // Each SSE payload is a chunk object; content lives in
-            // choices[0].delta.content (absent on role/finish chunks).
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(piece) = chunk["choices"][0]["delta"]["content"].as_str() {
-                    if !piece.is_empty() && full.len() < MAX_REPLY_BYTES {
-                        full.push_str(piece);
-                        on_delta(piece);
+        zord_net::post_sse(
+            &url,
+            self.cfg.bearer(),
+            &body,
+            self.cfg.timeout(),
+            &mut |data| {
+                // Each SSE payload is a chunk object; content lives in
+                // choices[0].delta.content (absent on role/finish chunks).
+                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(piece) = chunk["choices"][0]["delta"]["content"].as_str() {
+                        if !piece.is_empty() && full.len() < MAX_REPLY_BYTES {
+                            full.push_str(piece);
+                            on_delta(piece);
+                        }
                     }
                 }
-            }
-        })
+            },
+        )
         .map_err(|e| friendly(e, &self.cfg))?;
         let full = full.trim().to_string();
         if full.is_empty() {
@@ -151,9 +170,17 @@ impl RemoteLlm {
         Ok(full)
     }
 
-    fn chat_messages(&self, system_prompt: &str, turns: &[(ChatRole, String)]) -> Vec<serde_json::Value> {
+    fn chat_messages(
+        &self,
+        system_prompt: &str,
+        turns: &[(ChatRole, String)],
+    ) -> Vec<serde_json::Value> {
         let mut messages = vec![message("system", system_prompt)];
-        messages.extend(turns.iter().map(|(role, content)| message(role.as_str(), content)));
+        messages.extend(
+            turns
+                .iter()
+                .map(|(role, content)| message(role.as_str(), content)),
+        );
         messages
     }
 
@@ -197,10 +224,12 @@ fn message(role: &str, content: &str) -> serde_json::Value {
 fn friendly(e: zord_net::ApiError, cfg: &RemoteConfig) -> anyhow::Error {
     let server = cfg.base_url.trim();
     match e {
-        zord_net::ApiError::Connect(msg) => anyhow!(
-            "couldn't reach {server} — is the inference server running? ({msg})"
-        ),
-        zord_net::ApiError::Status { code: 401 | 403, .. } => {
+        zord_net::ApiError::Connect(msg) => {
+            anyhow!("couldn't reach {server} — is the inference server running? ({msg})")
+        }
+        zord_net::ApiError::Status {
+            code: 401 | 403, ..
+        } => {
             anyhow!("{server} rejected the request — check the API key in Settings")
         }
         zord_net::ApiError::Status { code: 404, body } => anyhow!(
@@ -304,14 +333,19 @@ mod tests {
                 if let Some(head_end) = text.find("\r\n\r\n") {
                     let need: usize = text
                         .lines()
-                        .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
                         .unwrap_or(0);
                     if req.len() >= head_end + 4 + need {
                         break;
                     }
                 }
             }
-            let body = r#"{"choices":[{"message":{"role":"assistant","content":" hello there "}}]}"#;
+            let body =
+                r#"{"choices":[{"message":{"role":"assistant","content":" hello there "}}]}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -323,14 +357,23 @@ mod tests {
 
         let mut c = cfg(&format!("http://127.0.0.1:{port}/v1"));
         c.model = "test-model".to_string();
-        let out = RemoteLlm::new(c).generate("hi", "sys", GenOpts::summary()).unwrap();
+        let out = RemoteLlm::new(c)
+            .generate("hi", "sys", GenOpts::summary())
+            .unwrap();
         assert_eq!(out, "hello there");
 
         let req = server.join().unwrap();
-        assert!(req.starts_with("POST /v1/chat/completions"), "request line: {}", req.lines().next().unwrap_or(""));
+        assert!(
+            req.starts_with("POST /v1/chat/completions"),
+            "request line: {}",
+            req.lines().next().unwrap_or("")
+        );
         assert!(req.contains("\"model\":\"test-model\""));
         assert!(req.contains("\"temperature\":0"));
-        assert!(!req.to_lowercase().contains("authorization:"), "empty key must send no auth header");
+        assert!(
+            !req.to_lowercase().contains("authorization:"),
+            "empty key must send no auth header"
+        );
     }
 
     /// Hits a real OpenAI-compatible server — run manually:
@@ -354,7 +397,10 @@ mod tests {
         let out = RemoteLlm::new(c)
             .chat_stream(
                 "You are a connectivity test. Answer in as few words as possible.",
-                &[(ChatRole::User, "Reply with the single word: ready".to_string())],
+                &[(
+                    ChatRole::User,
+                    "Reply with the single word: ready".to_string(),
+                )],
                 8192,
                 &mut |_| deltas += 1,
             )
@@ -388,7 +434,11 @@ mod tests {
                 if let Some(head_end) = text.find("\r\n\r\n") {
                     let need: usize = text
                         .lines()
-                        .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                        .find_map(|l| {
+                            l.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
                         .unwrap_or(0);
                     if raw.len() >= head_end + 4 + need {
                         break;
@@ -420,13 +470,21 @@ mod tests {
         c.model = "test-model".to_string();
         let mut deltas = Vec::new();
         let out = RemoteLlm::new(c)
-            .chat_stream("sys", &[(ChatRole::User, "hi".to_string())], 8192, &mut |d| {
-                deltas.push(d.to_string());
-            })
+            .chat_stream(
+                "sys",
+                &[(ChatRole::User, "hi".to_string())],
+                8192,
+                &mut |d| {
+                    deltas.push(d.to_string());
+                },
+            )
             .unwrap();
         assert_eq!(out, "Hello!");
         assert_eq!(deltas, vec!["Hel", "lo!"]);
         let req = server.join().unwrap();
-        assert!(req.contains("\"stream\":true"), "request must ask for streaming");
+        assert!(
+            req.contains("\"stream\":true"),
+            "request must ask for streaming"
+        );
     }
 }

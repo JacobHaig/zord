@@ -32,7 +32,12 @@ pub fn transcribe_wav_file(
         hound::WavReader::open(wav_path).with_context(|| format!("opening {wav_path:?}"))?;
     let spec = reader.spec();
     zord_audio::validate_wav_spec(spec)?;
-    tracing::info!(rate = spec.sample_rate, channels = spec.channels, ?source, "offline transcription");
+    tracing::info!(
+        rate = spec.sample_rate,
+        channels = spec.channels,
+        ?source,
+        "offline transcription"
+    );
 
     let channels = spec.channels.max(1) as usize;
     let mut resampler = MonoResampler::new(spec.sample_rate, spec.channels)?;

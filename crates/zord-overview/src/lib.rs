@@ -47,7 +47,11 @@ pub fn load(store: &Store) -> Result<Option<Overview>> {
         .get_meta(META_OVERVIEW_MEETINGS)?
         .and_then(|(v, _)| v.parse().ok())
         .unwrap_or(0);
-    Ok(Some(Overview { text, meetings, generated_at_ms }))
+    Ok(Some(Overview {
+        text,
+        meetings,
+        generated_at_ms,
+    }))
 }
 
 /// Render the current ledger as plain-text grounding for cross-meeting chat and
@@ -69,7 +73,12 @@ pub fn ledger_context(store: &Store) -> Result<Option<String>> {
         if archived {
             out.push_str(" (archived)");
         }
-        if let Some(d) = p.description.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(d) = p
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let _ = write!(out, " — {d}");
         }
         out.push('\n');
@@ -134,16 +143,21 @@ pub fn synthesize(
     let input = fit_to_budget(llm, &digests, n_ctx, 2048, settings, progress)?;
 
     progress("Synthesizing the cross-meeting overview…");
-    let text = llm.generate(&input, zord_config::overview_prompt(), GenOpts::overview(n_ctx))?;
+    let text = llm.generate(
+        &input,
+        zord_config::overview_prompt(),
+        GenOpts::overview(n_ctx),
+    )?;
 
     store.set_meta(META_OVERVIEW, &text)?;
     store.set_meta(META_OVERVIEW_MEETINGS, &digests.len().to_string())?;
-    let generated_at_ms = store
-        .get_meta(META_OVERVIEW)?
-        .map(|(_, t)| t)
-        .unwrap_or(0);
+    let generated_at_ms = store.get_meta(META_OVERVIEW)?.map(|(_, t)| t).unwrap_or(0);
     progress(&format!("Overview ready — {} meetings.", digests.len()));
-    Ok(Overview { text, meetings: digests.len(), generated_at_ms })
+    Ok(Overview {
+        text,
+        meetings: digests.len(),
+        generated_at_ms,
+    })
 }
 
 /// Build the grounding context for **cross-meeting chat** (Phase 23d): gather the
@@ -162,7 +176,14 @@ pub fn cross_meeting_context(
         anyhow::bail!("no meetings with transcripts yet");
     }
     let meetings = digests.len();
-    let context = fit_to_budget(llm, &digests, n_ctx.clamp(8192, 131_072), 768, settings, progress)?;
+    let context = fit_to_budget(
+        llm,
+        &digests,
+        n_ctx.clamp(8192, 131_072),
+        768,
+        settings,
+        progress,
+    )?;
     Ok((context, meetings))
 }
 
@@ -285,7 +306,11 @@ fn compressed_for(
     progress(&format!("Compressing {}…", meeting_title(session)));
     let names = store.speaker_names(&session.id).unwrap_or_default();
     let transcript = build_transcript(&segs, &names);
-    let c = llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+    let c = llm.compress(
+        &transcript,
+        zord_config::compress_prompt(),
+        settings.compress_ctx,
+    )?;
     store.set_compressed(&session.id, &c)?;
     Ok(Some(c))
 }
@@ -315,10 +340,18 @@ fn collect_digests(
                     continue; // nothing recorded — skip
                 }
                 generated += 1;
-                progress(&format!("Compressing meeting {} ({})…", generated, meeting_title(&s)));
+                progress(&format!(
+                    "Compressing meeting {} ({})…",
+                    generated,
+                    meeting_title(&s)
+                ));
                 let names = store.speaker_names(&s.id).unwrap_or_default();
                 let transcript = build_transcript(&segs, &names);
-                let c = llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+                let c = llm.compress(
+                    &transcript,
+                    zord_config::compress_prompt(),
+                    settings.compress_ctx,
+                )?;
                 store.set_compressed(&s.id, &c)?;
                 c
             }
@@ -376,7 +409,10 @@ fn hierarchical_reduce(
             zord_config::compress_prompt(),
             settings.compress_ctx,
         )?;
-        reduced.push((format!("Group {} — {} meetings", i + 1, group.len()), digest));
+        reduced.push((
+            format!("Group {} — {} meetings", i + 1, group.len()),
+            digest,
+        ));
     }
 
     let assembled = assemble(&reduced);
@@ -454,8 +490,7 @@ fn build_transcript(
     segs: &[zord_core::Segment],
     names: &std::collections::HashMap<i32, String>,
 ) -> String {
-    segs
-        .iter()
+    segs.iter()
         .map(|seg| format!("{}: {}", seg.speaker_label(names), seg.text))
         .collect::<Vec<_>>()
         .join("\n")

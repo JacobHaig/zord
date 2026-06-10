@@ -26,6 +26,7 @@ struct Job {
     vad: zord_audio::VadSegment,
 }
 
+#[allow(clippy::too_many_arguments)] // CLI plumbing: each flag maps to one option
 pub fn run_record(
     model_path: PathBuf,
     model_id: ModelId,
@@ -56,7 +57,10 @@ pub fn run_record(
             session_start,
             job_tx.clone(),
             keep_audio.as_deref().map(|p| derive_path(p, "me")),
-            zord_audio::LevelControl::new(zord_audio::LevelMode::parse(&cfg.mic_level_mode, cfg.mic_gain_db)),
+            zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
+                &cfg.mic_level_mode,
+                cfg.mic_gain_db,
+            )),
         ));
         Some(mic)
     } else {
@@ -75,7 +79,10 @@ pub fn run_record(
                     session_start,
                     job_tx.clone(),
                     keep_audio.as_deref().map(|p| derive_path(p, "others")),
-                    zord_audio::LevelControl::new(zord_audio::LevelMode::parse(&cfg.others_level_mode, cfg.others_gain_db)),
+                    zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
+                        &cfg.others_level_mode,
+                        cfg.others_gain_db,
+                    )),
                 ));
                 Some(s)
             }
@@ -99,7 +106,12 @@ pub fn run_record(
         while let Ok(job) = job_rx.recv() {
             for seg in transcriber.transcribe(&job.vad.samples, job.source, job.vad.t_start_ms)? {
                 store.insert_segment(&session, &seg)?;
-                println!("[{} {}] {}", fmt_ts(seg.t_start_ms), seg.source.label(), seg.text);
+                println!(
+                    "[{} {}] {}",
+                    fmt_ts(seg.t_start_ms),
+                    seg.source.label(),
+                    seg.text
+                );
                 count += 1;
             }
         }
@@ -112,9 +124,13 @@ pub fn run_record(
     drop(system);
 
     for p in procs {
-        p.join().expect("proc thread panicked")?;
+        p.join().map_err(|_| {
+            anyhow::anyhow!("a capture worker crashed; the recording may be incomplete")
+        })??;
     }
-    let count = transcribe.join().expect("transcribe thread panicked")?;
+    let count = transcribe.join().map_err(|_| {
+        anyhow::anyhow!("the transcription worker crashed; the recording may be incomplete")
+    })??;
     Ok(count)
 }
 
@@ -244,14 +260,22 @@ fn transcribe_wav(
 ) -> Result<usize> {
     let mut on_segment = |seg: zord_core::Segment| {
         let _ = store.insert_segment(session_id, &seg);
-        println!("[{} {}] {}", fmt_ts(seg.t_start_ms), seg.source.label(), seg.text);
+        println!(
+            "[{} {}] {}",
+            fmt_ts(seg.t_start_ms),
+            seg.source.label(),
+            seg.text
+        );
     };
     zord_transcribe::transcribe_wav_file(transcriber, source, wav_path, &mut on_segment, &|| false)
 }
 
 /// `foo.wav` + "me" -> `foo.me.wav`
 fn derive_path(p: &Path, tag: &str) -> PathBuf {
-    let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     p.with_file_name(format!("{stem}.{tag}.wav"))
 }
 

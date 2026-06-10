@@ -1437,6 +1437,90 @@ platform that can't hand us separated feeds.
 
 ---
 
+## Productionization & official release (Phases 32–35) — major initiative
+
+Goal (June 2026): stabilize the app and prepare an **official public release**.
+The stability audit (June 2026) found the app solid for the happy path but with
+concrete crash/data-loss/hang gaps; this initiative closes them, adds CI gates so
+they stay closed, and builds the release/distribution machinery.
+
+**Decisions locked (June 2026):**
+- **Versioning stays 0.2.x** — no 1.0 declaration; the release is "latest".
+- **Multi-channel distribution**: GitHub Releases now; **Steam, Microsoft Store,
+  maybe Mac App Store, possibly an own store** later. **Stores own updates on
+  their channels** (they forbid self-updating binaries); only the GitHub /
+  own-store channel self-updates.
+- **Update mechanism = distribution-channel build seam.** A build-time channel
+  id (github | steam | msstore | macappstore) + a **`self-update` Cargo
+  feature** compiled only into GitHub/own-store builds: check the GitHub
+  releases API (opt-out toggle), notify in-app, and on Windows swap the
+  portable EXE via rename (running EXEs can be *renamed* but not overwritten:
+  download new → rename running to `.old` → write new at original path →
+  relaunch → clean up; `self-replace` crate). macOS stays **notify + link**
+  until signing exists (Gatekeeper re-quarantines unsigned downloads).
+- **Ship unsigned for now** (no Apple/Windows certs yet) — document the
+  Gatekeeper right-click-open and SmartScreen "More info → Run anyway" paths;
+  store channels mitigate later (MS Store signs for us, Steam's client is
+  trusted). Wire signing into CI when certs exist (steps already gated).
+- **Discord 30d/30e land BEFORE the release** (headline feature).
+- **Order: 32 → 33 → 30d/30e → 34 → release; 35 (stores) can trail.**
+
+### Phase 32 — Crash & data-integrity hardening
+Findings from the audit, impact-ordered; each lands with a test where testable.
+- **32a — SQLite robustness**: set `busy_timeout` (none today → concurrent
+  db_loop + transcription writes can fail instantly with `SQLITE_BUSY`); make
+  multi-statement write paths transactional; surface a corrupt/locked DB at
+  startup as a visible error instead of a dead thread.
+- **32b — WAV integrity**: stop swallowing finalize errors
+  (`engine.rs` `let _ = w.finalize()`); finalize-on-drop guard so a panicking
+  proc still writes the header; repair truncated WAVs on open (recompute data
+  length from file size) so a crash mid-recording doesn't lose the audio.
+- **32c — Engine thread panic safety**: only diarization is `catch_unwind`-
+  wrapped today; a panic in `control_loop`/`db_loop`/`model_loop`/`play_loop`/
+  `spawn_proc` workers dies silently and hangs the UI. Wrap them: log to
+  `crash.log`, emit `Status::Error`, finalize the session.
+- **32d — Atomic config writes**: `config.json` is written in place; crash
+  mid-write corrupts it and load silently resets all settings. Write-temp +
+  rename.
+- **32e — WASAPI drain guard**: unchecked `pop_front().unwrap()`s in the
+  loopback frame drain (`zord-capture/src/system.rs`) — a queue-underflow race
+  is a crash on Windows.
+- **32f — Runtime unwrap sweep**: reachable `unwrap()/expect()` in runtime
+  paths across `zord-store`/`zord-overview`/`zord-summarize`/`zord-net`/GUI
+  (incl. `SystemTime` unwraps, the LLM-cache `.expect` in engine.rs).
+
+### Phase 33 — CI & quality gates
+- **33a — PR workflow**: `cargo fmt --check`, `clippy -D warnings`,
+  `cargo test` (default features) on every PR/push to develop+main, plus a
+  `cargo check` feature matrix (`discord`, `diarization`, `llm-local`,
+  `llm-remote`, `parakeet`; `encryption` skipped, as in release.yml).
+- **33b — Coverage for untested crates**: `zord-gui`, `zord-capture`,
+  `zord-core`, `zord-transcribe` have zero tests; add unit tests for their
+  headless-testable logic (pure helpers, state machines — not live audio/ASR,
+  per `verification-limits`).
+
+### Phase 34 — Release readiness
+- **34a — Channel seam + update check**: build-time distribution channel
+  (compile-time env/feature); About surface (version + channel + releases
+  link); `self-update` feature: GitHub releases check w/ opt-out toggle,
+  toast on new version, Windows portable rename-swap, macOS notify-only.
+- **34b — Docs pass**: README install + troubleshooting (incl. unsigned-app
+  bypass per OS), RELEASE.md checklist refresh, store-channel notes.
+- **34c — First-run & error-state polish**: mic/screen permission denied,
+  model download failure, no audio device — each must show a clear actionable
+  error, never a silent hang.
+
+### Phase 35 — Store distribution (may trail the first release)
+- **35a — Steam**: steamworks depot + build pipeline; channel build without
+  `self-update`.
+- **35b — Microsoft Store**: MSIX packaging (store-signed — solves SmartScreen
+  on that channel).
+- **35c — Mac App Store / own store**: needs Apple Developer account; audit
+  sandbox constraints (ScreenCaptureKit loopback under sandbox) before
+  committing.
+
+---
+
 ## 7. Open questions to revisit during build
 1. ~~**macOS minimum version**~~ — **DECIDED:** target whatever runs on Apple
    Silicon M1–M5. We'll set the deployment target to macOS 13 (the first version

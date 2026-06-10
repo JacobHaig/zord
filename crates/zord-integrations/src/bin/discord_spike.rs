@@ -66,8 +66,8 @@ struct Inner {
     out_dir: PathBuf,
     // Diagnostic counters — tell apart "nobody was in the channel" from
     // "packets arrived but DAVE didn't decrypt".
-    ticks: AtomicU64,        // VoiceTick events (one per 20ms while connected)
-    rtp_packets: AtomicU64,  // raw RTP audio packets seen (encrypted or not)
+    ticks: AtomicU64,           // VoiceTick events (one per 20ms while connected)
+    rtp_packets: AtomicU64,     // raw RTP audio packets seen (encrypted or not)
     speaking_frames: AtomicU64, // per-tick speaker entries
     decoded_frames: AtomicU64,  // entries that carried decoded PCM
     /// Set once we've joined a channel — guards against double-join and lets the
@@ -202,11 +202,24 @@ impl EventHandler for Bot {
         for gid in ctx.cache.guilds() {
             if let Some(g) = ctx.cache.guild(gid) {
                 if !g.voice_states.is_empty() {
-                    tracing::info!("server '{}' — {} user(s) in voice", g.name, g.voice_states.len());
+                    tracing::info!(
+                        "server '{}' — {} user(s) in voice",
+                        g.name,
+                        g.voice_states.len()
+                    );
                 }
                 for (u, vs) in g.voice_states.iter() {
-                    let mark = if u.get() == uid { "  ← matches DISCORD_USER_ID" } else { "" };
-                    tracing::info!("  in-voice: user {} → '{}' channel {:?}{mark}", u.get(), g.name, vs.channel_id.map(|c| c.get()));
+                    let mark = if u.get() == uid {
+                        "  ← matches DISCORD_USER_ID"
+                    } else {
+                        ""
+                    };
+                    tracing::info!(
+                        "  in-voice: user {} → '{}' channel {:?}{mark}",
+                        u.get(),
+                        g.name,
+                        vs.channel_id.map(|c| c.get())
+                    );
                     if u.get() == uid {
                         if let Some(c) = vs.channel_id {
                             found = Some((gid, c));
@@ -249,7 +262,12 @@ impl EventHandler for Bot {
             return;
         }
         if let (Some(g), Some(c)) = (new.guild_id, new.channel_id) {
-            tracing::info!(user = uid, guild = g.get(), channel = c.get(), "followed user joined voice — following them in");
+            tracing::info!(
+                user = uid,
+                guild = g.get(),
+                channel = c.get(),
+                "followed user joined voice — following them in"
+            );
             self.join_and_record(&ctx, g, c).await;
         }
     }
@@ -266,17 +284,28 @@ impl Bot {
         // Verify the channel is a voice channel so a failure is legible.
         match channel.to_channel(ctx).await {
             Ok(ch) => match ch.guild() {
-                Some(gc) => tracing::info!(channel = %gc.name, kind = ?gc.kind, "resolved target channel"),
-                None => tracing::warn!("target is not a guild channel (DM?) — join will likely fail"),
+                Some(gc) => {
+                    tracing::info!(channel = %gc.name, kind = ?gc.kind, "resolved target channel")
+                }
+                None => {
+                    tracing::warn!("target is not a guild channel (DM?) — join will likely fail")
+                }
             },
-            Err(e) => tracing::warn!("could not resolve channel {} ({e}) — wrong id, or bot lacks View Channel?", channel.get()),
+            Err(e) => tracing::warn!(
+                "could not resolve channel {} ({e}) — wrong id, or bot lacks View Channel?",
+                channel.get()
+            ),
         }
 
-        let manager = songbird::get(ctx).await.expect("songbird registered at init");
+        let manager = songbird::get(ctx)
+            .await
+            .expect("songbird registered at init");
         let _call_lock = match manager.join(guild, channel).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("join failed: {e} — bot lacks Connect permission, or wrong channel?");
+                tracing::error!(
+                    "join failed: {e} — bot lacks Connect permission, or wrong channel?"
+                );
                 std::process::exit(1);
             }
         };
@@ -290,7 +319,10 @@ impl Bot {
             call.add_global_event(CoreEvent::ClientDisconnect.into(), self.recv.clone());
         }
 
-        tracing::info!(secs = self.secs, "✅ joined + receiving — recording per-user audio (talk now!)");
+        tracing::info!(
+            secs = self.secs,
+            "✅ joined + receiving — recording per-user audio (talk now!)"
+        );
 
         // Stop timer: leave, finalize every WAV, print the SSRC→user map + verdict.
         let manager = manager.clone();
@@ -318,8 +350,12 @@ impl Bot {
             let decoded = inner.decoded_frames.load(Ordering::Relaxed);
             let users = inner.ssrc_user.len();
             tracing::info!(
-                ticks, rtp_packets = rtp, speaking_frames = speaking,
-                decoded_frames = decoded, mapped_users = users, tracks = count,
+                ticks,
+                rtp_packets = rtp,
+                speaking_frames = speaking,
+                decoded_frames = decoded,
+                mapped_users = users,
+                tracks = count,
                 "receive diagnostics"
             );
             if rtp == 0 && speaking == 0 {

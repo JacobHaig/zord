@@ -118,7 +118,8 @@ impl SummaryModel {
     /// a browser-download dropped into the models folder is recognized as this
     /// built-in model).
     pub fn mirror_url(self) -> String {
-        self.url().replace("https://huggingface.co/", "https://hf-mirror.com/")
+        self.url()
+            .replace("https://huggingface.co/", "https://hf-mirror.com/")
     }
 }
 
@@ -155,7 +156,10 @@ pub fn list_custom_models() -> Vec<String> {
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let is_gguf = name.to_ascii_lowercase().ends_with(".gguf");
-            let nonempty = entry.metadata().map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+            let nonempty = entry
+                .metadata()
+                .map(|m| m.is_file() && m.len() > 0)
+                .unwrap_or(false);
             if is_gguf && nonempty && !known.contains(&name.as_str()) {
                 out.push(name);
             }
@@ -199,9 +203,27 @@ pub struct OllamaModel {
 pub fn ollama_models() -> &'static [OllamaModel] {
     &[
         // (Qwen2.5 3B intentionally omitted — Qwen Research License, non-commercial.)
-        OllamaModel { repo: "qwen2.5", tag: "1.5b", filename: "qwen2.5-1.5b-ollama.gguf", label: "Qwen2.5 1.5B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~1 GB" },
-        OllamaModel { repo: "llama3.2", tag: "3b", filename: "llama3.2-3b-ollama.gguf", label: "Llama 3.2 3B Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~2 GB" },
-        OllamaModel { repo: "phi3.5", tag: "latest", filename: "phi3.5-ollama.gguf", label: "Phi-3.5 mini Instruct — GGUF download from the Ollama registry (non-HF)", size_label: "~2.2 GB" },
+        OllamaModel {
+            repo: "qwen2.5",
+            tag: "1.5b",
+            filename: "qwen2.5-1.5b-ollama.gguf",
+            label: "Qwen2.5 1.5B Instruct — GGUF download from the Ollama registry (non-HF)",
+            size_label: "~1 GB",
+        },
+        OllamaModel {
+            repo: "llama3.2",
+            tag: "3b",
+            filename: "llama3.2-3b-ollama.gguf",
+            label: "Llama 3.2 3B Instruct — GGUF download from the Ollama registry (non-HF)",
+            size_label: "~2 GB",
+        },
+        OllamaModel {
+            repo: "phi3.5",
+            tag: "latest",
+            filename: "phi3.5-ollama.gguf",
+            label: "Phi-3.5 mini Instruct — GGUF download from the Ollama registry (non-HF)",
+            size_label: "~2.2 GB",
+        },
     ]
 }
 
@@ -227,7 +249,11 @@ pub fn ensure_ollama_model(
     if path.exists() && std::fs::metadata(&path)?.len() > 0 {
         return Ok(path);
     }
-    tracing::info!(repo = spec.repo, tag = spec.tag, "downloading model via Ollama registry");
+    tracing::info!(
+        repo = spec.repo,
+        tag = spec.tag,
+        "downloading model via Ollama registry"
+    );
     zord_net::download_ollama_model(spec.repo, spec.tag, &path, progress)?;
     Ok(path)
 }
@@ -276,8 +302,13 @@ impl Summarizer {
         {
             params = params.with_n_gpu_layers(999); // offload all layers to Metal
         }
-        let size_mb = std::fs::metadata(model_path).map(|m| m.len() / 1_048_576).unwrap_or(0);
-        breadcrumb(&format!("load:start {} ({size_mb} MB)", model_path.display()));
+        let size_mb = std::fs::metadata(model_path)
+            .map(|m| m.len() / 1_048_576)
+            .unwrap_or(0);
+        breadcrumb(&format!(
+            "load:start {} ({size_mb} MB)",
+            model_path.display()
+        ));
         let model = LlamaModel::load_from_file(backend, model_path, &params)
             .with_context(|| format!("loading {model_path:?}"))?;
         breadcrumb("load:done");
@@ -307,7 +338,12 @@ impl Summarizer {
     /// `opts`. The user message is sent verbatim (callers add any framing such as
     /// a "Transcript:" prefix). Shared by [`summarize`], [`compress`], and the
     /// Overview synthesis.
-    pub fn generate(&self, user_content: &str, system_prompt: &str, opts: GenOpts) -> Result<String> {
+    pub fn generate(
+        &self,
+        user_content: &str,
+        system_prompt: &str,
+        opts: GenOpts,
+    ) -> Result<String> {
         let user = truncate_chars(user_content, opts.max_transcript_chars);
         let messages = vec![
             LlamaChatMessage::new("system".to_string(), system_prompt.to_string())?,
@@ -319,7 +355,12 @@ impl Summarizer {
     /// Multi-turn chat grounded in `system_prompt` (which carries the context to
     /// answer from) over `turns` of alternating user/assistant messages. Returns
     /// the assistant's next reply.
-    pub fn chat(&self, system_prompt: &str, turns: &[(ChatRole, String)], n_ctx: u32) -> Result<String> {
+    pub fn chat(
+        &self,
+        system_prompt: &str,
+        turns: &[(ChatRole, String)],
+        n_ctx: u32,
+    ) -> Result<String> {
         self.chat_stream(system_prompt, turns, n_ctx, &mut |_| {})
     }
 
@@ -332,9 +373,15 @@ impl Summarizer {
         n_ctx: u32,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String> {
-        let mut messages = vec![LlamaChatMessage::new("system".to_string(), system_prompt.to_string())?];
+        let mut messages = vec![LlamaChatMessage::new(
+            "system".to_string(),
+            system_prompt.to_string(),
+        )?];
         for (role, content) in turns {
-            messages.push(LlamaChatMessage::new(role.as_str().to_string(), content.clone())?);
+            messages.push(LlamaChatMessage::new(
+                role.as_str().to_string(),
+                content.clone(),
+            )?);
         }
         self.complete_with(messages, GenOpts::chat(n_ctx), on_delta)
     }
@@ -379,9 +426,10 @@ impl Summarizer {
             tokens.len(),
             opts.max_new_tokens
         ));
-        let mut ctx = self
-            .model
-            .new_context(backend, LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx)))?;
+        let mut ctx = self.model.new_context(
+            backend,
+            LlamaContextParams::default().with_n_ctx(NonZeroU32::new(n_ctx)),
+        )?;
 
         // Prefill the prompt in chunks no larger than the batch size. Submitting
         // the whole prompt in a single `decode` aborts inside ggml (ggml_abort)
@@ -390,7 +438,10 @@ impl Summarizer {
         const PREFILL_CHUNK: usize = 512;
         let mut batch = LlamaBatch::new(PREFILL_CHUNK, 1);
         let last = tokens.len() - 1;
-        breadcrumb(&format!("infer:prefill ({} tokens, chunk {PREFILL_CHUNK})", tokens.len()));
+        breadcrumb(&format!(
+            "infer:prefill ({} tokens, chunk {PREFILL_CHUNK})",
+            tokens.len()
+        ));
         let mut start = 0usize;
         while start < tokens.len() {
             let end = (start + PREFILL_CHUNK).min(tokens.len());
@@ -441,7 +492,8 @@ impl Summarizer {
 /// The tail of that file tells us exactly how far the last LLM run got.
 fn breadcrumb(line: &str) {
     tracing::info!(target: "zord::llm", "{line}");
-    let Some(dir) = directories::ProjectDirs::from("", "", "Zord").map(|d| d.data_dir().join("logs"))
+    let Some(dir) =
+        directories::ProjectDirs::from("", "", "Zord").map(|d| d.data_dir().join("logs"))
     else {
         return;
     };
@@ -481,13 +533,20 @@ mod prefill_tests {
         eprintln!("loading {}", model.display());
         let s = Summarizer::load(&model).expect("load model");
         // ~7000 tokens — well over the default n_batch of 2048 (Overview-sized).
-        let long = "The quarterly roadmap review covered staffing, budget, and timelines. "
-            .repeat(400);
+        let long =
+            "The quarterly roadmap review covered staffing, budget, and timelines. ".repeat(400);
         let toks = s.count_tokens(&long).unwrap();
         eprintln!("prompt ~{toks} tokens");
-        assert!(toks > 2048, "prompt should exceed n_batch to exercise chunking");
+        assert!(
+            toks > 2048,
+            "prompt should exceed n_batch to exercise chunking"
+        );
         let out = s
-            .generate(&long, "Summarize the following in one sentence.", GenOpts::overview(32768))
+            .generate(
+                &long,
+                "Summarize the following in one sentence.",
+                GenOpts::overview(32768),
+            )
             .expect("generate should not abort");
         eprintln!("reply: {out}");
         assert!(!out.trim().is_empty());

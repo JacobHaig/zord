@@ -46,7 +46,11 @@ pub struct LevelControl {
 
 impl LevelControl {
     pub fn new(mode: LevelMode) -> Self {
-        Self { mode, gain: 1.0, env: 0.0 }
+        Self {
+            mode,
+            gain: 1.0,
+            env: 0.0,
+        }
     }
 
     /// Apply the configured level control to `samples` in place. `sample_rate`
@@ -112,7 +116,10 @@ mod tests {
         let mut lc = LevelControl::new(LevelMode::Manual(24.0)); // ~16x
         let mut buf = vec![0.2, -0.5, 0.9, -1.0];
         lc.process(&mut buf, 16_000);
-        assert!(buf.iter().all(|s| s.abs() <= 1.0), "soft-limiter must keep |s| <= 1");
+        assert!(
+            buf.iter().all(|s| s.abs() <= 1.0),
+            "soft-limiter must keep |s| <= 1"
+        );
         assert!(buf[0].abs() > 0.2, "a quiet sample should be boosted");
     }
 }

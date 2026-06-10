@@ -40,7 +40,11 @@ fn agent(timeout: Option<Duration>) -> Agent {
         .http_status_as_error(false)
         // OS cert store via native-tls — trusts an IT-installed inspection CA,
         // unlike rustls's bundled Mozilla roots.
-        .tls_config(TlsConfig::builder().provider(TlsProvider::NativeTls).build());
+        .tls_config(
+            TlsConfig::builder()
+                .provider(TlsProvider::NativeTls)
+                .build(),
+        );
 
     if let Some(p) = proxy_from_env() {
         match ureq::Proxy::new(&p) {
@@ -159,8 +163,7 @@ pub fn post_sse(
                 resp.body_mut().with_config().limit(MAX_SSE_BYTES).reader(),
             );
             for line in reader.lines() {
-                let line =
-                    line.map_err(|e| ApiError::Connect(format!("reading stream: {e}")))?;
+                let line = line.map_err(|e| ApiError::Connect(format!("reading stream: {e}")))?;
                 if let Some(data) = line.strip_prefix("data:") {
                     let data = data.trim();
                     if data == "[DONE]" {
@@ -258,7 +261,10 @@ fn ollama_blob_url(agent: &Agent, repo: &str, tag: &str) -> Result<(String, Stri
     let manifest_url = format!("{base}/manifests/{tag}");
     let mut resp = agent
         .get(&manifest_url)
-        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .header(
+            "Accept",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        )
         .call()
         .with_context(|| format!("fetching Ollama manifest {manifest_url}"))?;
     let code = resp.status().as_u16();
@@ -291,7 +297,10 @@ fn try_download(
     expected_sha256: Option<&str>,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let resp = agent.get(url).call().with_context(|| format!("requesting {url}"))?;
+    let resp = agent
+        .get(url)
+        .call()
+        .with_context(|| format!("requesting {url}"))?;
     // ureq no longer treats non-2xx as an error (http_status_as_error=false),
     // so reject it here rather than downloading an error page.
     let code = resp.status().as_u16();
@@ -351,8 +360,13 @@ fn verify_digest(
     if let (Some(h), Some(expected)) = (hasher, expected_sha256) {
         let got = h.finalize();
         let want = expected.strip_prefix("sha256:").unwrap_or(expected);
-        if !got.iter().map(|b| format!("{b:02x}")).collect::<String>().eq_ignore_ascii_case(want) {
-            let _ = std::fs::remove_file(&tmp);
+        if !got
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+            .eq_ignore_ascii_case(want)
+        {
+            let _ = std::fs::remove_file(tmp);
             anyhow::bail!("{url}: sha256 mismatch (expected {want}) — refusing tampered download");
         }
     }
@@ -387,7 +401,10 @@ mod tests {
         let (url, digest) = ollama_blob_url(&agent(None), "qwen2.5", "1.5b").unwrap();
         assert!(url.contains("/blobs/sha256:"), "unexpected blob url: {url}");
         assert!(digest.starts_with("sha256:"), "unexpected digest: {digest}");
-        assert!(url.ends_with(&digest), "url must be content-addressed by the digest");
+        assert!(
+            url.ends_with(&digest),
+            "url must be content-addressed by the digest"
+        );
     }
 
     /// Offline unit test: a download whose bytes don't match the claimed digest
@@ -423,6 +440,9 @@ mod tests {
         server.join().unwrap();
         assert!(r.is_err(), "mismatched digest must fail");
         assert!(!dest.exists(), "no file should be left on digest mismatch");
-        assert!(!dest.with_extension("partial").exists(), "partial must be cleaned up");
+        assert!(
+            !dest.with_extension("partial").exists(),
+            "partial must be cleaned up"
+        );
     }
 }

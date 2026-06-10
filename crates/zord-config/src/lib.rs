@@ -337,12 +337,18 @@ pub fn title_prompt() -> &'static str {
 /// Clean an LLM-produced title: first non-empty line, strip wrapping quotes and
 /// a leading "Title:" label, trim trailing punctuation, and cap the length.
 pub fn clean_title(raw: &str) -> String {
-    let line = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     let line = line
         .trim_start_matches("Title:")
         .trim_start_matches("title:")
         .trim();
-    let line = line.trim_matches(|c| c == '"' || c == '\'' || c == '`').trim();
+    let line = line
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .trim();
     let line = line.trim_end_matches(['.', ',', ';', ':']).trim();
     line.chars().take(80).collect()
 }
@@ -371,8 +377,8 @@ fn default_summary_model() -> String {
 /// Ids of models removed for non-commercial licensing — a saved selection
 /// pointing at one is reset to the current default on load.
 const REMOVED_SUMMARY_MODELS: &[&str] = &[
-    "qwen2.5-3b-instruct",     // Qwen Research License (non-commercial)
-    "qwen2.5-3b-ollama.gguf",  // same model via the Ollama registry
+    "qwen2.5-3b-instruct",    // Qwen Research License (non-commercial)
+    "qwen2.5-3b-ollama.gguf", // same model via the Ollama registry
 ];
 fn default_summary_preset() -> String {
     "balanced".to_string()
@@ -486,7 +492,11 @@ impl Settings {
     /// The system prompt to summarize with: the custom override if set,
     /// otherwise the selected preset's prompt (falling back to "balanced").
     pub fn effective_summary_prompt(&self) -> String {
-        if let Some(p) = self.summary_prompt.as_ref().filter(|p| !p.trim().is_empty()) {
+        if let Some(p) = self
+            .summary_prompt
+            .as_ref()
+            .filter(|p| !p.trim().is_empty())
+        {
             return p.clone();
         }
         let presets = summary_presets();
@@ -605,8 +615,13 @@ impl Settings {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, serde_json::to_string_pretty(self)?)?;
-        restrict_to_owner(&path);
+        // Write-temp + rename so a crash mid-write can't truncate the file (a
+        // half-written config parses as nothing and silently resets every
+        // setting on the next launch). Rename is atomic on one filesystem.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        restrict_to_owner(&tmp); // set perms before it lands at the real path
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 
@@ -701,7 +716,9 @@ pub fn apply_retention(audio_dir: &std::path::Path, days: Option<u32>) -> usize 
     };
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
         let too_old = now
             .duration_since(modified)
             .map(|age| age > max_age)

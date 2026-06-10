@@ -25,7 +25,9 @@ impl LlmBackend {
     /// Load the local llama.cpp backend from a GGUF path.
     #[cfg(feature = "llama")]
     pub fn load_local(model_path: &std::path::Path) -> Result<Self> {
-        Ok(Self::Local(crate::summarizer::Summarizer::load(model_path)?))
+        Ok(Self::Local(crate::summarizer::Summarizer::load(
+            model_path,
+        )?))
     }
 
     /// Connect the remote backend (no I/O happens until the first request).
@@ -47,7 +49,12 @@ impl LlmBackend {
     }
 
     /// One chat completion over `user_content` with `system_prompt`, sized by `opts`.
-    pub fn generate(&self, user_content: &str, system_prompt: &str, opts: GenOpts) -> Result<String> {
+    pub fn generate(
+        &self,
+        user_content: &str,
+        system_prompt: &str,
+        opts: GenOpts,
+    ) -> Result<String> {
         match self {
             #[cfg(feature = "llama")]
             Self::Local(s) => s.generate(user_content, system_prompt, opts),
@@ -57,7 +64,12 @@ impl LlmBackend {
     }
 
     /// Multi-turn grounded chat (Phase 23d).
-    pub fn chat(&self, system_prompt: &str, turns: &[(ChatRole, String)], n_ctx: u32) -> Result<String> {
+    pub fn chat(
+        &self,
+        system_prompt: &str,
+        turns: &[(ChatRole, String)],
+        n_ctx: u32,
+    ) -> Result<String> {
         match self {
             #[cfg(feature = "llama")]
             Self::Local(s) => s.chat(system_prompt, turns, n_ctx),

@@ -115,13 +115,20 @@ fn init_logging() -> Option<tracing_appender::non_blocking::WorkerGuard> {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(stderr_layer)
-                .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(writer))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(writer),
+                )
                 .init();
             tracing::info!(path = %dir.join("zord.log").display(), "file logging enabled");
             Some(guard)
         }
         Err(e) => {
-            tracing_subscriber::registry().with(filter).with(stderr_layer).init();
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stderr_layer)
+                .init();
             tracing::warn!("file logging disabled: {e}");
             None
         }
@@ -179,15 +186,39 @@ struct JobView {
 /// translates each into the matching [`DbCmd`].
 #[derive(Clone, PartialEq)]
 enum LedgerAction {
-    RenameProject { id: String, name: String },
-    SetDescription { id: String, description: String },
-    Archive { id: String, archived: bool },
+    RenameProject {
+        id: String,
+        name: String,
+    },
+    SetDescription {
+        id: String,
+        description: String,
+    },
+    Archive {
+        id: String,
+        archived: bool,
+    },
     DeleteProject(String),
-    EditItem { id: String, text: String, owner: String },
-    SetItemStatus { id: String, status: String },
-    MoveItem { item_id: String, project_id: String },
+    EditItem {
+        id: String,
+        text: String,
+        owner: String,
+    },
+    SetItemStatus {
+        id: String,
+        status: String,
+    },
+    MoveItem {
+        item_id: String,
+        project_id: String,
+    },
     DeleteItem(String),
-    AddItem { project_id: String, kind: String, text: String, owner: String },
+    AddItem {
+        project_id: String,
+        kind: String,
+        text: String,
+        owner: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +228,9 @@ enum LedgerAction {
 
 #[cfg(feature = "encryption")]
 fn gate_db_path() -> PathBuf {
-    Settings::load().db_path().unwrap_or_else(|_| PathBuf::from("zord.db"))
+    Settings::load()
+        .db_path()
+        .unwrap_or_else(|_| PathBuf::from("zord.db"))
 }
 
 #[cfg(feature = "encryption")]
@@ -470,7 +503,9 @@ fn MainApp() -> Element {
         if let Ok(dir) = initial.audio_dir() {
             zord_config::apply_retention(&dir, initial.auto_delete_days);
         }
-        let db = initial.db_path().unwrap_or_else(|_| PathBuf::from("zord.db"));
+        let db = initial
+            .db_path()
+            .unwrap_or_else(|_| PathBuf::from("zord.db"));
         let (engine, mut ev_rx) = Engine::spawn(db);
         spawn(async move {
             // Per-event application. `Level` is handled separately (coalesced
@@ -580,7 +615,12 @@ fn MainApp() -> Element {
                 Event::JobStarted { id, kind, label } => {
                     let mut v = jobs.write();
                     if !v.iter().any(|j| j.id == id) {
-                        v.push(JobView { id, kind, label, started_at: now_ms() });
+                        v.push(JobView {
+                            id,
+                            kind,
+                            label,
+                            started_at: now_ms(),
+                        });
                     }
                 }
                 Event::JobFinished { id } => {
@@ -617,8 +657,14 @@ fn MainApp() -> Element {
                 let mut ev = first;
                 loop {
                     match ev {
-                        Event::Level { source: Source::Me, level } => last_me = Some(level),
-                        Event::Level { source: Source::Others, level } => last_others = Some(level),
+                        Event::Level {
+                            source: Source::Me,
+                            level,
+                        } => last_me = Some(level),
+                        Event::Level {
+                            source: Source::Others,
+                            level,
+                        } => last_others = Some(level),
                         other => apply(other),
                     }
                     match ev_rx.try_recv() {
@@ -736,7 +782,12 @@ fn MainApp() -> Element {
             engine.cancel_job(&id);
             // Clear the matching inline button flag now (a cancelled job's result
             // event is skipped, so the flag wouldn't otherwise reset).
-            if let Some(kind) = jobs.read().iter().find(|j| j.id == id).map(|j| j.kind.clone()) {
+            if let Some(kind) = jobs
+                .read()
+                .iter()
+                .find(|j| j.id == id)
+                .map(|j| j.kind.clone())
+            {
                 match kind.as_str() {
                     "summarize" => summarizing.set(false),
                     "compress" => compressing.set(false),
@@ -853,9 +904,12 @@ fn MainApp() -> Element {
         move |_| {
             overview_busy.set(true);
             notice.set(Some(
-                "Updating the project ledger — folding in new meetings. Runs in the background.".to_string(),
+                "Updating the project ledger — folding in new meetings. Runs in the background."
+                    .to_string(),
             ));
-            let _ = engine.summ_tx.send(SummCmd::FoldOverview { rebuild: false });
+            let _ = engine
+                .summ_tx
+                .send(SummCmd::FoldOverview { rebuild: false });
         }
     };
 
@@ -887,13 +941,25 @@ fn MainApp() -> Element {
                 LedgerAction::DeleteProject(id) => DbCmd::DeleteProject(id),
                 LedgerAction::EditItem { id, text, owner } => DbCmd::EditItem { id, text, owner },
                 LedgerAction::SetItemStatus { id, status } => DbCmd::SetItemStatus { id, status },
-                LedgerAction::MoveItem { item_id, project_id } => {
-                    DbCmd::MoveItem { item_id, project_id }
-                }
+                LedgerAction::MoveItem {
+                    item_id,
+                    project_id,
+                } => DbCmd::MoveItem {
+                    item_id,
+                    project_id,
+                },
                 LedgerAction::DeleteItem(id) => DbCmd::DeleteItem(id),
-                LedgerAction::AddItem { project_id, kind, text, owner } => {
-                    DbCmd::AddItem { project_id, kind, text, owner }
-                }
+                LedgerAction::AddItem {
+                    project_id,
+                    kind,
+                    text,
+                    owner,
+                } => DbCmd::AddItem {
+                    project_id,
+                    kind,
+                    text,
+                    owner,
+                },
             };
             let _ = engine.db_tx.send(cmd);
         }
@@ -2609,7 +2675,10 @@ fn SearchView(
     use std::collections::HashMap;
     let sess = sessions.read();
     let started: HashMap<String, u64> = sess.iter().map(|s| (s.id.clone(), s.started_at)).collect();
-    let titles: HashMap<String, String> = sess.iter().map(|s| (s.id.clone(), session_title(s))).collect();
+    let titles: HashMap<String, String> = sess
+        .iter()
+        .map(|s| (s.id.clone(), session_title(s)))
+        .collect();
     let note_hits: Vec<(String, String)> = note_results.read().clone();
 
     // Group hits by session, sort lines chronologically, sessions newest-first.
@@ -2730,8 +2799,10 @@ fn LedgerPanel(
     let is_busy = busy();
     let pending = data.as_ref().map(|l| l.pending).unwrap_or(0);
     let projects = data.map(|l| l.projects).unwrap_or_default();
-    let targets: Vec<(String, String)> =
-        projects.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+    let targets: Vec<(String, String)> = projects
+        .iter()
+        .map(|p| (p.id.clone(), p.name.clone()))
+        .collect();
     let has_ledger = !projects.is_empty();
     let mut confirm_rebuild = use_signal(|| false);
 
@@ -3126,7 +3197,13 @@ fn split_sections(md: &str) -> (String, Vec<(String, String)>) {
     if let Some(s) = cur.take() {
         sections.push(s);
     }
-    (preamble.trim().to_string(), sections.into_iter().map(|(h, b)| (h, b.trim().to_string())).collect())
+    (
+        preamble.trim().to_string(),
+        sections
+            .into_iter()
+            .map(|(h, b)| (h, b.trim().to_string()))
+            .collect(),
+    )
 }
 
 /// A grounded chat panel (Phase 23d): a scrolling Q&A log + an input row. The
@@ -3631,7 +3708,10 @@ fn fmt_ts(ms: u64) -> String {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn session_title(s: &Session) -> String {
@@ -3697,7 +3777,11 @@ fn fmt_date(ms: u64) -> String {
 
 /// Sidebar second line: date + how long ago + duration when known.
 fn session_meta(s: &Session) -> String {
-    let mut meta = format!("{} · {}", fmt_date(s.started_at), relative_time(s.started_at));
+    let mut meta = format!(
+        "{} · {}",
+        fmt_date(s.started_at),
+        relative_time(s.started_at)
+    );
     if let Some(secs) = s.ended_at.map(|e| e.saturating_sub(s.started_at) / 1000) {
         if secs > 0 {
             meta.push_str(&format!(" · {}", fmt_dur(secs)));

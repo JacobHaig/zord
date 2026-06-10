@@ -106,10 +106,7 @@ async fn sessions(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-async fn session(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn session(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match with_store(&state, move |s| s.segments(&id)).await {
         Ok(v) => Json(v).into_response(),
         Err(c) => c.into_response(),
@@ -127,10 +124,7 @@ struct SearchHit {
     segment: Segment,
 }
 
-async fn search(
-    State(state): State<AppState>,
-    Query(q): Query<SearchQuery>,
-) -> impl IntoResponse {
+async fn search(State(state): State<AppState>, Query(q): Query<SearchQuery>) -> impl IntoResponse {
     let query = sanitize_fts(&q.q);
     if query.is_empty() {
         return Json(Vec::<SearchHit>::new()).into_response();
@@ -139,7 +133,10 @@ async fn search(
         Ok(v) => {
             let hits: Vec<SearchHit> = v
                 .into_iter()
-                .map(|(session_id, segment)| SearchHit { session_id, segment })
+                .map(|(session_id, segment)| SearchHit {
+                    session_id,
+                    segment,
+                })
                 .collect();
             Json(hits).into_response()
         }

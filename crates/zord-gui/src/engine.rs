@@ -55,7 +55,10 @@ pub enum Event {
     Segment(Segment),
     /// Live loudness for a channel: gained RMS with attack/decay ballistics,
     /// 0..1. Identical computation for mic and system so both bars behave alike.
-    Level { source: Source, level: f32 },
+    Level {
+        source: Source,
+        level: f32,
+    },
     /// Result of [`DbCmd::ListSessions`].
     Sessions(Vec<Session>),
     /// Sidebar badges per session id: (has_summary, has_compressed, has_speakers).
@@ -69,10 +72,15 @@ pub enum Event {
     /// The model catalog with current download status.
     Models(Vec<ModelInfo>),
     /// Download progress for a model (0..100).
-    ModelProgress { name: String, pct: u8 },
+    ModelProgress {
+        name: String,
+        pct: u8,
+    },
     /// A model download failed — the UI offers the manual-fetch fallback
     /// (direct URL + open models folder) for this model.
-    DownloadFailed { name: String },
+    DownloadFailed {
+        name: String,
+    },
     /// A session's summary (loaded or freshly generated). `None` = none yet.
     Summary(Option<String>),
     /// A session's dense-prose compression (loaded or freshly generated)
@@ -93,11 +101,17 @@ pub enum Event {
     /// An assistant reply to a chat question (Phase 23d). `scope` says which
     /// conversation it belongs to. (Only produced in `summaries` builds.)
     #[allow(dead_code)]
-    ChatReply { scope: ChatScope, reply: String },
+    ChatReply {
+        scope: ChatScope,
+        reply: String,
+    },
     /// A streamed piece of the in-progress chat reply (Phase 24d). Always
     /// followed by a terminal [`Event::ChatReply`] with the full text.
     #[allow(dead_code)]
-    ChatDelta { scope: ChatScope, delta: String },
+    ChatDelta {
+        scope: ChatScope,
+        delta: String,
+    },
     /// Custom names for diarized speakers in the viewed session (index → name).
     /// Emitted on session load; do NOT use it to clear diarization busy state.
     Speakers(std::collections::HashMap<i32, String>),
@@ -115,13 +129,19 @@ pub enum Event {
     /// Which retained per-channel WAVs exist on disk for the viewed session
     /// (absolute paths, me/others). Lines from a channel without a file get no
     /// replay button.
-    AudioFiles { me: Option<String>, others: Option<String> },
+    AudioFiles {
+        me: Option<String>,
+        others: Option<String>,
+    },
     /// The transcript line (db id) currently playing back. `None` = stopped or
     /// finished.
     Playing(Option<i64>),
     /// Result of [`ModelCmd::ListRemoteLlm`]: the external server's model ids,
     /// or why it couldn't be reached (Phase 24c).
-    RemoteModels { models: Vec<String>, error: Option<String> },
+    RemoteModels {
+        models: Vec<String>,
+        error: Option<String>,
+    },
     /// A post-stop / on-demand transcription pass started (Phase 25) — shows
     /// up on the background-jobs board as its own entry.
     Retranscribing,
@@ -133,10 +153,16 @@ pub enum Event {
     /// independent of which session is being viewed, so navigating/recording
     /// never clears them. `id` is unique (e.g. "diarize:<session>"); `kind` is
     /// one of summarize|compress|overview|diarize|retranscribe|download.
-    JobStarted { id: String, kind: String, label: String },
+    JobStarted {
+        id: String,
+        kind: String,
+        label: String,
+    },
     /// A background job ended (success, no-op, error, or cancellation). Removes
     /// it from the jobs panel and clears the matching inline indicator.
-    JobFinished { id: String },
+    JobFinished {
+        id: String,
+    },
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -340,7 +366,10 @@ pub enum DbCmd {
     /// (Re-)run speaker diarization on a past session's retained "Others" audio.
     /// `num_speakers` pins the speaker count for this session (0 = auto-detect);
     /// it is persisted on the session so it's remembered next time.
-    Diarize { id: String, num_speakers: u32 },
+    Diarize {
+        id: String,
+        num_speakers: u32,
+    },
     /// Re-transcribe a past session from its kept WAVs with the configured
     /// re-transcription model (Phase 25). Replaces existing segments; speaker
     /// labels are re-derived afterwards when the session had them.
@@ -352,7 +381,10 @@ pub enum DbCmd {
         name: String,
     },
     /// Save the host's free-form notes for a session (empty clears them).
-    SetNotes { id: String, notes: String },
+    SetNotes {
+        id: String,
+        notes: String,
+    },
     /// Load the most recently stored cross-meeting Overview (Phase 23).
     LoadOverview,
     /// Load the rolling project ledger (Phase 26) — no LLM, just reads.
@@ -360,19 +392,38 @@ pub enum DbCmd {
     /// Phase 26e manual edits to the ledger. Each re-emits the updated ledger.
     /// All hand edits set the `manual` flag so later auto-folds don't clobber them.
     /// Rename a project.
-    RenameProject { id: String, name: String },
+    RenameProject {
+        id: String,
+        name: String,
+    },
     /// Set a project's one-line description/state.
-    SetProjectDescription { id: String, description: String },
+    SetProjectDescription {
+        id: String,
+        description: String,
+    },
     /// Flip a project between active and archived.
-    SetProjectArchived { id: String, archived: bool },
+    SetProjectArchived {
+        id: String,
+        archived: bool,
+    },
     /// Delete a project and all its items.
     DeleteProject(String),
     /// Edit an item's text and/or owner (owner empty = clear).
-    EditItem { id: String, text: String, owner: String },
+    EditItem {
+        id: String,
+        text: String,
+        owner: String,
+    },
     /// Set an item's lifecycle status (open/blocked/waiting/done).
-    SetItemStatus { id: String, status: String },
+    SetItemStatus {
+        id: String,
+        status: String,
+    },
     /// Move an item to another project.
-    MoveItem { item_id: String, project_id: String },
+    MoveItem {
+        item_id: String,
+        project_id: String,
+    },
     /// Delete a single item.
     DeleteItem(String),
     /// Add a hand-written item to a project.
@@ -429,7 +480,10 @@ pub enum SummCmd {
     /// Answer a chat question grounded in a meeting / all meetings (Phase 23d).
     /// `turns` is the full conversation so far (incl. the new question last);
     /// each turn is `(is_user, text)`.
-    Chat { scope: ChatScope, turns: Vec<(bool, String)> },
+    Chat {
+        scope: ChatScope,
+        turns: Vec<(bool, String)>,
+    },
 }
 
 /// Registry of cancellable background jobs: job id → cooperative cancel flag.
@@ -446,7 +500,13 @@ pub struct Jobs {
 
 impl Jobs {
     /// Register a job and announce it; returns its cancel token.
-    fn begin(&self, ev: &UnboundedSender<Event>, id: &str, kind: &str, label: &str) -> Arc<AtomicBool> {
+    fn begin(
+        &self,
+        ev: &UnboundedSender<Event>,
+        id: &str,
+        kind: &str,
+        label: &str,
+    ) -> Arc<AtomicBool> {
         let token = Arc::new(AtomicBool::new(false));
         if let Ok(mut m) = self.tokens.lock() {
             m.insert(id.to_string(), token.clone());
@@ -503,6 +563,19 @@ impl Engine {
     }
 }
 
+/// Run `f`, catching any panic so the worker's death is *visible*: the
+/// process-wide hook (main.rs) has already written the panic to crash.log by
+/// the time this catches it — without this the UI just hangs in whatever busy
+/// state the dead worker left behind, with no indication anything went wrong.
+fn supervise(name: &str, ev: &UnboundedSender<Event>, f: impl FnOnce()) {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    if catch_unwind(AssertUnwindSafe(f)).is_err() {
+        let _ = ev.send(Event::Status(Status::Error(format!(
+            "internal error: the {name} worker crashed — details in logs/crash.log; restart the app to recover"
+        ))));
+    }
+}
+
 impl Engine {
     /// Spawn the control + db + model worker threads. Returns the handle and
     /// the event stream.
@@ -518,26 +591,43 @@ impl Engine {
         {
             let ev = ev_tx.clone();
             let dbp = db_path.clone();
-            thread::spawn(move || control_loop(rec_rx, ev, dbp));
+            thread::spawn(move || {
+                let sup = ev.clone();
+                supervise("recorder", &sup, move || control_loop(rec_rx, ev, dbp));
+            });
         }
         {
             let ev = ev_tx.clone();
             let dbp = db_path.clone();
             let jobs = jobs.clone();
-            thread::spawn(move || db_loop(db_rx, ev, dbp, jobs));
+            thread::spawn(move || {
+                let sup = ev.clone();
+                supervise("database", &sup, move || db_loop(db_rx, ev, dbp, jobs));
+            });
         }
         {
             let ev = ev_tx.clone();
-            thread::spawn(move || model_loop(model_rx, ev));
+            thread::spawn(move || {
+                let sup = ev.clone();
+                supervise("model", &sup, move || model_loop(model_rx, ev));
+            });
         }
         {
             let ev = ev_tx.clone();
             let jobs = jobs.clone();
-            thread::spawn(move || summarize_loop(summ_rx, ev, db_path, jobs));
+            thread::spawn(move || {
+                let sup = ev.clone();
+                supervise("summarize", &sup, move || {
+                    summarize_loop(summ_rx, ev, db_path, jobs)
+                });
+            });
         }
         {
             let ev = ev_tx;
-            thread::spawn(move || play_loop(play_rx, ev));
+            thread::spawn(move || {
+                let sup = ev.clone();
+                supervise("playback", &sup, move || play_loop(play_rx, ev));
+            });
         }
         (
             Engine {
@@ -555,7 +645,12 @@ impl Engine {
 
 /// Worker that generates session summaries (local LLM, heavy). Real impl only
 /// in `summaries` builds; otherwise it reports a friendly notice.
-fn summarize_loop(rx: mpsc::Receiver<SummCmd>, ev: UnboundedSender<Event>, db_path: PathBuf, jobs: Jobs) {
+fn summarize_loop(
+    rx: mpsc::Receiver<SummCmd>,
+    ev: UnboundedSender<Event>,
+    db_path: PathBuf,
+    jobs: Jobs,
+) {
     // A chat keeps its model resident across turns so follow-ups don't reload it.
     // One-shot jobs (summarize/compress/overview) load + drop their own model, so
     // we free the resident one first to keep peak RAM at a single model.
@@ -615,8 +710,7 @@ fn render_labeled_transcript(
     segs: &[Segment],
     names: &std::collections::HashMap<i32, String>,
 ) -> String {
-    segs
-        .iter()
+    segs.iter()
         .map(|s| format!("{}: {}", s.speaker_label(names), s.text))
         .collect::<Vec<_>>()
         .join("\n")
@@ -734,7 +828,12 @@ fn resolve_summary_model_path(
 
 /// Compress a session's transcript into dense prose and store it (Phase 23).
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf, token: &Arc<AtomicBool>) {
+fn compress_one(
+    session_id: &str,
+    ev: &UnboundedSender<Event>,
+    db_path: &PathBuf,
+    token: &Arc<AtomicBool>,
+) {
     let store = match Store::open(db_path) {
         Ok(s) => s,
         Err(e) => {
@@ -744,19 +843,29 @@ fn compress_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf
     };
     let segs = store.segments(session_id).unwrap_or_default();
     if segs.is_empty() {
-        let _ = ev.send(Event::Notice("Nothing to compress in this session.".to_string()));
+        let _ = ev.send(Event::Notice(
+            "Nothing to compress in this session.".to_string(),
+        ));
         return;
     }
     let names = store.speaker_names(session_id).unwrap_or_default();
     let transcript = with_notes(&store, session_id, render_labeled_transcript(&segs, &names));
 
     let settings = zord_config::Settings::load();
-    let _ = ev.send(Event::Notice("Preparing the LLM for compression…".to_string()));
+    let _ = ev.send(Event::Notice(
+        "Preparing the LLM for compression…".to_string(),
+    ));
     let Some(llm) = build_llm_backend(&settings, ev) else {
         return;
     };
-    let _ = ev.send(Event::Notice("Compressing… (runs in the background)".to_string()));
-    match llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
+    let _ = ev.send(Event::Notice(
+        "Compressing… (runs in the background)".to_string(),
+    ));
+    match llm.compress(
+        &transcript,
+        zord_config::compress_prompt(),
+        settings.compress_ctx,
+    ) {
         Ok(text) => {
             if cancelled(token) {
                 return; // cancelled mid-generation → discard (detach)
@@ -805,7 +914,12 @@ fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path, token: &
 /// sessions are applied. Progress is relayed as notices; the refreshed ledger is
 /// emitted as `Event::Ledger` (also on failure, so the UI reflects partial work).
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn fold_overview(ev: &UnboundedSender<Event>, db_path: &std::path::Path, rebuild: bool, token: &Arc<AtomicBool>) {
+fn fold_overview(
+    ev: &UnboundedSender<Event>,
+    db_path: &std::path::Path,
+    rebuild: bool,
+    token: &Arc<AtomicBool>,
+) {
     let settings = zord_config::Settings::load();
     let _ = ev.send(Event::Notice("Preparing the LLM…".to_string()));
     let Some(llm) = build_llm_backend(&settings, ev) else {
@@ -935,13 +1049,26 @@ fn chat_one(
         }
     };
 
-    let system = format!("{}\n\n=== Context ===\n{}", zord_config::chat_system_prompt(), context);
+    let system = format!(
+        "{}\n\n=== Context ===\n{}",
+        zord_config::chat_system_prompt(),
+        context
+    );
     // Error bubbles ("⚠️ Chat failed: …") are part of the visible conversation
     // but not real assistant output — don't feed them back to the model.
     let mapped: Vec<(ChatRole, String)> = turns
         .into_iter()
         .filter(|(is_user, t)| *is_user || !t.starts_with("⚠️"))
-        .map(|(is_user, t)| (if is_user { ChatRole::User } else { ChatRole::Assistant }, t))
+        .map(|(is_user, t)| {
+            (
+                if is_user {
+                    ChatRole::User
+                } else {
+                    ChatRole::Assistant
+                },
+                t,
+            )
+        })
         .collect();
     let _ = ev.send(Event::Notice("Thinking…".to_string()));
     // Stream the reply as it generates; the terminal ChatReply carries the full
@@ -960,7 +1087,10 @@ fn chat_one(
             let _ = ev.send(Event::ChatReply { scope, reply });
         }
         Err(e) => {
-            let _ = ev.send(Event::ChatReply { scope, reply: format!("⚠️ Chat failed: {e}") });
+            let _ = ev.send(Event::ChatReply {
+                scope,
+                reply: format!("⚠️ Chat failed: {e}"),
+            });
         }
     }
 }
@@ -977,7 +1107,9 @@ fn meeting_chat_context(
 ) -> Option<String> {
     let segs = store.segments(session_id).unwrap_or_default();
     if segs.is_empty() {
-        let _ = ev.send(Event::Notice("This session has no transcript to chat about.".to_string()));
+        let _ = ev.send(Event::Notice(
+            "This session has no transcript to chat about.".to_string(),
+        ));
         return None;
     }
     let names = store.speaker_names(session_id).unwrap_or_default();
@@ -985,7 +1117,10 @@ fn meeting_chat_context(
 
     // Reserve headroom (chat output + conversation + prompt) within the window.
     let budget = (settings.compress_ctx as usize).saturating_sub(1400);
-    let fits = llm.count_tokens(&transcript).map(|t| t < budget).unwrap_or(false);
+    let fits = llm
+        .count_tokens(&transcript)
+        .map(|t| t < budget)
+        .unwrap_or(false);
     if fits {
         return Some(format!("Meeting transcript:\n{transcript}"));
     }
@@ -996,8 +1131,14 @@ fn meeting_chat_context(
             return Some(format!("Meeting compression (dense):\n{c}"));
         }
     }
-    let _ = ev.send(Event::Notice("Long meeting — compressing it first to chat…".to_string()));
-    match llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx) {
+    let _ = ev.send(Event::Notice(
+        "Long meeting — compressing it first to chat…".to_string(),
+    ));
+    match llm.compress(
+        &transcript,
+        zord_config::compress_prompt(),
+        settings.compress_ctx,
+    ) {
         Ok(c) => {
             let _ = store.set_compressed(session_id, &c);
             let _ = ev.send(Event::Compressed(Some(c.clone())));
@@ -1011,7 +1152,12 @@ fn meeting_chat_context(
 }
 
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBuf, token: &Arc<AtomicBool>) {
+fn summarize_one(
+    session_id: &str,
+    ev: &UnboundedSender<Event>,
+    db_path: &PathBuf,
+    token: &Arc<AtomicBool>,
+) {
     let store = match Store::open(db_path) {
         Ok(s) => s,
         Err(e) => {
@@ -1021,7 +1167,9 @@ fn summarize_one(session_id: &str, ev: &UnboundedSender<Event>, db_path: &PathBu
     };
     let segs = store.segments(session_id).unwrap_or_default();
     if segs.is_empty() {
-        let _ = ev.send(Event::Notice("Nothing to summarize in this session.".to_string()));
+        let _ = ev.send(Event::Notice(
+            "Nothing to summarize in this session.".to_string(),
+        ));
         return;
     }
     // Label each line by its diarized speaker (and custom name, if assigned) so
@@ -1096,7 +1244,10 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                         let _ = ev.send(Event::DownloadFailed { name: name.clone() });
                     }
                     true
-                } else if zord_summarize::ollama_models().iter().any(|m| m.filename == name) {
+                } else if zord_summarize::ollama_models()
+                    .iter()
+                    .any(|m| m.filename == name)
+                {
                     if let Err(e) = zord_summarize::ensure_ollama_model(&name, &mut progress) {
                         tracing::warn!("Ollama download failed for {name}: {e}");
                         let _ = ev.send(Event::DownloadFailed { name: name.clone() });
@@ -1157,7 +1308,10 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
                     let settings = zord_config::Settings::load();
                     match zord_summarize::list_remote_models(&remote_cfg(&settings)) {
                         Ok(models) => {
-                            let _ = ev.send(Event::RemoteModels { models, error: None });
+                            let _ = ev.send(Event::RemoteModels {
+                                models,
+                                error: None,
+                            });
                         }
                         Err(e) => {
                             let _ = ev.send(Event::RemoteModels {
@@ -1180,7 +1334,11 @@ fn model_loop(rx: mpsc::Receiver<ModelCmd>, ev: UnboundedSender<Event>) {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    // unwrap_or_default: a pre-1970 system clock yields 0 instead of a panic.
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Emit the session list plus its per-session badge flags together, so the
@@ -1204,7 +1362,11 @@ fn load_overview(store: &Store) -> Option<OverviewData> {
         .flatten()
         .and_then(|(v, _)| v.parse().ok())
         .unwrap_or(0);
-    Some(OverviewData { text, generated_at, meetings })
+    Some(OverviewData {
+        text,
+        generated_at,
+        meetings,
+    })
 }
 
 /// Read the whole project ledger (Phase 26) into the GUI mirror types, plus the
@@ -1282,7 +1444,9 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 if let Ok(v) = store.segments(&id) {
                     let _ = ev.send(Event::Transcript(v));
                 }
-                let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
+                let _ = ev.send(Event::Speakers(
+                    store.speaker_names(&id).unwrap_or_default(),
+                ));
                 let _ = ev.send(Event::Summary(store.get_summary(&id).ok().flatten()));
                 let _ = ev.send(Event::Compressed(store.get_compressed(&id).ok().flatten()));
                 let _ = ev.send(Event::Notes(store.get_notes(&id).ok().flatten()));
@@ -1326,7 +1490,9 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             }
             DbCmd::RenameSpeaker { id, speaker, name } => {
                 let _ = store.set_speaker_name(&id, speaker, &name);
-                let _ = ev.send(Event::Speakers(store.speaker_names(&id).unwrap_or_default()));
+                let _ = ev.send(Event::Speakers(
+                    store.speaker_names(&id).unwrap_or_default(),
+                ));
             }
             DbCmd::LoadOverview => {
                 let data = load_overview(&store);
@@ -1386,7 +1552,10 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = store.set_item_manual(&id, true);
                 let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
             }
-            DbCmd::MoveItem { item_id, project_id } => {
+            DbCmd::MoveItem {
+                item_id,
+                project_id,
+            } => {
                 let _ = store.move_item(&item_id, &project_id, now_ms());
                 let _ = store.set_item_manual(&item_id, true);
                 let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
@@ -1395,7 +1564,12 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = store.delete_item(&id);
                 let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
             }
-            DbCmd::AddItem { project_id, kind, text, owner } => {
+            DbCmd::AddItem {
+                project_id,
+                kind,
+                text,
+                owner,
+            } => {
                 let now = now_ms();
                 let owner = owner.trim();
                 let item = zord_core::ProjectItem {
@@ -1426,7 +1600,9 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 thread::spawn(move || {
                     let jid = format!("diarize:{id}");
                     let token = jobs.begin(&ev, &jid, "diarize", "Identifying speakers");
-                    diarize_session_ondemand(&db_path, &id, num_speakers, &ev, &token);
+                    supervise("diarize", &ev, || {
+                        diarize_session_ondemand(&db_path, &id, num_speakers, &ev, &token)
+                    });
                     jobs.end(&ev, &jid);
                 });
             }
@@ -1438,7 +1614,9 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 thread::spawn(move || {
                     let jid = format!("retranscribe:{id}");
                     let token = jobs.begin(&ev, &jid, "retranscribe", "Re-transcribing meeting");
-                    retranscribe_session_ondemand(&db_path, &id, &ev, &token);
+                    supervise("retranscribe", &ev, || {
+                        retranscribe_session_ondemand(&db_path, &id, &ev, &token)
+                    });
                     jobs.end(&ev, &jid);
                 });
             }
@@ -1491,7 +1669,12 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
             }
         };
         match cmd {
-            Some(PlayCmd::Play { segment_id, wav, start_ms, end_ms }) => {
+            Some(PlayCmd::Play {
+                segment_id,
+                wav,
+                start_ms,
+                end_ms,
+            }) => {
                 if let Some(s) = sink.take() {
                     s.stop();
                 }
@@ -1500,7 +1683,9 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                     output = rodio::DeviceSinkBuilder::open_default_sink().ok();
                 }
                 let Some(device) = output.as_ref() else {
-                    let _ = ev.send(Event::Notice("No audio output device available.".to_string()));
+                    let _ = ev.send(Event::Notice(
+                        "No audio output device available.".to_string(),
+                    ));
                     let _ = ev.send(Event::Playing(None));
                     continue;
                 };
@@ -1512,7 +1697,9 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 let (samples, rate) =
                     zord_audio::read_wav_slice_ms(&wav, start_ms, end_ms).unwrap_or_default();
                 if samples.is_empty() {
-                    let _ = ev.send(Event::Notice("Couldn't read this line's audio.".to_string()));
+                    let _ = ev.send(Event::Notice(
+                        "Couldn't read this line's audio.".to_string(),
+                    ));
                     let _ = ev.send(Event::Playing(None));
                     continue;
                 }
@@ -1735,7 +1922,12 @@ fn apply_diarization(
         let Some(id) = seg.id else { continue };
         let best = spans
             .iter()
-            .map(|sp| (sp.speaker, overlap_ms(seg.t_start_ms, seg.t_end_ms, sp.start_ms, sp.end_ms)))
+            .map(|sp| {
+                (
+                    sp.speaker,
+                    overlap_ms(seg.t_start_ms, seg.t_end_ms, sp.start_ms, sp.end_ms),
+                )
+            })
             .filter(|(_, ov)| *ov > 0)
             .max_by_key(|(_, ov)| *ov);
         if let Some((speaker, _)) = best {
@@ -1761,7 +1953,9 @@ fn apply_diarization(
     if let Ok(v) = store.segments(session_id) {
         let _ = ev.send(Event::Transcript(v));
     }
-    let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
+    let _ = ev.send(Event::Speakers(
+        store.speaker_names(session_id).unwrap_or_default(),
+    ));
     let _ = ev.send(Event::Notice(format!(
         "Identified {} speaker(s) in this conversation.",
         speakers.len()
@@ -1777,11 +1971,7 @@ fn overlap_ms(a0: u64, a1: u64, b0: u64, b1: u64) -> u64 {
 }
 
 /// Render a session and write it to the app data `exports/` directory.
-fn export_session(
-    store: &Store,
-    id: &str,
-    format: zord_export::Format,
-) -> anyhow::Result<String> {
+fn export_session(store: &Store, id: &str, format: zord_export::Format) -> anyhow::Result<String> {
     let session = store
         .get_session(id)?
         .ok_or_else(|| anyhow::anyhow!("no such session"))?;
@@ -1858,9 +2048,9 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 }
             }
             RecorderCmd::Shutdown => break,
-            RecorderCmd::Stop => {}               // nothing recording
-            RecorderCmd::SetMicMuted(_) => {}     // nothing recording
-            RecorderCmd::SetSystemMuted(_) => {}  // nothing recording
+            RecorderCmd::Stop => {}              // nothing recording
+            RecorderCmd::SetMicMuted(_) => {}    // nothing recording
+            RecorderCmd::SetSystemMuted(_) => {} // nothing recording
         }
     }
 }
@@ -2009,13 +2199,12 @@ fn run_session(
 
     // Write the Others WAV if anything needs it: kept audio, the auto pass,
     // retention for later re-diarization, or a capture-only recording.
-    let others_wav: Option<PathBuf> =
-        if record_system && (keep_audio || diarize_auto || !live) {
-            let _ = std::fs::create_dir_all(&session_dir);
-            Some(zord_config::track_path(&session_dir, "others"))
-        } else {
-            None
-        };
+    let others_wav: Option<PathBuf> = if record_system && (keep_audio || diarize_auto || !live) {
+        let _ = std::fs::create_dir_all(&session_dir);
+        Some(zord_config::track_path(&session_dir, "others"))
+    } else {
+        None
+    };
 
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
@@ -2035,9 +2224,23 @@ fn run_session(
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
         match Microphone::start_with(mic_tx, input_device.as_deref()) {
             Ok(m) => {
-                let mic_level = zord_audio::LevelControl::new(
-                    zord_audio::LevelMode::parse(&settings.mic_level_mode, settings.mic_gain_db));
-                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, None, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone()), mic_level, stopping.clone()));
+                let mic_level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
+                    &settings.mic_level_mode,
+                    settings.mic_gain_db,
+                ));
+                procs.push(spawn_proc(
+                    mic_rx,
+                    m.sample_rate(),
+                    Source::Me,
+                    None,
+                    session_start,
+                    job_tx.clone(),
+                    ev.clone(),
+                    wav_path("me"),
+                    Some(mic_muted.clone()),
+                    mic_level,
+                    stopping.clone(),
+                ));
                 Some(m)
             }
             Err(e) => {
@@ -2054,9 +2257,23 @@ fn run_session(
         let (sys_tx, sys_rx) = mpsc::channel::<Vec<f32>>();
         match SystemAudio::start(sys_tx) {
             Ok(s) => {
-                let sys_level = zord_audio::LevelControl::new(
-                    zord_audio::LevelMode::parse(&settings.others_level_mode, settings.others_gain_db));
-                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, None, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), Some(sys_muted.clone()), sys_level, stopping.clone()));
+                let sys_level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
+                    &settings.others_level_mode,
+                    settings.others_gain_db,
+                ));
+                procs.push(spawn_proc(
+                    sys_rx,
+                    s.sample_rate(),
+                    Source::Others,
+                    None,
+                    session_start,
+                    job_tx.clone(),
+                    ev.clone(),
+                    others_wav.clone(),
+                    Some(sys_muted.clone()),
+                    sys_level,
+                    stopping.clone(),
+                ));
                 Some(s)
             }
             Err(e) => {
@@ -2156,11 +2373,17 @@ fn run_session(
     stopping.store(true, Ordering::Relaxed);
     drop(mic);
     drop(system);
+    let mut crashed = false;
     for p in procs {
-        let _ = p.join();
+        crashed |= p.join().is_err();
     }
     if let Some(t) = transcribe {
-        let _ = t.join();
+        crashed |= t.join().is_err();
+    }
+    if crashed {
+        let _ = ev.send(Event::Notice(
+            "a recording worker crashed during this session — parts of the audio or transcript may be missing (details in logs/crash.log)".into(),
+        ));
     }
     let _ = store.end_session(&session_id, now_ms());
     tracing::info!("control: recording torn down");
@@ -2336,8 +2559,12 @@ fn run_integration_session(
     let it_job_tx = job_tx.clone();
     let integration_thread = {
         let (stopping, ended, ev) = (stopping.clone(), ended.clone(), ev.clone());
-        let (session_id, db_path, session_dir, procs) =
-            (session_id.clone(), db_path.clone(), session_dir.clone(), procs.clone());
+        let (session_id, db_path, session_dir, procs) = (
+            session_id.clone(),
+            db_path.clone(),
+            session_dir.clone(),
+            procs.clone(),
+        );
         let (others_mode, others_gain) =
             (settings.others_level_mode.clone(), settings.others_gain_db);
         let (discord_token, discord_user, force_fake) = (
@@ -2351,10 +2578,15 @@ fn run_integration_session(
             let announce = |idx: i32, name: &str| {
                 if let Some(s) = store.as_ref() {
                     let _ = s.set_speaker_name(&session_id, idx, name);
-                    let _ = ev.send(Event::Speakers(s.speaker_names(&session_id).unwrap_or_default()));
+                    let _ = ev.send(Event::Speakers(
+                        s.speaker_names(&session_id).unwrap_or_default(),
+                    ));
                 }
             };
-            let on_join = |role: zord_integrations::TrackRole, name: String, sample_rate: u32, audio: zord_integrations::AudioStream| {
+            let on_join = |role: zord_integrations::TrackRole,
+                           name: String,
+                           sample_rate: u32,
+                           audio: zord_integrations::AudioStream| {
                 // The followed user → "Me"; everyone else → an Others speaker.
                 let (source, speaker, track) = match role {
                     zord_integrations::TrackRole::Me => (Source::Me, None, "me".to_string()),
@@ -2369,8 +2601,17 @@ fn run_integration_session(
                 ));
                 let wav = Some(zord_config::track_path(&session_dir, &track));
                 let h = spawn_proc(
-                    audio, sample_rate, source, speaker, session_start,
-                    it_job_tx.clone(), ev.clone(), wav, None, level, stopping.clone(),
+                    audio,
+                    sample_rate,
+                    source,
+                    speaker,
+                    session_start,
+                    it_job_tx.clone(),
+                    ev.clone(),
+                    wav,
+                    None,
+                    level,
+                    stopping.clone(),
                 );
                 if let Ok(mut p) = procs.lock() {
                     p.push(h);
@@ -2381,7 +2622,8 @@ fn run_integration_session(
                     announce(idx, &name);
                 }
             };
-            match zord_integrations::drive_session(provider.as_mut(), &stopping, on_join, on_rename) {
+            match zord_integrations::drive_session(provider.as_mut(), &stopping, on_join, on_rename)
+            {
                 Ok(reason) => tracing::info!("integration session ended: {reason:?}"),
                 Err(e) => {
                     let _ = ev.send(Event::Notice(format!("integration error: {e}")));
@@ -2412,19 +2654,26 @@ fn run_integration_session(
     }
 
     stopping.store(true, Ordering::Relaxed);
-    let _ = integration_thread.join();
+    let mut crashed = integration_thread.join().is_err();
     if let Ok(mut p) = procs.lock() {
         for h in p.drain(..) {
-            let _ = h.join();
+            crashed |= h.join().is_err();
         }
     }
     if let Some(t) = transcribe {
-        let _ = t.join();
+        crashed |= t.join().is_err();
+    }
+    if crashed {
+        let _ = ev.send(Event::Notice(
+            "a recording worker crashed during this session — parts of the audio or transcript may be missing (details in logs/crash.log)".into(),
+        ));
     }
     let _ = store.end_session(&session_id, now_ms());
     // Integration sessions carry ground-truth speakers → no diarization pass.
     let _ = ev.send(Event::Status(Status::Idle));
-    let _ = ev.send(Event::Speakers(store.speaker_names(&session_id).unwrap_or_default()));
+    let _ = ev.send(Event::Speakers(
+        store.speaker_names(&session_id).unwrap_or_default(),
+    ));
     emit_sessions(&store, ev);
     tracing::info!("control: integration session torn down");
     shutdown
@@ -2501,19 +2750,34 @@ fn retranscribe_session_ondemand(
         .unwrap_or(false);
     // A deferred capture-only session has no segments yet — its *first*
     // transcription should honor the diarize-auto setting like a normal stop.
-    let first_transcription = store.segments(session_id).map(|v| v.is_empty()).unwrap_or(false);
+    let first_transcription = store
+        .segments(session_id)
+        .map(|v| v.is_empty())
+        .unwrap_or(false);
 
-    let ok = post_transcribe_session(&store, session_id, std::path::Path::new(&prefix), ev, Some(token));
+    let ok = post_transcribe_session(
+        &store,
+        session_id,
+        std::path::Path::new(&prefix),
+        ev,
+        Some(token),
+    );
     // Segments were replaced — any custom speaker labels were on the old rows.
-    let _ = ev.send(Event::Speakers(store.speaker_names(session_id).unwrap_or_default()));
+    let _ = ev.send(Event::Speakers(
+        store.speaker_names(session_id).unwrap_or_default(),
+    ));
 
-    let want_diarize = had_speakers
-        || (first_transcription && zord_config::Settings::load().diarize_auto);
+    let want_diarize =
+        had_speakers || (first_transcription && zord_config::Settings::load().diarize_auto);
     if ok && want_diarize && !cancelled(token) && cfg!(feature = "diarization") {
         let _ = ev.send(Event::Notice(
             "Re-identifying speakers on the new transcript…".to_string(),
         ));
-        let pinned = store.get_diarize_speakers(session_id).ok().flatten().unwrap_or(0);
+        let pinned = store
+            .get_diarize_speakers(session_id)
+            .ok()
+            .flatten()
+            .unwrap_or(0);
         diarize_session_ondemand(db_path, session_id, pinned, ev, token);
     }
     done(ev)
@@ -2548,8 +2812,7 @@ fn post_transcribe_inner(
     token: Option<&Arc<AtomicBool>>,
 ) -> bool {
     let settings = zord_config::Settings::load();
-    let model = ModelId::parse(&settings.retranscribe_model)
-        .unwrap_or(ModelId::LargeV3TurboQ5);
+    let model = ModelId::parse(&settings.retranscribe_model).unwrap_or(ModelId::LargeV3TurboQ5);
     let _ = ev.send(Event::Notice(format!(
         "Transcribing with {}… (first run downloads the model)",
         model.name()
@@ -2597,7 +2860,13 @@ fn post_transcribe_inner(
         };
         // `cancel` also stops the decode loop within ~1s (Phase C) — not just
         // persistence — so a cancelled re-transcribe frees the CPU promptly.
-        match zord_transcribe::transcribe_wav_file(&transcriber, source, &wav, &mut on_segment, &cancel) {
+        match zord_transcribe::transcribe_wav_file(
+            &transcriber,
+            source,
+            &wav,
+            &mut on_segment,
+            &cancel,
+        ) {
             Ok(n) => total += n,
             Err(e) => {
                 let _ = ev.send(Event::Notice(format!("transcribing {suffix}: {e}")));
@@ -2657,7 +2926,11 @@ fn smooth_level(rms: f32, n: usize, sample_rate: u32, mut level: f32) -> f32 {
     let db = 20.0 * rms.max(1e-6).log10();
     let target = ((db - LEVEL_FLOOR_DB) / -LEVEL_FLOOR_DB).clamp(0.0, 1.0);
     let dt = n as f32 / sample_rate.max(1) as f32; // seconds this buffer spans (mono)
-    let tau = if target > level { LEVEL_ATTACK_S } else { LEVEL_RELEASE_S };
+    let tau = if target > level {
+        LEVEL_ATTACK_S
+    } else {
+        LEVEL_RELEASE_S
+    };
     let alpha = 1.0 - (-dt / tau).exp();
     level += (target - level) * alpha;
     level
@@ -2687,7 +2960,19 @@ fn spawn_proc(
         };
         let mut segmenter = Segmenter::new(SegmenterConfig::default());
         // The stored track keeps the device's native rate (Phase 25d).
-        let mut wav = wav_path.and_then(|p| WavWriter::create(p, sample_rate).ok());
+        let mut wav = match wav_path {
+            Some(p) => match WavWriter::create(&p, sample_rate) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!(
+                        "couldn't create the {} audio file: {e} — recording continues without saved audio",
+                        source.as_str()
+                    )));
+                    None
+                }
+            },
+            None => None,
+        };
         // Wall-clock-aligned mono sample count emitted so far. Capture sources
         // (notably WASAPI loopback) deliver no samples during silence, so a raw
         // running count drifts behind real time; we pad the gaps with silence so
@@ -2770,7 +3055,15 @@ fn spawn_proc(
             let out: Vec<f32> = pad_to_wallclock(session_start, produced, frame, sample_rate);
             produced += out.len() as u64;
             if let Some(w) = wav.as_mut() {
-                let _ = w.write(&out);
+                if let Err(e) = w.write(&out) {
+                    // Disk full / IO error: notify once and stop writing rather
+                    // than failing silently on every buffer.
+                    let _ = ev.send(Event::Notice(format!(
+                        "writing the {} audio file failed: {e} — audio saving stopped (transcription continues)",
+                        source.as_str()
+                    )));
+                    wav = None;
+                }
             }
 
             // Models always consume 16 kHz — derived here on the fly, never stored.
@@ -2781,14 +3074,27 @@ fn spawn_proc(
             // Timestamps are wall-clock (the input stream is padded to real time;
             // the resampler adds only ~tens of ms of buffering latency).
             for seg in segmenter.push(&mono) {
-                let _ = job_tx.send(Job { source, speaker, vad: seg });
+                let _ = job_tx.send(Job {
+                    source,
+                    speaker,
+                    vad: seg,
+                });
             }
         }
         if let Some(seg) = segmenter.flush() {
-            let _ = job_tx.send(Job { source, speaker, vad: seg });
+            let _ = job_tx.send(Job {
+                source,
+                speaker,
+                vad: seg,
+            });
         }
         if let Some(w) = wav {
-            let _ = w.finalize();
+            if let Err(e) = w.finalize() {
+                let _ = ev.send(Event::Notice(format!(
+                    "finalizing the {} audio file failed: {e} — the saved track may be unreadable",
+                    source.as_str()
+                )));
+            }
         }
     })
 }

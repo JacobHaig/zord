@@ -17,7 +17,11 @@ pub struct GenOpts {
 impl GenOpts {
     /// Notes summary: small context, short output (legacy defaults).
     pub fn summary() -> Self {
-        Self { n_ctx: 8192, max_new_tokens: 640, max_transcript_chars: 16_000 }
+        Self {
+            n_ctx: 8192,
+            max_new_tokens: 640,
+            max_transcript_chars: 16_000,
+        }
     }
 
     /// Dense-prose compression (Phase 23): a large, configurable context so a

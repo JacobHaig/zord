@@ -27,8 +27,8 @@ use serenity::http::Http;
 use songbird::driver::{DecodeConfig, DecodeMode};
 use songbird::model::payload::Speaking;
 use songbird::{
-    Config, CoreEvent, Event as SongbirdEvent, EventContext,
-    EventHandler as VoiceEventHandler, SerenityInit,
+    Config, CoreEvent, Event as SongbirdEvent, EventContext, EventHandler as VoiceEventHandler,
+    SerenityInit,
 };
 
 use crate::integration::{Integration, IntegrationEvent, Participant};
@@ -175,7 +175,8 @@ impl Bot {
         };
         match manager.join(guild, channel).await {
             Ok(call) => {
-                let recv = VoiceReceiver::new(self.follow, self.ev_tx.clone(), ctx.http.clone(), guild);
+                let recv =
+                    VoiceReceiver::new(self.follow, self.ev_tx.clone(), ctx.http.clone(), guild);
                 let mut call = call.lock().await;
                 call.add_global_event(CoreEvent::SpeakingStateUpdate.into(), recv.clone());
                 call.add_global_event(CoreEvent::VoiceTick.into(), recv.clone());
@@ -206,7 +207,10 @@ impl EventHandler for Bot {
         if let Some((g, c)) = target {
             self.try_join(&ctx, g, c).await;
         } else {
-            tracing::info!("discord: waiting for user {} to join a voice channel", self.follow);
+            tracing::info!(
+                "discord: waiting for user {} to join a voice channel",
+                self.follow
+            );
         }
     }
 

@@ -48,8 +48,7 @@ impl MonoResampler {
         // FixedAsync::Input keeps the fixed-input-size behavior the streaming
         // loop relies on (input_frames_next() is constant) — rubato 3.0's
         // replacement for the old SincFixedIn.
-        let resampler =
-            Async::<f32>::new_sinc(ratio, 2.0, &params, chunk, 1, FixedAsync::Input)?;
+        let resampler = Async::<f32>::new_sinc(ratio, 2.0, &params, chunk, 1, FixedAsync::Input)?;
 
         Ok(Self {
             channels,
@@ -86,11 +85,11 @@ impl MonoResampler {
             // borrows the scratch buffer (copied out after).
             let input = InterleavedSlice::new(&self.pending[..needed], 1, needed)
                 .map_err(|e| anyhow::anyhow!("resample input buffer: {e:?}"))?;
-            let mut output = InterleavedSlice::new_mut(&mut self.out_buf[..frames_out], 1, frames_out)
-                .map_err(|e| anyhow::anyhow!("resample output buffer: {e:?}"))?;
-            let (_in_used, out_used) =
-                resampler.process_into_buffer(&input, &mut output, None)?;
-            drop(output);
+            let mut output =
+                InterleavedSlice::new_mut(&mut self.out_buf[..frames_out], 1, frames_out)
+                    .map_err(|e| anyhow::anyhow!("resample output buffer: {e:?}"))?;
+            let (_in_used, out_used) = resampler.process_into_buffer(&input, &mut output, None)?;
+            // `output`'s borrow of `out_buf` ends here (NLL), freeing it to be read.
             out.extend_from_slice(&self.out_buf[..out_used]);
             self.pending.drain(..needed);
         }
@@ -147,7 +146,10 @@ mod tests {
             "got {} samples, expected ~{expected}",
             out.len()
         );
-        assert!(out.iter().all(|s| s.is_finite()), "non-finite samples produced");
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "non-finite samples produced"
+        );
         assert!(out.iter().any(|&s| s.abs() > 0.05), "output is silent");
     }
 }

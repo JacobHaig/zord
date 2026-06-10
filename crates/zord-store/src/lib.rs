@@ -49,7 +49,9 @@ fn apply_key(conn: &Connection) -> Result<()> {
     if let Some(key) = current_key() {
         conn.pragma_update(None, "key", &key)?;
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-            .map_err(|_| anyhow::anyhow!("could not open encrypted database (wrong passphrase?)"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("could not open encrypted database (wrong passphrase?)")
+            })?;
     }
     Ok(())
 }
@@ -71,6 +73,9 @@ impl Store {
         apply_key(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Concurrent writers (GUI db thread + CLI/web) otherwise get an
+        // immediate SQLITE_BUSY instead of waiting their turn.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -131,7 +136,9 @@ impl Store {
 
     /// Fetch a session's host notes, if any.
     pub fn get_notes(&self, session_id: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT notes FROM sessions WHERE id = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT notes FROM sessions WHERE id = ?1")?;
         let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, Option<String>>(0))?;
         Ok(rows.next().transpose()?.flatten())
     }
@@ -285,7 +292,8 @@ impl Store {
     }
 
     pub fn delete_project(&self, id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM projects WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -297,9 +305,18 @@ impl Store {
                  updated_session, completed_session, created_at, updated_at, manual)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                it.id, it.project_id, it.kind.as_str(), it.text, it.owner, it.status.as_str(),
-                it.created_session, it.updated_session, it.completed_session,
-                i64v(it.created_at), i64v(it.updated_at), it.manual as i64,
+                it.id,
+                it.project_id,
+                it.kind.as_str(),
+                it.text,
+                it.owner,
+                it.status.as_str(),
+                it.created_session,
+                it.updated_session,
+                it.completed_session,
+                i64v(it.created_at),
+                i64v(it.updated_at),
+                it.manual as i64,
             ],
         )?;
         Ok(())
@@ -332,12 +349,24 @@ impl Store {
             "UPDATE project_items
              SET status = ?2, updated_session = ?3, completed_session = ?4, updated_at = ?5
              WHERE id = ?1",
-            params![id, status.as_str(), updated_session, completed_session, i64v(now)],
+            params![
+                id,
+                status.as_str(),
+                updated_session,
+                completed_session,
+                i64v(now)
+            ],
         )?;
         Ok(())
     }
 
-    pub fn update_item_text(&self, id: &str, text: &str, owner: Option<&str>, now: u64) -> Result<()> {
+    pub fn update_item_text(
+        &self,
+        id: &str,
+        text: &str,
+        owner: Option<&str>,
+        now: u64,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE project_items SET text = ?2, owner = ?3, updated_at = ?4 WHERE id = ?1",
             params![id, text, owner, i64v(now)],
@@ -364,12 +393,18 @@ impl Store {
     }
 
     pub fn delete_item(&self, id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM project_items WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM project_items WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     /// Record that a session has been folded into the ledger (with its extract).
-    pub fn mark_session_applied(&self, session_id: &str, extract: Option<&str>, now: u64) -> Result<()> {
+    pub fn mark_session_applied(
+        &self,
+        session_id: &str,
+        extract: Option<&str>,
+        now: u64,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO session_overview_state (session_id, applied_at, extract)
              VALUES (?1, ?2, ?3)
@@ -401,10 +436,12 @@ impl Store {
     /// destructive reset behind "Build from history". Drops manual edits.
     pub fn clear_ledger(&self) -> Result<()> {
         self.conn.execute_batch(
-            "DELETE FROM project_history;
+            "BEGIN;
+             DELETE FROM project_history;
              DELETE FROM project_items;
              DELETE FROM projects;
-             DELETE FROM session_overview_state;",
+             DELETE FROM session_overview_state;
+             COMMIT;",
         )?;
         Ok(())
     }
@@ -444,8 +481,10 @@ impl Store {
 
     /// Remove all segments for a session (used before re-transcribing).
     pub fn clear_segments(&self, session_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM segments WHERE session_id = ?1", params![session_id])?;
+        self.conn.execute(
+            "DELETE FROM segments WHERE session_id = ?1",
+            params![session_id],
+        )?;
         Ok(())
     }
 
@@ -461,9 +500,10 @@ impl Store {
     /// Delete a session and its transcript. Clears segments first so the FTS
     /// index is kept consistent (FK cascade doesn't fire triggers by default).
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        self.clear_segments(id)?;
-        self.conn
-            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM segments WHERE session_id = ?1", params![id])?;
+        tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -567,8 +607,10 @@ impl Store {
 
     /// Edit a segment's text in place (FTS stays in sync via the UPDATE trigger).
     pub fn update_segment_text(&self, id: i64, text: &str) -> Result<()> {
-        self.conn
-            .execute("UPDATE segments SET text = ?2 WHERE id = ?1", params![id, text])?;
+        self.conn.execute(
+            "UPDATE segments SET text = ?2 WHERE id = ?1",
+            params![id, text],
+        )?;
         Ok(())
     }
 
@@ -584,14 +626,16 @@ impl Store {
     /// Clear all speaker assignments for a session (used before re-diarizing).
     /// Also drops any custom speaker names so stale labels don't linger.
     pub fn clear_speakers(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE segments SET speaker = NULL WHERE session_id = ?1",
             params![session_id],
         )?;
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM speaker_names WHERE session_id = ?1",
             params![session_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -627,7 +671,11 @@ impl Store {
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                (r.get::<_, bool>(1)?, r.get::<_, bool>(2)?, r.get::<_, bool>(3)?),
+                (
+                    r.get::<_, bool>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, bool>(3)?,
+                ),
             ))
         })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
@@ -657,7 +705,10 @@ fn add_late_columns(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE segments ADD COLUMN speaker INTEGER", []);
     // Per-session expected speaker count for diarization (NULL = auto-detect),
     // set from the control next to "Identify speakers".
-    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN diarize_speakers INTEGER", []);
+    let _ = conn.execute(
+        "ALTER TABLE sessions ADD COLUMN diarize_speakers INTEGER",
+        [],
+    );
     // Free-form per-session notes written by the host (links, action items,
     // reminders). Searchable, and fed to the AI features as authoritative input.
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN notes TEXT", []);
@@ -1047,7 +1098,8 @@ mod ledger_tests {
         mk_session(&s, "s2", 20);
 
         assert!(s.get_notes("s1").unwrap().is_none());
-        s.set_notes("s1", "Follow up: https://example.com/spec — 50% done").unwrap();
+        s.set_notes("s1", "Follow up: https://example.com/spec — 50% done")
+            .unwrap();
         s.set_notes("s2", "  ").unwrap(); // whitespace clears
         assert_eq!(
             s.get_notes("s1").unwrap().as_deref(),
@@ -1113,21 +1165,16 @@ mod ledger_tests {
         assert!(items[0].status.is_active());
 
         // Transition to done with provenance.
-        s.update_item_status(
-            "i1",
-            ItemStatus::Done,
-            Some("sess-b"),
-            Some("sess-b"),
-            200,
-        )
-        .unwrap();
+        s.update_item_status("i1", ItemStatus::Done, Some("sess-b"), Some("sess-b"), 200)
+            .unwrap();
         let it = s.get_item("i1").unwrap().unwrap();
         assert_eq!(it.status, ItemStatus::Done);
         assert_eq!(it.completed_session.as_deref(), Some("sess-b"));
         assert!(!it.status.is_active());
 
         // Manual edit protection flag.
-        s.update_item_text("i1", "Write the adapter (done)", None, 210).unwrap();
+        s.update_item_text("i1", "Write the adapter (done)", None, 210)
+            .unwrap();
         s.set_item_manual("i1", true).unwrap();
         assert!(s.get_item("i1").unwrap().unwrap().manual);
 
@@ -1169,7 +1216,8 @@ mod ledger_tests {
         assert_eq!(s.unapplied_sessions().unwrap().len(), 3);
         assert!(!s.is_session_applied("s2").unwrap());
 
-        s.mark_session_applied("s2", Some("{\"items\":[]}"), 25).unwrap();
+        s.mark_session_applied("s2", Some("{\"items\":[]}"), 25)
+            .unwrap();
         assert!(s.is_session_applied("s2").unwrap());
 
         let pending = s.unapplied_sessions().unwrap();
@@ -1219,7 +1267,8 @@ mod ledger_tests {
             manual: false,
         })
         .unwrap();
-        s.log_history("p1", Some("i1"), "added", Some("s1"), 1).unwrap();
+        s.log_history("p1", Some("i1"), "added", Some("s1"), 1)
+            .unwrap();
         s.mark_session_applied("s1", None, 1).unwrap();
 
         s.clear_ledger().unwrap();

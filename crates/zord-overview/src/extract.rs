@@ -83,7 +83,11 @@ pub fn extract_session(
 ) -> anyhow::Result<SessionExtract> {
     use zord_summarize::GenOpts;
     let user = format!("Meeting:\n\n{transcript}");
-    let raw = llm.generate(&user, zord_config::extract_prompt(), GenOpts::overview(n_ctx))?;
+    let raw = llm.generate(
+        &user,
+        zord_config::extract_prompt(),
+        GenOpts::overview(n_ctx),
+    )?;
     Ok(parse_extract(&raw))
 }
 
@@ -92,7 +96,10 @@ pub fn extract_session(
 /// a malformed extract should not abort a whole fold run.
 pub fn parse_extract(raw: &str) -> SessionExtract {
     let Some(json) = first_json_object(raw) else {
-        tracing::warn!("extract: no JSON object in model reply ({} bytes)", raw.len());
+        tracing::warn!(
+            "extract: no JSON object in model reply ({} bytes)",
+            raw.len()
+        );
         return SessionExtract::default();
     };
     match serde_json::from_str::<SessionExtract>(json) {
@@ -116,11 +123,9 @@ fn sanitize(mut ex: SessionExtract) -> SessionExtract {
         it.project = it.project.trim().to_string();
         it.text = it.text.trim().to_string();
         it.kind = normalize_kind(&it.kind);
-        it.owner = it
-            .owner
-            .take()
-            .map(|o| o.trim().to_string())
-            .filter(|o| !o.is_empty() && !o.eq_ignore_ascii_case("null") && !o.eq_ignore_ascii_case("unknown"));
+        it.owner = it.owner.take().map(|o| o.trim().to_string()).filter(|o| {
+            !o.is_empty() && !o.eq_ignore_ascii_case("null") && !o.eq_ignore_ascii_case("unknown")
+        });
         !it.text.is_empty()
     });
     ex.resolved.retain_mut(|r| {

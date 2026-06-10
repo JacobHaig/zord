@@ -156,12 +156,19 @@ mod tests {
         let mut streams = Vec::new();
         for _ in 0..2 {
             match rx.recv_timeout(timeout).unwrap() {
-                IntegrationEvent::ParticipantJoined { participant, sample_rate, audio } => {
+                IntegrationEvent::ParticipantJoined {
+                    participant,
+                    sample_rate,
+                    audio,
+                } => {
                     assert_eq!(sample_rate, 48_000);
                     joined.push(participant.key);
                     streams.push(audio);
                 }
-                other => panic!("expected ParticipantJoined, got something else: {}", label(&other)),
+                other => panic!(
+                    "expected ParticipantJoined, got something else: {}",
+                    label(&other)
+                ),
             }
         }
         joined.sort();
@@ -171,12 +178,18 @@ mod tests {
         for s in &streams {
             let frame = s.recv_timeout(timeout).expect("a frame");
             assert!(!frame.is_empty());
-            assert!(frame.iter().any(|&x| x.abs() > 0.0), "frame should carry signal");
+            assert!(
+                frame.iter().any(|&x| x.abs() > 0.0),
+                "frame should carry signal"
+            );
         }
 
         // The session eventually ends.
         loop {
-            match rx.recv_timeout(timeout).expect("more events before timeout") {
+            match rx
+                .recv_timeout(timeout)
+                .expect("more events before timeout")
+            {
                 IntegrationEvent::Ended { .. } => break,
                 _ => continue,
             }

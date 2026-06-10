@@ -177,7 +177,11 @@ fn main() -> Result<()> {
         Cmd::Decrypt { db } => cmd_decrypt(db),
         Cmd::Summarize { session_id, db } => cmd_summarize(&session_id, db),
         Cmd::Compress { session_id, db } => cmd_compress(&session_id, db),
-        Cmd::Overview { refresh, rebuild, db } => cmd_overview(refresh, rebuild, db),
+        Cmd::Overview {
+            refresh,
+            rebuild,
+            db,
+        } => cmd_overview(refresh, rebuild, db),
         Cmd::Diarize { session_id, db } => cmd_diarize(&session_id, db),
     }
 }
@@ -216,24 +220,33 @@ fn build_llm_backend(settings: &zord_config::Settings) -> Result<zord_summarize:
                 "Using external LLM '{}' at {}…",
                 settings.llm_model, settings.llm_base_url
             );
-            return Ok(zord_summarize::LlmBackend::remote(zord_summarize::RemoteConfig {
-                base_url: settings.llm_base_url.clone(),
-                api_key: settings.llm_api_key.clone(),
-                model: settings.llm_model.clone(),
-                timeout_secs: settings.llm_timeout_secs,
-            }));
+            return Ok(zord_summarize::LlmBackend::remote(
+                zord_summarize::RemoteConfig {
+                    base_url: settings.llm_base_url.clone(),
+                    api_key: settings.llm_api_key.clone(),
+                    model: settings.llm_model.clone(),
+                    timeout_secs: settings.llm_timeout_secs,
+                },
+            ));
         }
     }
     #[cfg(feature = "llm-local")]
     {
         if settings.llm_backend == "external" && cfg!(not(feature = "llm-remote")) {
-            eprintln!("(external LLM support isn't built into this binary — using the local model)");
+            eprintln!(
+                "(external LLM support isn't built into this binary — using the local model)"
+            );
         }
-        let model_path = if let Some(model) = zord_summarize::SummaryModel::parse(&settings.summary_model) {
+        let model_path = if let Some(model) =
+            zord_summarize::SummaryModel::parse(&settings.summary_model)
+        {
             eprintln!("Preparing summary model '{}'…", model.name());
             zord_summarize::ensure_summary_model(model, &mut |done, total| {
                 if let Some(total) = total {
-                    eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
+                    eprint!(
+                        "\r  downloading: {:.1}%   ",
+                        done as f64 / total as f64 * 100.0
+                    );
                 }
             })?
         } else if let Some(p) = zord_summarize::custom_model_path(&settings.summary_model) {
@@ -325,8 +338,11 @@ fn cmd_compress(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     let settings = zord_config::Settings::load();
     let llm = build_llm_backend(&settings)?;
     eprintln!("Compressing (ctx {} tokens)…", settings.compress_ctx);
-    let compressed =
-        llm.compress(&transcript, zord_config::compress_prompt(), settings.compress_ctx)?;
+    let compressed = llm.compress(
+        &transcript,
+        zord_config::compress_prompt(),
+        settings.compress_ctx,
+    )?;
     store.set_compressed(session_id, &compressed)?;
     println!("{compressed}");
     Ok(())
@@ -385,7 +401,10 @@ fn compute_speaker_assignments(
 ) -> (Vec<(i64, i32)>, std::collections::HashSet<i32>) {
     let mut assignments: Vec<(i64, i32)> = Vec::new();
     let mut speakers = std::collections::HashSet::new();
-    for seg in segs.iter().filter(|s| s.source == zord_core::Source::Others) {
+    for seg in segs
+        .iter()
+        .filter(|s| s.source == zord_core::Source::Others)
+    {
         let Some(id) = seg.id else { continue };
         let best = spans
             .iter()
@@ -410,10 +429,17 @@ fn load_diarizer(settings: &zord_config::Settings) -> Result<zord_diarize::Diari
     let model = zord_diarize::EmbeddingModel::parse_or_default(&settings.diarize_embedding_model);
     let seg =
         zord_diarize::SegmentationModel::parse_or_default(&settings.diarize_segmentation_model);
-    eprintln!("Preparing speaker models '{}' + '{}'…", seg.name(), model.name());
+    eprintln!(
+        "Preparing speaker models '{}' + '{}'…",
+        seg.name(),
+        model.name()
+    );
     zord_diarize::ensure_diar_models(seg, model, &mut |done, total| {
         if let Some(total) = total {
-            eprint!("\r  downloading: {:.1}%   ", done as f64 / total as f64 * 100.0);
+            eprint!(
+                "\r  downloading: {:.1}%   ",
+                done as f64 / total as f64 * 100.0
+            );
         }
     })?;
     eprintln!("\r  models ready. Identifying speakers…       ");
@@ -440,8 +466,9 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
         .audio_path
         .with_context(|| "this session didn't retain audio, so speakers can't be identified")?;
     // Resolve the Others track in the new folder layout or the legacy flat layout.
-    let wav = zord_config::resolve_track(&prefix, "others")
-        .with_context(|| format!("the 'Others' audio for this session is missing (looked under {prefix})"))?;
+    let wav = zord_config::resolve_track(&prefix, "others").with_context(|| {
+        format!("the 'Others' audio for this session is missing (looked under {prefix})")
+    })?;
 
     // Streams + downsamples the (possibly native-rate) track to the 16 kHz the
     // diarizer expects (Phase 25d).
@@ -472,7 +499,10 @@ fn cmd_diarize(session_id: &str, db: Option<PathBuf>) -> Result<()> {
     for (id, speaker) in assignments {
         store.set_segment_speaker(id, Some(speaker))?;
     }
-    println!("Identified {} speaker(s) in session '{session_id}'.", speakers.len());
+    println!(
+        "Identified {} speaker(s) in session '{session_id}'.",
+        speakers.len()
+    );
     Ok(())
 }
 
@@ -558,8 +588,7 @@ fn cmd_decrypt(_db: Option<PathBuf>) -> Result<()> {
 }
 
 fn cmd_retranscribe(session_id: &str, model: &str, db: Option<PathBuf>) -> Result<()> {
-    let model_id = ModelId::parse(model)
-        .with_context(|| format!("unknown model '{model}'"))?;
+    let model_id = ModelId::parse(model).with_context(|| format!("unknown model '{model}'"))?;
     let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;
     let session = store
@@ -582,7 +611,10 @@ fn cmd_retranscribe(session_id: &str, model: &str, db: Option<PathBuf>) -> Resul
     eprintln!("\r  model ready.                    ");
 
     let count = pipeline::run_retranscribe(model_path, model_id, db_path, session_id, &prefix)?;
-    eprintln!("\nRe-transcribed {count} segment(s) with {}.", model_id.name());
+    eprintln!(
+        "\nRe-transcribed {count} segment(s) with {}.",
+        model_id.name()
+    );
     Ok(())
 }
 
@@ -606,7 +638,12 @@ fn cmd_export(
     match out {
         Some(path) => {
             std::fs::write(&path, rendered)?;
-            eprintln!("Wrote {} ({} segments) to {}", fmt.extension(), segments.len(), path.display());
+            eprintln!(
+                "Wrote {} ({} segments) to {}",
+                fmt.extension(),
+                segments.len(),
+                path.display()
+            );
         }
         None => print!("{rendered}"),
     }
@@ -619,8 +656,7 @@ fn cmd_serve(port: u16, db: Option<PathBuf>) -> Result<()> {
 }
 
 fn cmd_file(path: PathBuf, model: &str, db: Option<PathBuf>) -> Result<()> {
-    let model_id = ModelId::parse(model)
-        .with_context(|| format!("unknown model '{model}'"))?;
+    let model_id = ModelId::parse(model).with_context(|| format!("unknown model '{model}'"))?;
     eprintln!("Preparing model '{}'...", model_id.name());
     let model_path = zord_transcribe::ensure_model(model_id, &mut |done, total| {
         if let Some(total) = total {
@@ -694,9 +730,10 @@ fn unlock(_db_path: &std::path::Path) -> Result<()> {
 }
 
 fn now_ms() -> u64 {
+    // unwrap_or_default: a pre-1970 system clock yields 0 instead of a panic.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
@@ -728,8 +765,7 @@ fn cmd_record(
     keep_audio: Option<PathBuf>,
     capture: Option<String>,
 ) -> Result<()> {
-    let model_id = ModelId::parse(model)
-        .with_context(|| format!("unknown model '{model}'"))?;
+    let model_id = ModelId::parse(model).with_context(|| format!("unknown model '{model}'"))?;
     let (record_mic, record_system) = resolve_capture_mode(capture);
 
     // Ensure the model exists locally (download on first run, with progress).
@@ -740,7 +776,10 @@ fn cmd_record(
             eprint!("\r  downloading: {:.1}% ({} MB)   ", pct, done / 1_048_576);
         }
     })?;
-    eprintln!("\r  model ready: {}                         ", model_path.display());
+    eprintln!(
+        "\r  model ready: {}                         ",
+        model_path.display()
+    );
 
     let db_path = resolve_db(db)?;
     let store = Store::open(&db_path)?;

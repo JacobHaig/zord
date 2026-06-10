@@ -30,8 +30,12 @@ pub trait TranscribeBackend: Send {
     /// Transcribe one VAD segment. `base_offset_ms` is the segment's start time
     /// relative to the session, so returned timings are session-relative;
     /// `source` tags every output segment.
-    fn transcribe(&self, samples: &[f32], source: Source, base_offset_ms: u64)
-        -> Result<Vec<Segment>>;
+    fn transcribe(
+        &self,
+        samples: &[f32],
+        source: Source,
+        base_offset_ms: u64,
+    ) -> Result<Vec<Segment>>;
     fn model_name(&self) -> &str;
 }
 

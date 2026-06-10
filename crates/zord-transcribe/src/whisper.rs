@@ -37,7 +37,12 @@ impl TranscribeBackend for WhisperBackend {
         &self.model_name
     }
 
-    fn transcribe(&self, samples: &[f32], source: Source, base_offset_ms: u64) -> Result<Vec<Segment>> {
+    fn transcribe(
+        &self,
+        samples: &[f32],
+        source: Source,
+        base_offset_ms: u64,
+    ) -> Result<Vec<Segment>> {
         let mut state = self.ctx.create_state()?;
 
         let params = build_full_params(self.n_threads);

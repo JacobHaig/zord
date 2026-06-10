@@ -15,7 +15,10 @@ pub fn validate_wav_spec(spec: hound::WavSpec) -> Result<()> {
         bail!("invalid WAV: sample_rate is 0");
     }
     if !(1..=64).contains(&spec.bits_per_sample) {
-        bail!("invalid WAV: bits_per_sample {} out of range", spec.bits_per_sample);
+        bail!(
+            "invalid WAV: bits_per_sample {} out of range",
+            spec.bits_per_sample
+        );
     }
     Ok(())
 }
@@ -41,7 +44,8 @@ impl WavWriter {
     pub fn write(&mut self, samples: &[f32]) -> Result<()> {
         for &s in samples {
             let clamped = s.clamp(-1.0, 1.0);
-            self.inner.write_sample((clamped * i16::MAX as f32) as i16)?;
+            self.inner
+                .write_sample((clamped * i16::MAX as f32) as i16)?;
         }
         Ok(())
     }
@@ -49,6 +53,69 @@ impl WavWriter {
     pub fn finalize(self) -> Result<()> {
         self.inner.finalize()?;
         Ok(())
+    }
+}
+
+/// Crash recovery: fix a WAV whose header lengths don't match the file.
+///
+/// A hard stop (kill, power loss) skips `finalize()`, leaving the RIFF/data
+/// length fields stale (hound writes them as 0 at create time and only fills
+/// them in at the end) — so readers see an "empty" file even though the
+/// samples are on disk. This walks the RIFF chunks, recomputes the `data`
+/// length from the actual file size (clipped to whole frames), rewrites both
+/// length fields, and trims any partial trailing frame. Returns `true` if the
+/// file was modified. Non-WAV / too-short files are left untouched (`false`).
+///
+/// Safe against a concurrent live writer: repairing only edits the two length
+/// fields, which the writer's own `finalize()` overwrites with its true counts.
+pub fn repair_wav_header(path: impl AsRef<Path>) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    let file_len = f.metadata()?.len();
+    if file_len < 44 {
+        return Ok(false); // smaller than the smallest header+fmt+data layout
+    }
+    let mut hdr = [0u8; 12];
+    f.read_exact(&mut hdr)?;
+    if &hdr[0..4] != b"RIFF" || &hdr[8..12] != b"WAVE" {
+        return Ok(false);
+    }
+    let mut pos: u64 = 12;
+    let mut block_align: u64 = 1;
+    loop {
+        if pos + 8 > file_len {
+            return Ok(false); // no data chunk found
+        }
+        f.seek(SeekFrom::Start(pos))?;
+        let mut ch = [0u8; 8];
+        f.read_exact(&mut ch)?;
+        let len = u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]) as u64;
+        match &ch[0..4] {
+            b"fmt " if len >= 16 => {
+                let mut fmt = [0u8; 16];
+                f.read_exact(&mut fmt)?;
+                block_align = u16::from_le_bytes([fmt[12], fmt[13]]).max(1) as u64;
+            }
+            b"data" => {
+                let avail = file_len.saturating_sub(pos + 8);
+                let actual = avail - (avail % block_align);
+                if len == actual {
+                    return Ok(false);
+                }
+                f.seek(SeekFrom::Start(pos + 4))?;
+                f.write_all(&(actual.min(u32::MAX as u64) as u32).to_le_bytes())?;
+                let riff_len = (pos + actual).min(u32::MAX as u64) as u32; // file minus the 8-byte RIFF header
+                f.seek(SeekFrom::Start(4))?;
+                f.write_all(&riff_len.to_le_bytes())?;
+                f.set_len(pos + 8 + actual)?; // drop a partial trailing frame
+                return Ok(true);
+            }
+            _ => {}
+        }
+        pos += 8 + len + (len & 1); // chunks are 2-byte aligned
     }
 }
 
@@ -62,6 +129,7 @@ pub fn read_wav_slice_ms(
     start_ms: u64,
     end_ms: u64,
 ) -> Result<(Vec<f32>, u32)> {
+    let _ = repair_wav_header(&path); // crash recovery; no-op on healthy files
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
     validate_wav_spec(spec)?;
@@ -103,6 +171,7 @@ pub fn read_wav_slice_ms(
 /// gets slurped whole (Phase 25d). Used to feed the diarizer from the single
 /// stored native-rate track. A 16 kHz file passes through untouched.
 pub fn read_wav_mono_16k(path: impl AsRef<Path>) -> Result<Vec<f32>> {
+    let _ = repair_wav_header(&path); // crash recovery; no-op on healthy files
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
     validate_wav_spec(spec)?;
@@ -146,6 +215,7 @@ pub fn read_wav_mono_16k(path: impl AsRef<Path>) -> Result<Vec<f32>> {
 /// Read a WAV file (any int/float format) into mono `f32` samples in `[-1, 1]`
 /// at its **native** rate. Multi-channel files are downmixed by averaging.
 pub fn read_wav_mono_f32(path: impl AsRef<Path>) -> Result<Vec<f32>> {
+    let _ = repair_wav_header(&path); // crash recovery; no-op on healthy files
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
     validate_wav_spec(spec)?;
@@ -168,4 +238,67 @@ pub fn read_wav_mono_f32(path: impl AsRef<Path>) -> Result<Vec<f32>> {
         .chunks(channels)
         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Simulate a hard crash (finalize never ran): hound leaves the RIFF/data
+    /// length fields as 0, so readers see an empty file. Repair must restore
+    /// the lengths from the file size and make the samples readable again.
+    #[test]
+    fn repairs_unfinalized_wav() {
+        let dir = std::env::temp_dir().join(format!("zord-wavfix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.wav");
+
+        let mut w = WavWriter::create(&path, 16_000).unwrap();
+        w.write(&vec![0.25f32; 16_000]).unwrap(); // 1 s of audio
+        w.finalize().unwrap();
+
+        // Zero the RIFF + data length fields, as an unfinalized header has them.
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start(4)).unwrap();
+        f.write_all(&0u32.to_le_bytes()).unwrap();
+        f.seek(SeekFrom::Start(40)).unwrap(); // data length (44-byte canonical header)
+        f.write_all(&0u32.to_le_bytes()).unwrap();
+        drop(f);
+        assert_eq!(hound::WavReader::open(&path).unwrap().len(), 0);
+
+        assert!(repair_wav_header(&path).unwrap());
+        let samples = read_wav_mono_f32(&path).unwrap();
+        assert_eq!(samples.len(), 16_000);
+        assert!((samples[0] - 0.25).abs() < 0.01);
+
+        // Healthy file: a second pass changes nothing.
+        assert!(!repair_wav_header(&path).unwrap());
+
+        // Data past the header's count (crash after more samples were flushed):
+        // whole frames are recovered, a partial trailing frame is trimmed.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(&[0xAB, 0xCD, 0xEF]).unwrap(); // 1.5 frames
+        drop(f);
+        assert!(repair_wav_header(&path).unwrap());
+        assert_eq!(read_wav_mono_f32(&path).unwrap().len(), 16_001);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Non-WAV files must be left untouched.
+    #[test]
+    fn repair_ignores_non_wav() {
+        let dir = std::env::temp_dir().join(format!("zord-wavfix2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("not.wav");
+        let body = vec![7u8; 100];
+        std::fs::write(&path, &body).unwrap();
+        assert!(!repair_wav_header(&path).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

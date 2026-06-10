@@ -79,7 +79,11 @@ pub fn snapshot(store: &Store) -> Result<LedgerSnapshot> {
                 owner: it.owner,
             })
             .collect();
-        projects.push(SnapProject { id: p.id, name: p.name, open_items });
+        projects.push(SnapProject {
+            id: p.id,
+            name: p.name,
+            open_items,
+        });
     }
     Ok(LedgerSnapshot { projects })
 }
@@ -146,7 +150,11 @@ pub fn plan_fold(
         serde_json::to_string_pretty(snapshot)?,
         serde_json::to_string_pretty(extract)?,
     );
-    let raw = llm.generate(&payload, zord_config::reconcile_prompt(), GenOpts::overview(n_ctx))?;
+    let raw = llm.generate(
+        &payload,
+        zord_config::reconcile_prompt(),
+        GenOpts::overview(n_ctx),
+    )?;
     Ok(parse_plan(&raw))
 }
 
@@ -252,12 +260,26 @@ pub fn apply_plan(
         if id.is_empty() {
             continue;
         }
-        let Some(item) = store.get_item(id)? else { continue };
+        let Some(item) = store.get_item(id)? else {
+            continue;
+        };
         if !item.status.is_active() {
             continue; // already done
         }
-        store.update_item_status(id, ItemStatus::Done, Some(session_id), Some(session_id), now)?;
-        store.log_history(&item.project_id, Some(id), "completed", Some(session_id), now)?;
+        store.update_item_status(
+            id,
+            ItemStatus::Done,
+            Some(session_id),
+            Some(session_id),
+            now,
+        )?;
+        store.log_history(
+            &item.project_id,
+            Some(id),
+            "completed",
+            Some(session_id),
+            now,
+        )?;
         store.touch_project(&item.project_id, now)?;
         stats.items_completed += 1;
     }
@@ -282,7 +304,11 @@ pub fn apply_plan(
             .map(str::trim)
             .filter(|o| !o.is_empty())
             .map(str::to_string);
-        let status = if a.done { ItemStatus::Done } else { ItemStatus::Open };
+        let status = if a.done {
+            ItemStatus::Done
+        } else {
+            ItemStatus::Open
+        };
         let completed_session = a.done.then(|| session_id.to_string());
         let id = format!("{session_id}-i{k}");
         store.add_item(&ProjectItem {
