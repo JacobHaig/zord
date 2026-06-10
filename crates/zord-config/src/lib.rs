@@ -166,6 +166,15 @@ pub struct Settings {
     /// Default monochrome (`false`).
     #[serde(default)]
     pub badge_tint: bool,
+    /// Theme overrides (Settings → Theme): `#rrggbb`, empty = built-in default.
+    /// `theme_accent` drives the interactive color; `theme_me`/`theme_others`
+    /// drive the transcript channel colors. Danger/record red is never themed.
+    #[serde(default)]
+    pub theme_accent: String,
+    #[serde(default)]
+    pub theme_me: String,
+    #[serde(default)]
+    pub theme_others: String,
     /// Microphone ("Me") capture level mode: "off" | "manual" | "auto".
     #[serde(default = "default_level_mode")]
     pub mic_level_mode: String,
@@ -505,6 +514,9 @@ impl Default for Settings {
             capture_app_id: String::new(),
             capture_app_name: String::new(),
             badge_tint: false,
+            theme_accent: String::new(),
+            theme_me: String::new(),
+            theme_others: String::new(),
             mic_level_mode: default_level_mode(),
             mic_gain_db: 0.0,
             others_level_mode: default_level_mode(),
@@ -579,6 +591,12 @@ pub fn app_data_dir() -> Result<PathBuf> {
 /// Path to the `config.json` settings file.
 pub fn config_path() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("config.json"))
+}
+
+/// Strictly `#rrggbb` — anything else is rejected (theme inputs keep the last
+/// valid value rather than injecting arbitrary text into a style attribute).
+pub fn is_valid_hex_color(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Tighten a file to owner-only read/write (`0600`) on Unix; no-op elsewhere.
@@ -842,5 +860,21 @@ mod tests {
         assert_eq!(s.capture_mode, "mic");
         // The new button toggle defaults on.
         assert!(s.discord_record_button);
+    }
+
+    #[test]
+    fn theme_settings_roundtrip_and_hex_validation() {
+        // Defaults: unset (empty) = use the built-in palette.
+        let s = Settings::default();
+        assert_eq!(s.theme_accent, "");
+        assert_eq!(s.theme_me, "");
+        assert_eq!(s.theme_others, "");
+        // Validation: exactly #rrggbb.
+        assert!(is_valid_hex_color("#4cc2ff"));
+        assert!(is_valid_hex_color("#FFB454"));
+        assert!(!is_valid_hex_color("4cc2ff"));
+        assert!(!is_valid_hex_color("#4cc2f"));
+        assert!(!is_valid_hex_color("#4cc2fg"));
+        assert!(!is_valid_hex_color("#4cc2ff00"));
     }
 }
