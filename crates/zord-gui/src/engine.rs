@@ -2776,6 +2776,25 @@ fn run_integration_session(
     let _ = store.end_session(&session_id, now_ms());
     // Integration sessions carry ground-truth speakers → no diarization pass.
     let _ = ev.send(Event::Status(Status::Idle));
+
+    // Post-stop transcription pass (Phase 25 parity — was missing for
+    // integration sessions, so a Discord recording with live transcription
+    // off produced no transcript at all until a manual Re-transcribe): with
+    // live off this is where the transcript comes from; with live on it
+    // upgrades the live transcript with the re-transcription model. The
+    // per-speaker spk-N tracks keep their ground-truth indices, so the real
+    // names recorded in speaker_names re-attach to the new segments.
+    if settings.auto_transcribe {
+        post_transcribe_session(&store, &session_id, &session_dir, ev, None);
+    } else if !live {
+        let _ = ev.send(Event::Notice(
+            "Recording saved — transcription deferred. Open the session and press \
+             Re-transcribe (or turn on 'Transcribe automatically after recording' \
+             in Settings)."
+                .to_string(),
+        ));
+    }
+
     let _ = ev.send(Event::Speakers(
         store.speaker_names(&session_id).unwrap_or_default(),
     ));
@@ -2973,15 +2992,42 @@ fn post_transcribe_inner(
     let _ = store.set_session_model(session_id, model.name());
     let mut total = 0usize;
     let audio_path = audio_prefix.to_string_lossy();
-    for (suffix, source) in [("me", Source::Me), ("others", Source::Others)] {
+    // Track list: the fixed me/others pair, plus any per-speaker tracks an
+    // integration session wrote (spk-0.wav, spk-1.wav, … — folder layout
+    // only). Their ground-truth speaker index is re-applied to each segment,
+    // so the existing speaker_names labels survive a re-transcription.
+    let mut tracks: Vec<(String, Source, Option<i32>)> = vec![
+        ("me".to_string(), Source::Me, None),
+        ("others".to_string(), Source::Others, None),
+    ];
+    if let Ok(rd) = std::fs::read_dir(audio_prefix) {
+        let mut spk: Vec<i32> = rd
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                name.strip_prefix("spk-")?
+                    .strip_suffix(".wav")?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        spk.sort_unstable();
+        for idx in spk {
+            tracks.push((format!("spk-{idx}"), Source::Others, Some(idx)));
+        }
+    }
+    for (suffix, source, speaker) in tracks {
         // Resolve the track in the new folder layout or the legacy flat layout.
-        let Some(wav) = zord_config::resolve_track(&audio_path, suffix) else {
+        let Some(wav) = zord_config::resolve_track(&audio_path, &suffix) else {
             continue;
         };
         let cancel = || token.map(cancelled).unwrap_or(false);
-        let mut on_segment = |seg: Segment| {
+        let mut on_segment = |mut seg: Segment| {
             // Keep-partial: segments transcribed before the cancel are kept.
             if !cancel() {
+                if speaker.is_some() {
+                    seg.speaker = speaker;
+                }
                 let _ = store.insert_segment(session_id, &seg);
             }
         };
