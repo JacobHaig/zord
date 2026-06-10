@@ -6,6 +6,7 @@ mod engine;
 mod osutil;
 #[cfg(feature = "self-update")]
 mod update;
+mod wizard;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
@@ -470,6 +471,9 @@ fn MainApp() -> Element {
     let mut recording_discord = use_signal(|| false);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
+    // First-run setup wizard (Phase 36b): shown until completed/skipped once;
+    // re-runnable from Settings → About.
+    let show_wizard = use_signal(|| !Settings::load().setup_complete);
     // Sidebar width (px) — adjusted by dragging the splitter, persisted in
     // settings on release.
     let mut sidebar_w = use_signal(|| settings.peek().sidebar_width.clamp(160, 480));
@@ -1341,6 +1345,21 @@ fn MainApp() -> Element {
                 notice,
                 devices: devices.clone(),
                 engine: engine.clone(),
+                show_wizard,
+            }
+        }
+
+        // ---- First-run setup wizard (Phase 36b) ----
+        if *show_wizard.read() {
+            wizard::SetupWizard {
+                settings,
+                show_wizard,
+                engine: engine.clone(),
+                devices: devices.clone(),
+                me_level,
+                models,
+                model_progress,
+                notice,
             }
         }
     }
@@ -2155,6 +2174,7 @@ fn SettingsOverlay(
     notice: Signal<Option<String>>,
     devices: Vec<String>,
     engine: Engine,
+    show_wizard: Signal<bool>,
 ) -> Element {
     let current = settings.read().model.clone();
     let progress = model_progress.read().clone();
@@ -2228,7 +2248,7 @@ fn SettingsOverlay(
                                 FilesSettings { settings, notice }
                                 }
                                 if *settings_tab.read() == "about" {
-                                AboutSettings { settings, notice }
+                                AboutSettings { settings, notice, show_settings, show_wizard }
                                 }
                                 } // settings-pane
                                 } // settings-layout
@@ -2948,9 +2968,15 @@ fn ThemeSettings(settings: Signal<Settings>) -> Element {
     }
 }
 
-/// Settings → About: a one-line local-only blurb.
+/// Settings → About: a one-line local-only blurb, version/channel, updates,
+/// and the setup-wizard re-run.
 #[component]
-fn AboutSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> Element {
+fn AboutSettings(
+    settings: Signal<Settings>,
+    notice: Signal<Option<String>>,
+    mut show_settings: Signal<bool>,
+    mut show_wizard: Signal<bool>,
+) -> Element {
     // Update controls exist only in `self-update` builds (the GitHub channel);
     // store builds neither check nor install — the store does.
     let update_ui: Option<Element> = {
@@ -2972,6 +2998,16 @@ fn AboutSettings(settings: Signal<Settings>, notice: Signal<Option<String>>) -> 
             p { class: "field-note", "Zord · 100% local. Recordings, transcripts, and models stay on this device — nothing is uploaded." }
             p { class: "field-note",
                 "Version {env!(\"CARGO_PKG_VERSION\")} · {zord_core::DIST_CHANNEL} channel"
+            }
+            div { class: "field",
+                button {
+                    class: "mbtn ghost",
+                    onclick: move |_| {
+                        show_settings.set(false);
+                        show_wizard.set(true);
+                    },
+                    "Run setup again"
+                }
             }
             {update_ui}
         }
@@ -4627,7 +4663,10 @@ fn theme_style(s: &Settings) -> String {
         ("--others", &s.theme_others),
     ] {
         if zord_config::is_valid_hex_color(value) {
-            css.push_str(&format!("{var}: {value}; {var}-fg: {}; ", readable_fg(value)));
+            css.push_str(&format!(
+                "{var}: {value}; {var}-fg: {}; ",
+                readable_fg(value)
+            ));
         }
     }
     css.trim_end().to_string()

@@ -339,6 +339,17 @@ pub enum RecorderCmd {
     /// Mute/unmute the desktop/system audio ("Others") mid-recording without
     /// stopping. Same semantics as [`SetMicMuted`] for the system channel.
     SetSystemMuted(bool),
+    /// Start a microphone *test* (setup wizard): capture the chosen device and
+    /// emit `Event::Level` meters only — no session, no WAV, no transcription.
+    /// The OS mic-permission prompt fires here. Stopped by [`MicTestStop`] or
+    /// superseded by a real recording `Start`.
+    ///
+    /// [`MicTestStop`]: RecorderCmd::MicTestStop
+    MicTestStart {
+        device: Option<String>,
+    },
+    /// Stop a running microphone test.
+    MicTestStop,
     /// Stop the engine entirely (process exit normally handles this; kept for
     /// completeness / future graceful shutdown).
     #[allow(dead_code)]
@@ -2080,8 +2091,65 @@ fn sanitize_fts(q: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_path: PathBuf) {
+    // Active microphone *test* (setup wizard) between sessions: the capture
+    // source plus the stop flag of its level-pump thread. Dropped (capture
+    // stops) on MicTestStop, a new MicTestStart, or a real recording Start.
+    let mut mic_test: Option<(zord_capture::Microphone, Arc<AtomicBool>)> = None;
+    let stop_mic_test = |slot: &mut Option<(zord_capture::Microphone, Arc<AtomicBool>)>| {
+        if let Some((mic, stop)) = slot.take() {
+            stop.store(true, Ordering::Relaxed);
+            drop(mic); // closes the stream → the pump thread's recv ends
+        }
+    };
     while let Ok(cmd) = rx.recv() {
         match cmd {
+            RecorderCmd::MicTestStart { device } => {
+                stop_mic_test(&mut mic_test);
+                let (tx, rx_frames) = mpsc::channel::<Vec<f32>>();
+                match Microphone::start_with(tx, device.as_deref()) {
+                    Ok(mic) => {
+                        let rate = mic.sample_rate();
+                        let stop = Arc::new(AtomicBool::new(false));
+                        let pump_stop = stop.clone();
+                        let pump_ev = ev.clone();
+                        thread::spawn(move || {
+                            let mut level = 0.0f32;
+                            let mut last_send = std::time::Instant::now();
+                            while let Ok(frame) = rx_frames.recv() {
+                                if pump_stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let n = frame.len().max(1);
+                                let rms =
+                                    (frame.iter().map(|s| s * s).sum::<f32>() / n as f32).sqrt();
+                                level = smooth_level(rms, n, rate, level);
+                                if last_send.elapsed().as_millis() >= 33 {
+                                    let _ = pump_ev.send(Event::Level {
+                                        source: Source::Me,
+                                        level,
+                                    });
+                                    last_send = std::time::Instant::now();
+                                }
+                            }
+                            // Leave the meter at rest when the test ends.
+                            let _ = pump_ev.send(Event::Level {
+                                source: Source::Me,
+                                level: 0.0,
+                            });
+                        });
+                        mic_test = Some((mic, stop));
+                    }
+                    Err(e) => {
+                        let hint = if cfg!(target_os = "macos") {
+                            " (check Microphone permission in System Settings → Privacy & Security)"
+                        } else {
+                            " (check the OS microphone privacy settings and that a mic is connected)"
+                        };
+                        let _ = ev.send(Event::Notice(format!("microphone test: {e}{hint}")));
+                    }
+                }
+            }
+            RecorderCmd::MicTestStop => stop_mic_test(&mut mic_test),
             RecorderCmd::Start {
                 model,
                 keep_audio,
@@ -2092,6 +2160,8 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 live,
                 integration,
             } => {
+                // A real recording owns the mic — end any wizard test first.
+                stop_mic_test(&mut mic_test);
                 // Guard: if neither was requested, record both.
                 let (record_mic, record_system) = if !record_mic && !record_system {
                     (true, true)
@@ -2174,6 +2244,8 @@ fn wait_for_stop(
             Ok(RecorderCmd::SetMicMuted(m)) => mic_muted.store(m, Ordering::Relaxed),
             Ok(RecorderCmd::SetSystemMuted(m)) => sys_muted.store(m, Ordering::Relaxed),
             Ok(RecorderCmd::Start { .. }) => {} // ignore double-start
+            // Mic tests are a between-sessions (wizard) affair.
+            Ok(RecorderCmd::MicTestStart { .. } | RecorderCmd::MicTestStop) => {}
         }
     }
     shutdown

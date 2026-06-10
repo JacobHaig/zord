@@ -634,3 +634,42 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   padding: 4px 8px; font-size: 12px; font-family: ui-monospace, monospace;
 }
 .swatch-hex:focus { border-color: var(--accent); outline: none; }
+
+/* Setup wizard (Phase 36b) */
+.wizard-card {
+  width: min(560px, 92%); margin: auto; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--r-lg);
+  box-shadow: var(--elev-3); padding: var(--sp-6);
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  animation: pop-in var(--t-pop) var(--ease);
+}
+.wizard-title { font-size: 22px; font-weight: 800; }
+.wizard-sub { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.wizard-body { display: flex; flex-direction: column; gap: var(--sp-3); min-height: 150px; }
+.wizard-scroll { max-height: 52vh; overflow-y: auto; }
+.wizard-foot { display: flex; align-items: center; gap: var(--sp-2); }
+.wizard-dots { display: flex; gap: 6px; margin-right: auto; }
+.wizard-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); transition: background var(--t-fast) var(--ease); }
+.wizard-dot.on { background: var(--accent); }
+.intent-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-2); }
+.intent-card {
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-start;
+  text-align: left; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: var(--sp-3); cursor: pointer;
+  color: var(--text); font-size: 13px; font-weight: 600;
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.intent-card.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.intent-card .ic { width: 18px; height: 18px; color: var(--accent); }
+.intent-desc { font-size: 11px; color: var(--muted); line-height: 1.4; font-weight: 400; }
+.wizard-primary {
+  background: var(--accent); color: var(--accent-fg); border: none;
+  padding: 10px 18px; border-radius: var(--r-md); font-weight: 700;
+  cursor: pointer; font-size: 14px;
+  transition: filter var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.wizard-primary:hover { filter: brightness(1.08); box-shadow: 0 0 0 4px var(--accent-soft); }
+.wizard-primary:active { transform: scale(0.97); }
+.wizard-summary { list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); }
+.wizard-summary li { display: flex; align-items: center; gap: var(--sp-2); font-size: 13px; }
+.wizard-summary .ic { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
