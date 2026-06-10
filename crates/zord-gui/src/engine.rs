@@ -163,6 +163,10 @@ pub enum Event {
     JobFinished {
         id: String,
     },
+    /// The full voiceprint library (Phase 38): emitted after any list / mutate
+    /// operation on `DbCmd::Voiceprints*`. GUI signal wired in Task 38d.
+    #[allow(dead_code)] // payload read by the GUI in Task 38d
+    Voiceprints(Vec<zord_store::VoiceprintInfo>),
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -403,6 +407,21 @@ pub enum DbCmd {
         speaker: i32,
         name: String,
     },
+    /// Voiceprint library (Phase 38): list / rename / forget. Replies with
+    /// `Event::Voiceprints`. GUI call-sites added in Task 38d.
+    #[allow(dead_code)] // call sites wired in Task 38d
+    Voiceprints,
+    #[allow(dead_code)]
+    VoiceprintRename {
+        id: i64,
+        name: String,
+    },
+    #[allow(dead_code)]
+    VoiceprintForget {
+        id: i64,
+    },
+    #[allow(dead_code)]
+    VoiceprintForgetAll,
     /// Save the host's free-form notes for a session (empty clears them).
     SetNotes {
         id: String,
@@ -1598,9 +1617,42 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             }
             DbCmd::RenameSpeaker { id, speaker, name } => {
                 let _ = store.set_speaker_name(&id, speaker, &name);
+                #[cfg(feature = "voiceprints")]
+                {
+                    let settings = zord_config::Settings::load();
+                    if settings.voiceprints_enabled && !name.trim().is_empty() {
+                        if let Ok(Some((model, emb))) =
+                            store.session_speaker_embedding(&id, speaker)
+                        {
+                            if let Ok(vid) =
+                                store.enroll_voiceprint(name.trim(), &model, &emb, Some(&id))
+                            {
+                                let _ = store.link_speaker_voiceprint(&id, speaker, vid);
+                                let _ = ev.send(Event::Voiceprints(
+                                    store.voiceprints().unwrap_or_default(),
+                                ));
+                            }
+                        }
+                    }
+                }
                 let _ = ev.send(Event::Speakers(
                     store.speaker_names(&id).unwrap_or_default(),
                 ));
+            }
+            DbCmd::Voiceprints => {
+                let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
+            }
+            DbCmd::VoiceprintRename { id, name } => {
+                let _ = store.rename_voiceprint(id, &name);
+                let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
+            }
+            DbCmd::VoiceprintForget { id } => {
+                let _ = store.forget_voiceprint(id);
+                let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
+            }
+            DbCmd::VoiceprintForgetAll => {
+                let _ = store.forget_all_voiceprints();
+                let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
             }
             DbCmd::LoadOverview => {
                 let data = load_overview(&store);
@@ -2058,6 +2110,9 @@ fn apply_diarization(
         let _ = store.set_segment_speaker(id, Some(speaker));
     }
 
+    #[cfg(feature = "voiceprints")]
+    apply_voiceprints(store, session_id, &samples, &spans, model, ev);
+
     if let Ok(v) = store.segments(session_id) {
         let _ = ev.send(Event::Transcript(v));
     }
@@ -2076,6 +2131,57 @@ fn overlap_ms(a0: u64, a1: u64, b0: u64, b1: u64) -> u64 {
     let lo = a0.max(b0);
     let hi = a1.min(b1);
     hi.saturating_sub(lo)
+}
+
+/// Phase 38: persist per-cluster embeddings for this session, and (when the
+/// user opted in) match them against the voiceprint library to auto-name
+/// speakers. Best-effort — failures notice and return, never blocking the
+/// diarization result.
+#[cfg(feature = "voiceprints")]
+fn apply_voiceprints(
+    store: &Store,
+    session_id: &str,
+    samples: &[f32],
+    spans: &[zord_diarize::DiarSegment],
+    model: zord_diarize::EmbeddingModel,
+    ev: &UnboundedSender<Event>,
+) {
+    let embedder = match zord_diarize::SpeakerEmbedder::load(model) {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("voiceprints: {e}")));
+            return;
+        }
+    };
+    let clusters = embedder.embed_clusters(samples, 16_000, spans);
+    for (speaker, emb) in &clusters {
+        let _ = store.set_session_speaker_embedding(session_id, *speaker, model.name(), emb);
+    }
+    let settings = zord_config::Settings::load();
+    if !settings.voiceprints_enabled {
+        return;
+    }
+    let cands = store.voiceprint_centroids(model.name()).unwrap_or_default();
+    if cands.is_empty() {
+        return;
+    }
+    let threshold = zord_config::voiceprint_threshold(&settings.voiceprints_match);
+    let mut recognized: Vec<String> = Vec::new();
+    for (speaker, emb) in &clusters {
+        if let Some((vid, name, _score)) =
+            zord_store::best_voiceprint_match(&cands, emb, threshold, 0.05)
+        {
+            let _ = store.set_speaker_name(session_id, *speaker, &name);
+            let _ = store.link_speaker_voiceprint(session_id, *speaker, vid);
+            recognized.push(name);
+        }
+    }
+    if !recognized.is_empty() {
+        let _ = ev.send(Event::Notice(format!(
+            "Recognized {}.",
+            recognized.join(", ")
+        )));
+    }
 }
 
 /// The app data `exports/` directory (created on demand).
@@ -3027,6 +3133,9 @@ fn run_integration_session(
         ));
     }
 
+    #[cfg(feature = "voiceprints")]
+    enroll_integration_tracks(&store, &session_id, &session_dir, ev);
+
     let _ = ev.send(Event::Speakers(
         store.speaker_names(&session_id).unwrap_or_default(),
     ));
@@ -3087,6 +3196,79 @@ fn build_integration_provider(
     {
         tracing::info!("integration: using fake provider (no discord feature)");
         Ok(Box::new(zord_integrations::FakeProvider::default()))
+    }
+}
+
+/// Phase 38: enroll Discord per-participant tracks under their ground-truth
+/// names — the cleanest enrollment source there is (no clustering involved).
+/// Skips placeholder "Speaker N" names (unmapped-SSRC fallbacks, not identities)
+/// and tracks shorter than 3 s of speech. Bails silently when the embedding
+/// model hasn't been downloaded — no notice spam.
+#[cfg(feature = "voiceprints")]
+fn enroll_integration_tracks(
+    store: &Store,
+    session_id: &str,
+    session_dir: &std::path::Path,
+    ev: &UnboundedSender<Event>,
+) {
+    let settings = zord_config::Settings::load();
+    if !settings.voiceprints_enabled {
+        return;
+    }
+    let names = store.speaker_names(session_id).unwrap_or_default();
+    let model = zord_diarize::EmbeddingModel::parse_or_default(&settings.diarize_embedding_model);
+    let embedder = match zord_diarize::SpeakerEmbedder::load(model) {
+        Ok(e) => e,
+        Err(_) => return, // model not downloaded — bail silently
+    };
+    // Enumerate spk-N.wav tracks written by the integration session.
+    let spk_indices: Vec<i32> = {
+        let Ok(rd) = std::fs::read_dir(session_dir) else {
+            return;
+        };
+        let mut v: Vec<i32> = rd
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                name.strip_prefix("spk-")?
+                    .strip_suffix(".wav")?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let audio_path = session_dir.to_string_lossy();
+    let mut enrolled = 0;
+    for speaker in spk_indices {
+        let Some(name) = names.get(&speaker).filter(|n| !n.starts_with("Speaker ")) else {
+            continue;
+        };
+        let Some(path) = zord_config::resolve_track(&audio_path, &format!("spk-{speaker}")) else {
+            continue;
+        };
+        let Ok(samples) = zord_audio::read_audio_mono_16k(&path) else {
+            continue;
+        };
+        let speech = zord_diarize::gather_speech(&samples, 16_000, 30);
+        if speech.len() < 3 * 16_000 {
+            continue; // < 3 s of speech — skip
+        }
+        let Some(emb) = embedder.embed(&speech, 16_000) else {
+            continue;
+        };
+        let _ = store.set_session_speaker_embedding(session_id, speaker, model.name(), &emb);
+        if let Ok(vid) = store.enroll_voiceprint(name, model.name(), &emb, Some(session_id)) {
+            let _ = store.link_speaker_voiceprint(session_id, speaker, vid);
+            enrolled += 1;
+        }
+    }
+    if enrolled > 0 {
+        let _ = ev.send(Event::Notice(format!(
+            "Saved voiceprints for {enrolled} Discord speaker(s)."
+        )));
+        let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
     }
 }
 

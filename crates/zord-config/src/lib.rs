@@ -164,6 +164,16 @@ pub struct Settings {
     /// Display name of the per-app capture target (for the picker UI only).
     #[serde(default)]
     pub capture_app_name: String,
+    /// Voiceprints (Phase 38): match speakers against the local library and
+    /// auto-name them. Requires the one-time consent flow; off by default.
+    #[serde(default)]
+    pub voiceprints_enabled: bool,
+    /// Match strictness preset: "strict" | "standard" | "relaxed".
+    #[serde(default = "default_voiceprints_match")]
+    pub voiceprints_match: String,
+    /// Unix time the user accepted the voiceprint consent dialog (0 = never).
+    #[serde(default)]
+    pub voiceprints_consented_at: u64,
     /// Transcribe while recording (Phase 25). Off = capture-only: meters + WAV
     /// writing only (~no CPU, no model RAM — for low-power machines where live
     /// whisper bursts stutter the webcam); transcription runs when you stop.
@@ -415,6 +425,10 @@ fn default_segmentation_model() -> String {
     "pyannote-3.0".to_string()
 }
 
+fn default_voiceprints_match() -> String {
+    "standard".to_string()
+}
+
 fn default_capture_mode() -> String {
     "both".to_string()
 }
@@ -546,6 +560,9 @@ impl Default for Settings {
             live_transcription: true,
             retranscribe_model: default_retranscribe_model(),
             auto_transcribe: false,
+            voiceprints_enabled: false,
+            voiceprints_match: default_voiceprints_match(),
+            voiceprints_consented_at: 0,
         }
     }
 }
@@ -613,6 +630,15 @@ pub fn app_data_dir() -> Result<PathBuf> {
 /// Path to the `config.json` settings file.
 pub fn config_path() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("config.json"))
+}
+
+/// Cosine threshold for a voiceprint match (research-tuned presets).
+pub fn voiceprint_threshold(preset: &str) -> f32 {
+    match preset {
+        "strict" => 0.78,
+        "relaxed" => 0.66,
+        _ => 0.72,
+    }
 }
 
 /// Strictly `#rrggbb` — anything else is rejected (theme inputs keep the last
@@ -942,5 +968,15 @@ mod tests {
         assert!(!s.setup_complete);
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert!(!s.setup_complete);
+    }
+
+    #[test]
+    fn voiceprint_defaults_and_thresholds() {
+        let s = Settings::default();
+        assert!(!s.voiceprints_enabled);
+        assert_eq!(s.voiceprints_consented_at, 0);
+        assert_eq!(voiceprint_threshold(&s.voiceprints_match), 0.72);
+        assert_eq!(voiceprint_threshold("strict"), 0.78);
+        assert_eq!(voiceprint_threshold("bogus"), 0.72);
     }
 }

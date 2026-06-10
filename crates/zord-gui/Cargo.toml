@@ -22,6 +22,9 @@ llm-local = ["dep:zord-summarize", "zord-summarize/llama", "dep:zord-overview", 
 llm-remote = ["dep:zord-summarize", "zord-summarize/remote", "dep:zord-overview", "zord-overview/remote"]
 # Enable per-speaker diarization (sherpa-onnx).
 diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
+# Persistent cross-session speaker identification (voiceprints). Opt-in at
+# runtime AND removable at build time (docs/voiceprints-legal.md).
+voiceprints = ["diarization"]
 # Discord voice integration (per-participant capture via songbird; heavy build).
 discord = ["zord-integrations/discord"]
 # In-app update check + Windows in-place install (Phase 34). Compiled ONLY into

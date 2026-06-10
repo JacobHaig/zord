@@ -636,6 +636,8 @@ fn MainApp() -> Element {
                     jobs.write().retain(|j| j.id != id);
                 }
                 Event::Playing(v) => playing_seg.set(v),
+                // Phase 38: voiceprint library updates — GUI state wired in T4.
+                Event::Voiceprints(_) => {}
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
                         notice.set(Some(format!("External LLM: {e}")));
