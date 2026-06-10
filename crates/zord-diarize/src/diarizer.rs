@@ -173,7 +173,7 @@ fn segmentation_present(seg: SegmentationModel) -> bool {
         .unwrap_or(false)
 }
 
-fn embedding_path(model: EmbeddingModel) -> Result<PathBuf> {
+pub(crate) fn embedding_path(model: EmbeddingModel) -> Result<PathBuf> {
     Ok(models_dir()?.join(model.filename()))
 }
 
@@ -241,15 +241,15 @@ fn ensure_segmentation(
 }
 
 fn unpack_segmentation_tarball(tarball: &std::path::Path, dir: &std::path::Path) -> Result<()> {
-    let file = std::fs::File::open(&tarball)?;
+    let file = std::fs::File::open(tarball)?;
     // Cap total decompressed bytes so a malicious/compromised mirror can't ship
     // a high-ratio bzip2 bomb that fills the disk (segmentation models are ≤~50 MB).
     const MAX_UNPACK_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
     let bz = std::io::Read::take(bzip2::read::BzDecoder::new(file), MAX_UNPACK_BYTES);
     tar::Archive::new(bz)
-        .unpack(&dir)
+        .unpack(dir)
         .context("unpacking segmentation archive")?;
-    let _ = std::fs::remove_file(&tarball);
+    let _ = std::fs::remove_file(tarball);
     Ok(())
 }
 
@@ -277,7 +277,7 @@ pub fn delete_embedding(model: EmbeddingModel) -> Result<()> {
     Ok(())
 }
 
-fn to_cfg_path(p: &std::path::Path) -> Option<String> {
+pub(crate) fn to_cfg_path(p: &std::path::Path) -> Option<String> {
     Some(p.to_string_lossy().into_owned())
 }
 
