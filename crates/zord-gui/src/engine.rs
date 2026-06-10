@@ -326,6 +326,10 @@ pub enum RecorderCmd {
         /// Transcribe while recording (Phase 25). `false` = capture-only:
         /// meters + WAVs, no model load, no transcribe jobs.
         live: bool,
+        /// Start an integration (Discord) session instead of local capture —
+        /// set by the Record Discord button. The `ZORD_DISCORD` /
+        /// `ZORD_FAKE_INTEGRATION` env vars still force it (dev path).
+        integration: bool,
     },
     Stop,
     /// Mute/unmute the microphone ("Me") mid-recording without stopping. While
@@ -2086,6 +2090,7 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                 record_mic,
                 record_system,
                 live,
+                integration,
             } => {
                 // Guard: if neither was requested, record both.
                 let (record_mic, record_system) = if !record_mic && !record_system {
@@ -2102,20 +2107,12 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                     record_system,
                     live,
                 };
-                // Integration session when the capture mode is "discord" (Phase
-                // 30d UI) or a dev trigger is set — `ZORD_DISCORD` (real provider)
-                // / `ZORD_FAKE_INTEGRATION` (fake). Else a normal recording.
-                let discord_mode = zord_config::Settings::load().capture_mode == "discord";
-                if discord_mode && !cfg!(feature = "discord") {
-                    // Config written by a discord build, opened in one without
-                    // the engine: refuse rather than silently record a fake
-                    // (empty) session.
-                    let _ = ev.send(Event::Status(Status::Error(
-                        "capture mode is Discord but this build doesn't include the Discord engine — pick another capture mode in Settings → Recording".into(),
-                    )));
-                    continue;
-                }
-                let integration = discord_mode
+                // Integration session when the Record Discord button asked for
+                // one, or a dev trigger forces it — `ZORD_DISCORD` (real
+                // provider) / `ZORD_FAKE_INTEGRATION` (fake). The button only
+                // renders in discord builds, so the old "discord mode in a
+                // featureless build" guard went away with the capture mode.
+                let integration = integration
                     || std::env::var("ZORD_DISCORD").is_ok()
                     || std::env::var("ZORD_FAKE_INTEGRATION").is_ok();
                 let ended = if integration {

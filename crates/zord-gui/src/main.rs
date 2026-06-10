@@ -465,6 +465,9 @@ fn MainApp() -> Element {
     // current recording.
     let mut mic_muted = use_signal(|| false);
     let mut sys_muted = use_signal(|| false);
+    // Whether the current recording is an integration (Discord) session —
+    // set at Start; drives hiding the local-capture mute buttons.
+    let mut recording_discord = use_signal(|| false);
     let mut settings = use_signal(Settings::load);
     let mut show_settings = use_signal(|| false);
     // Sidebar width (px) — adjusted by dragging the splitter, persisted in
@@ -825,7 +828,7 @@ fn MainApp() -> Element {
 
     let on_record = {
         let engine = engine.clone();
-        move |_| {
+        move |integration: bool| {
             if recording {
                 tracing::info!("record button: Stop clicked");
                 let _ = engine.rec_tx.send(RecorderCmd::Stop);
@@ -848,6 +851,7 @@ fn MainApp() -> Element {
                 speaker_names.write().clear();
                 mic_muted.set(false);
                 sys_muted.set(false);
+                recording_discord.set(integration);
                 view.set(View::Live);
                 let s = settings.peek().clone();
                 let model = ModelId::parse(&s.model).unwrap_or(ModelId::LargeV3TurboQ5);
@@ -861,6 +865,7 @@ fn MainApp() -> Element {
                     record_mic,
                     record_system,
                     live: s.live_transcription,
+                    integration,
                 });
             }
         }
@@ -869,6 +874,12 @@ fn MainApp() -> Element {
     // Which channels the current capture mode includes (drives the mute buttons).
     let mic_in_capture = settings.read().capture_mode != "system";
     let system_in_capture = settings.read().capture_mode != "mic";
+    // Record Discord button (spec 2026-06-10): discord build + credentials
+    // saved + not hidden by the Integrations toggle.
+    let discord_button = cfg!(feature = "discord")
+        && !settings.read().discord_bot_token.is_empty()
+        && !settings.read().discord_user_id.trim().is_empty()
+        && settings.read().discord_record_button;
     // Appearance: tint session badges by meaning vs monochrome (Settings → Theme).
     let tint_badges = settings.read().badge_tint;
 
@@ -1128,6 +1139,8 @@ fn MainApp() -> Element {
                 confirm_delete,
                 rec_secs,
                 recording,
+                discord_button,
+                recording_discord: *recording_discord.read(),
                 st: st.clone(),
                 status_text: status_text.clone(),
                 tint_badges,
@@ -1391,6 +1404,8 @@ fn SessionsSidebar(
     mut confirm_delete: Signal<Option<String>>,
     rec_secs: Signal<u64>,
     recording: bool,
+    discord_button: bool,
+    recording_discord: bool,
     st: Status,
     status_text: String,
     tint_badges: bool,
@@ -1401,7 +1416,7 @@ fn SessionsSidebar(
     engine: Engine,
     on_open_session: EventHandler<String>,
     on_show_live: EventHandler<()>,
-    on_record: EventHandler<MouseEvent>,
+    on_record: EventHandler<bool>,
     on_mute: EventHandler<MouseEvent>,
     on_mute_system: EventHandler<MouseEvent>,
 ) -> Element {
@@ -1540,7 +1555,7 @@ fn SessionsSidebar(
                 }
                 // ---- Record: permanent primary at the sidebar foot ----
                 div { class: "sidebar-foot",
-                    if recording && system_in_capture {
+                    if recording && system_in_capture && !recording_discord {
                         button {
                             class: if *sys_muted.read() { "record muted" } else { "record mute" },
                             title: if *sys_muted.read() { "Desktop audio muted — click to unmute" } else { "Mute desktop / system audio" },
@@ -1549,7 +1564,7 @@ fn SessionsSidebar(
                             if *sys_muted.read() { "Unmute desktop" } else { "Mute desktop" }
                         }
                     }
-                    if recording && mic_in_capture {
+                    if recording && mic_in_capture && !recording_discord {
                         button {
                             class: if *mic_muted.read() { "record muted" } else { "record mute" },
                             title: if *mic_muted.read() { "Mic muted — click to unmute" } else { "Mute your microphone" },
@@ -1558,9 +1573,18 @@ fn SessionsSidebar(
                             if *mic_muted.read() { "Unmute mic" } else { "Mute mic" }
                         }
                     }
+                    if !recording && discord_button {
+                        button {
+                            class: "record discord",
+                            title: "Record the Discord voice channel you're in (via your bot)",
+                            onclick: move |_| on_record.call(true),
+                            {icon("headphones")}
+                            "Record Discord"
+                        }
+                    }
                     button {
                         class: if recording { "record stop" } else { "record" },
-                        onclick: move |e| on_record.call(e),
+                        onclick: move |_| on_record.call(false),
                         {icon(if recording { "stop" } else { "record" })}
                         if recording { "Stop" } else { "Record" }
                     }

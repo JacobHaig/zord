@@ -527,3 +527,6 @@ body {
 .panel-toggle, .close-btn, .notice-x { transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease; }
 /* Tighten the main column padding on narrow windows. */
 @media (max-width: 760px) { .main { padding: 14px 16px; } .settings-layout { gap: 14px; } }
+
+/* The dedicated Discord record button (blurple, sibling of Record). */
+.record.discord { background: #5865f2; }
