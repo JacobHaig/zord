@@ -1254,17 +1254,24 @@ dep lands. Designed so a **local vs hosted backend swap** is feasible later.
   capture `FrameSink`, sparse by nature). `FakeProvider` emits N participants
   with real-time-paced sparse tone bursts + silent gaps, then `Ended`. Unit-test
   passes; clippy clean; stays out of the `discord` feature (light seam).
-- **29b — engine wiring (the bigger part).** Engine gains an "integration
-  session" recording mode (alongside mic/system/both): runs an `Integration`,
-  and on each `ParticipantJoined` assigns the next speaker index, writes
-  `speaker_names`, and spawns a per-speaker proc (`Others` + speaker index →
-  `spk-N.wav`, Phase 28e). Local mic still drives "Me" (self-SSRC suppressed by
-  the Discord impl). `ParticipantRenamed` updates `speaker_names`; `Ended`
-  finalizes like Stop. Integration sessions carry ground-truth speakers → skip
-  the diarization auto-pass and hide Identify-speakers. Validate end-to-end with
-  `FakeProvider` (a hidden dev trigger) before Discord.
-- **29c — GUI surface.** Minimal: start/stop an integration session; show the
-  per-speaker live state. (Settings → Integrations tab is Phase 30.)
+- **29b — engine wiring.** ✅ **DONE (build-verified).** `drive_session` (in
+  `zord-integrations`, unit-tested) pumps an `Integration`'s events and assigns a
+  stable 0-based speaker index per participant. The engine's new
+  `run_integration_session` (a *separate* fn, so it can't destabilize the proven
+  `run_session`) runs it: per `ParticipantJoined` it registers the name
+  (`set_speaker_name`) and spawns a per-speaker proc (`Others` + ground-truth
+  speaker index → `spk-N.wav`, wall-clock aligned via the shared `session_start`);
+  `Job` gained a `speaker: Option<i32>` so segments carry the index;
+  `ParticipantRenamed` updates `speaker_names`; the session ends on the provider's
+  `Ended` *or* a user Stop; the local mic still drives "Me". No diarization pass
+  (ground-truth speakers). Triggered by `ZORD_FAKE_INTEGRATION=1` (hidden dev
+  trigger reusing the Record button). **Runtime check is a GUI launch** (like all
+  engine work — `verification-limits`): `ZORD_FAKE_INTEGRATION=1 cargo run -p
+  zord-gui`, press Record → expect `spk-0/1.wav` in the session folder +
+  "Tester 1/2" in `speaker_names`. Builds + clippy + integration unit tests green.
+- **29c — GUI surface → folded into Phase 30.** The env-var trigger reuses the
+  Record button, so no separate minimal UI is needed now; the proper start/stop +
+  per-speaker live state lands with the Settings → Integrations tab in Phase 30.
 
 ### Phase 30 — Discord integration (full)
 The `discord` Integration implementation on the Phase 29 seam, using the Phase 27

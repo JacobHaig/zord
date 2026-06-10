@@ -1842,7 +1842,15 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                     record_system,
                     live,
                 };
-                if run_session(opts, &rx, &ev, &db_path) {
+                // Hidden dev trigger (Phase 29b): exercise the integration path
+                // with the built-in fake provider. The real Discord provider +
+                // Settings UI replace this in Phase 30.
+                let ended = if std::env::var("ZORD_FAKE_INTEGRATION").is_ok() {
+                    run_integration_session(opts, &rx, &ev, &db_path)
+                } else {
+                    run_session(opts, &rx, &ev, &db_path)
+                };
+                if ended {
                     break; // session ended due to Shutdown
                 }
             }
@@ -1856,6 +1864,10 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
 
 struct Job {
     source: Source,
+    /// Pre-assigned speaker index for this chunk (integration sessions, where
+    /// identity is ground truth). `None` for mic/desktop — diarization (or the
+    /// live labeler) decides the speaker for those.
+    speaker: Option<i32>,
     vad: zord_audio::VadSegment,
 }
 
@@ -2022,7 +2034,7 @@ fn run_session(
             Ok(m) => {
                 let mic_level = zord_audio::LevelControl::new(
                     zord_audio::LevelMode::parse(&settings.mic_level_mode, settings.mic_gain_db));
-                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone()), mic_level, stopping.clone()));
+                procs.push(spawn_proc(mic_rx, m.sample_rate(), Source::Me, None, session_start, job_tx.clone(), ev.clone(), wav_path("me"), Some(mic_muted.clone()), mic_level, stopping.clone()));
                 Some(m)
             }
             Err(e) => {
@@ -2041,7 +2053,7 @@ fn run_session(
             Ok(s) => {
                 let sys_level = zord_audio::LevelControl::new(
                     zord_audio::LevelMode::parse(&settings.others_level_mode, settings.others_gain_db));
-                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), Some(sys_muted.clone()), sys_level, stopping.clone()));
+                procs.push(spawn_proc(sys_rx, s.sample_rate(), Source::Others, None, session_start, job_tx.clone(), ev.clone(), others_wav.clone(), Some(sys_muted.clone()), sys_level, stopping.clone()));
                 Some(s)
             }
             Err(e) => {
@@ -2115,7 +2127,11 @@ fn run_session(
                 match transcriber.transcribe(&job.vad.samples, job.source, job.vad.t_start_ms) {
                     Ok(segs) => {
                         for mut seg in segs {
-                            if seg.speaker.is_none() {
+                            // Ground-truth speaker (integration) wins; else the
+                            // live diarization label, if any.
+                            if let Some(spk) = job.speaker {
+                                seg.speaker = Some(spk);
+                            } else if seg.speaker.is_none() {
                                 seg.speaker = live_speaker;
                             }
                             let _ = store.insert_segment(&session, &seg);
@@ -2195,6 +2211,230 @@ fn run_session(
     }
 
     tracing::info!("control: session idle");
+    shutdown
+}
+
+/// Run an **integration** recording session (Phase 29b). Instead of the system
+/// loopback, an [`zord_integrations::Integration`] (here the built-in
+/// `FakeProvider`) supplies one identity-labeled audio stream per participant;
+/// each becomes a per-speaker track (`Others` + a ground-truth speaker index →
+/// `spk-N.wav`, wall-clock aligned), while the local mic still drives "Me". The
+/// session ends on the provider's `Ended` or a user Stop. No diarization runs —
+/// speakers are known. Triggered for now by the `ZORD_FAKE_INTEGRATION` env var;
+/// the real Discord provider + Settings UI land in Phase 30.
+fn run_integration_session(
+    opts: SessionOpts,
+    rx: &mpsc::Receiver<RecorderCmd>,
+    ev: &UnboundedSender<Event>,
+    db_path: &PathBuf,
+) -> bool {
+    let SessionOpts { model, input_device, record_mic, live, .. } = opts;
+
+    let model_path = if live {
+        let _ = ev.send(Event::Status(Status::PreparingModel));
+        let ev2 = ev.clone();
+        match ensure_model(model, &mut |done, total| {
+            if let Some(total) = total {
+                let pct = (done as f64 / total as f64 * 100.0) as u8;
+                let _ = ev2.send(Event::Status(Status::Downloading(pct)));
+            }
+        }) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                let _ = ev.send(Event::Status(Status::Error(format!("model: {e}"))));
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Status(Status::Error(format!("db: {e}"))));
+            return false;
+        }
+    };
+    let started_at = now_ms();
+    let session_id = format!("sess-{started_at}");
+    let settings = zord_config::Settings::load();
+    // Integration sessions always persist per-speaker tracks (their WAVs are the
+    // transcription input + feed future re-transcription).
+    let session_dir = settings
+        .session_audio_dir(started_at)
+        .unwrap_or_else(|_| settings.audio_dir().unwrap_or_default().join(&session_id));
+    let _ = std::fs::create_dir_all(&session_dir);
+    let _ = store.create_session(&Session {
+        id: session_id.clone(),
+        started_at,
+        ended_at: None,
+        title: None,
+        audio_path: Some(session_dir.display().to_string()),
+        model: model.name().to_string(),
+    });
+    let _ = ev.send(Event::SessionStarted(session_id.clone()));
+
+    let session_start = Instant::now();
+    let (job_tx, job_rx) = mpsc::channel::<Job>();
+    let stopping = Arc::new(AtomicBool::new(false));
+    let mic_muted = Arc::new(AtomicBool::new(false));
+    let procs: Arc<std::sync::Mutex<Vec<thread::JoinHandle<()>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // Microphone ("Me") — the local user; the Discord provider (Phase 30)
+    // suppresses the followed user's own stream so it isn't double-captured.
+    let mic = if record_mic {
+        let (mic_tx, mic_rx) = mpsc::channel::<Vec<f32>>();
+        match Microphone::start_with(mic_tx, input_device.as_deref()) {
+            Ok(m) => {
+                let mic_level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
+                    &settings.mic_level_mode,
+                    settings.mic_gain_db,
+                ));
+                let h = spawn_proc(
+                    mic_rx, m.sample_rate(), Source::Me, None, session_start,
+                    job_tx.clone(), ev.clone(), Some(zord_config::track_path(&session_dir, "me")),
+                    Some(mic_muted.clone()), mic_level, stopping.clone(),
+                );
+                procs.lock().unwrap().push(h);
+                Some(m)
+            }
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("microphone: {e}")));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let _ = ev.send(Event::Status(Status::Recording));
+
+    // Transcription + storage thread (same shape as run_session); ground-truth
+    // `job.speaker` lands on each segment.
+    let transcribe = model_path.clone().map(|model_path| {
+        let ev = ev.clone();
+        let session = session_id.clone();
+        let db_path = db_path.clone();
+        let stopping = stopping.clone();
+        thread::spawn(move || {
+            let transcriber = match Transcriber::load(model, &model_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = ev.send(Event::Status(Status::Error(format!("whisper: {e}"))));
+                    return;
+                }
+            };
+            let store = match Store::open(&db_path) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            while let Ok(job) = job_rx.recv() {
+                if stopping.load(Ordering::Relaxed) {
+                    break;
+                }
+                match transcriber.transcribe(&job.vad.samples, job.source, job.vad.t_start_ms) {
+                    Ok(segs) => {
+                        for mut seg in segs {
+                            if let Some(spk) = job.speaker {
+                                seg.speaker = Some(spk);
+                            }
+                            let _ = store.insert_segment(&session, &seg);
+                            let _ = ev.send(Event::Segment(seg));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = ev.send(Event::Notice(format!("transcribe error: {e}")));
+                    }
+                }
+            }
+        })
+    });
+
+    // Drive the integration on its own thread: each participant → a per-speaker
+    // proc (Others + ground-truth index → spk-N.wav); names → speaker_names.
+    let ended = Arc::new(AtomicBool::new(false));
+    let it_job_tx = job_tx.clone();
+    let integration_thread = {
+        let (stopping, ended, ev) = (stopping.clone(), ended.clone(), ev.clone());
+        let (session_id, db_path, session_dir, procs) =
+            (session_id.clone(), db_path.clone(), session_dir.clone(), procs.clone());
+        let (others_mode, others_gain) =
+            (settings.others_level_mode.clone(), settings.others_gain_db);
+        thread::spawn(move || {
+            let store = Store::open(&db_path).ok();
+            let mut provider = zord_integrations::FakeProvider::default();
+            let announce = |idx: i32, name: &str| {
+                if let Some(s) = store.as_ref() {
+                    let _ = s.set_speaker_name(&session_id, idx, name);
+                    let _ = ev.send(Event::Speakers(s.speaker_names(&session_id).unwrap_or_default()));
+                }
+            };
+            let on_join = |idx: i32, name: String, sample_rate: u32, audio: zord_integrations::AudioStream| {
+                announce(idx, &name);
+                let level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
+                    &others_mode,
+                    others_gain,
+                ));
+                let wav = Some(zord_config::track_path(&session_dir, &format!("spk-{idx}")));
+                let h = spawn_proc(
+                    audio, sample_rate, Source::Others, Some(idx), session_start,
+                    it_job_tx.clone(), ev.clone(), wav, None, level, stopping.clone(),
+                );
+                if let Ok(mut p) = procs.lock() {
+                    p.push(h);
+                }
+            };
+            let on_rename = |idx: i32, name: String| announce(idx, &name);
+            match zord_integrations::drive_session(&mut provider, &stopping, on_join, on_rename) {
+                Ok(reason) => tracing::info!("integration session ended: {reason:?}"),
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!("integration error: {e}")));
+                }
+            }
+            ended.store(true, Ordering::Relaxed);
+        })
+    };
+    drop(job_tx); // only the procs + integration thread hold senders now
+
+    // Wait for a user Stop/Shutdown *or* the provider ending the session.
+    let mut shutdown = false;
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(RecorderCmd::Stop) => break,
+            Ok(RecorderCmd::Shutdown) => {
+                shutdown = true;
+                break;
+            }
+            Ok(RecorderCmd::SetMicMuted(m)) => mic_muted.store(m, Ordering::Relaxed),
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if ended.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    stopping.store(true, Ordering::Relaxed);
+    drop(mic);
+    let _ = integration_thread.join();
+    if let Ok(mut p) = procs.lock() {
+        for h in p.drain(..) {
+            let _ = h.join();
+        }
+    }
+    if let Some(t) = transcribe {
+        let _ = t.join();
+    }
+    let _ = store.end_session(&session_id, now_ms());
+    // Integration sessions carry ground-truth speakers → no diarization pass.
+    let _ = ev.send(Event::Status(Status::Idle));
+    let _ = ev.send(Event::Speakers(store.speaker_names(&session_id).unwrap_or_default()));
+    emit_sessions(&store, ev);
+    tracing::info!("control: integration session torn down");
     shutdown
 }
 
@@ -2399,10 +2639,14 @@ fn smooth_level(rms: f32, n: usize, sample_rate: u32, mut level: f32) -> f32 {
 }
 
 /// Per-channel resample + VAD stage that also emits live level meters.
+#[allow(clippy::too_many_arguments)]
 fn spawn_proc(
     rx: mpsc::Receiver<Vec<f32>>,
     sample_rate: u32,
     source: Source,
+    // Ground-truth speaker for every job from this proc (integration per-speaker
+    // tracks); `None` for mic/desktop.
+    speaker: Option<i32>,
     session_start: Instant,
     job_tx: mpsc::Sender<Job>,
     ev: UnboundedSender<Event>,
@@ -2512,11 +2756,11 @@ fn spawn_proc(
             // Timestamps are wall-clock (the input stream is padded to real time;
             // the resampler adds only ~tens of ms of buffering latency).
             for seg in segmenter.push(&mono) {
-                let _ = job_tx.send(Job { source, vad: seg });
+                let _ = job_tx.send(Job { source, speaker, vad: seg });
             }
         }
         if let Some(seg) = segmenter.flush() {
-            let _ = job_tx.send(Job { source, vad: seg });
+            let _ = job_tx.send(Job { source, speaker, vad: seg });
         }
         if let Some(w) = wav {
             let _ = w.finalize();

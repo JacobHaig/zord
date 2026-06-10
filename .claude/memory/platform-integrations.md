@@ -112,6 +112,13 @@ Cargo feature (out of the default build). Related: [[architecture]],
 `ParticipantRenamed{key,name}` / `Ended{reason}`, `Participant{key,name}`. The
 seam is dependency-free (default build, NOT behind `discord`) — only impls are
 heavy. `FakeProvider` (canned sparse tone bursts) validates the path; unit-tested.
-Next: **29b** engine "integration session" mode (per-`ParticipantJoined` → assign
-speaker idx + `speaker_names` + per-speaker proc → `spk-N.wav`; Me = local mic;
-`Ended` finalizes; skip diarization). Then 29c GUI, then Phase 30 Discord impl.
+**29b ✅ DONE (build-verified):** `drive_session` (in zord-integrations,
+unit-tested) assigns a stable 0-based speaker index per participant; engine
+`run_integration_session` (separate fn, doesn't touch run_session) spawns a
+per-speaker proc per `ParticipantJoined` (`Others` + ground-truth idx →
+`spk-N.wav`, wall-clock aligned); `Job` gained `speaker: Option<i32>`; Me = local
+mic; ends on `Ended` or Stop; no diarization. Hidden trigger
+`ZORD_FAKE_INTEGRATION=1` reuses the Record button. Runtime check = GUI launch
+(engine work isn't headless-testable). **29c folded into Phase 30** (env trigger
+reuses Record; real UI = Settings → Integrations tab). Next: **Phase 30** Discord
+provider impl (real `Integration` behind `discord`, SSRC→user mapping, consent).

@@ -9591,6 +9591,7 @@ dependencies = [
  "zord-core",
  "zord-diarize",
  "zord-export",
+ "zord-integrations",
  "zord-overview",
  "zord-store",
  "zord-summarize",

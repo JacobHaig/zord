@@ -37,6 +37,7 @@ zord-export = { path = "crates/zord-export" }
 zord-summarize = { path = "crates/zord-summarize" }
 zord-overview = { path = "crates/zord-overview" }
 zord-diarize = { path = "crates/zord-diarize" }
+zord-integrations = { path = "crates/zord-integrations" }
 zord-web = { path = "crates/zord-web" }
 
 # shared third-party
