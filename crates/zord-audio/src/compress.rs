@@ -91,7 +91,8 @@ pub fn compress_wav_to_opus(src: &Path, dst: &Path, bitrate: i32) -> Result<()> 
     let block_len = spec.sample_rate as usize * channels; // ~1 s interleaved
     let mut block: Vec<f32> = Vec::with_capacity(block_len);
     let mut pending: Vec<f32> = Vec::new(); // mono 48k awaiting a full frame
-    let mut input_samples_48k: u64 = 0;
+    let mut native_frames: u64 = 0; // input length at the source rate
+    let mut produced_48k: u64 = 0; // resampled samples handed to the encoder
     let mut granule: u64 = 0;
     let mut packets: Vec<Vec<u8>> = Vec::new(); // small buffer; flushed per block
 
@@ -103,6 +104,7 @@ pub fn compress_wav_to_opus(src: &Path, dst: &Path, bitrate: i32) -> Result<()> 
         if block.is_empty() {
             return Ok(());
         }
+        native_frames += (block.len() / channels) as u64;
         let mono_48k = match resampler.as_mut() {
             Some(r) => r.process(block)?,
             None if channels > 1 => block
@@ -111,7 +113,7 @@ pub fn compress_wav_to_opus(src: &Path, dst: &Path, bitrate: i32) -> Result<()> 
                 .collect(),
             None => std::mem::take(block),
         };
-        input_samples_48k += mono_48k.len() as u64;
+        produced_48k += mono_48k.len() as u64;
         pending.extend_from_slice(&mono_48k);
         block.clear();
         while pending.len() >= FRAME {
@@ -155,25 +157,41 @@ pub fn compress_wav_to_opus(src: &Path, dst: &Path, bitrate: i32) -> Result<()> 
     push_block(&mut block, &mut pending, &mut enc, &mut packets)?;
     flush_packets!();
 
-    // Final (possibly zero-padded) frame, end-trimmed via the granule.
-    let mut last = std::mem::take(&mut pending);
-    if !last.is_empty() || input_samples_48k == 0 {
-        last.resize(FRAME, 0.0);
-        let p = enc.encode_vec_float(&last, 4000).context("encode tail")?;
-        let final_granule = pre_skip as u64 + input_samples_48k;
-        writer
-            .write_packet(p, serial, PacketWriteEndInfo::EndStream, final_granule)
-            .context("write tail")?;
-    } else {
-        // Input ended exactly on a frame boundary: re-mark the stream end by
-        // an empty-but-valid trailing frame carrying the trim granule.
-        let silent = vec![0.0f32; FRAME];
-        let p = enc.encode_vec_float(&silent, 4000).context("encode tail")?;
-        let final_granule = pre_skip as u64 + input_samples_48k;
-        writer
-            .write_packet(p, serial, PacketWriteEndInfo::EndStream, final_granule)
-            .context("write tail")?;
+    // A resampler holds latency internally — flush it with silence until the
+    // expected output length is reached, or the tail (tens of ms) would be
+    // dropped and verification against the WAV's duration would fail.
+    let expected_48k = native_frames * OPUS_RATE as u64 / spec.sample_rate.max(1) as u64;
+    if let Some(r) = resampler.as_mut() {
+        let mut stall = 0;
+        while produced_48k < expected_48k && stall < 8 {
+            let zeros = vec![0.0f32; 1024 * channels];
+            let out = r.process(&zeros)?;
+            if out.is_empty() {
+                stall += 1;
+            } else {
+                stall = 0;
+            }
+            produced_48k += out.len() as u64;
+            pending.extend_from_slice(&out);
+            while pending.len() >= FRAME {
+                let frame: Vec<f32> = pending.drain(..FRAME).collect();
+                packets.push(enc.encode_vec_float(&frame, 4000).context("encode")?);
+            }
+            flush_packets!();
+        }
     }
+
+    // Final (possibly zero-padded) frame; the end-trim granule marks the true
+    // length so decoders cut the padding (and any flush overshoot) exactly.
+    // If the flush stalled short (pathological), the granule stays honest and
+    // the caller's duration verification keeps the WAV.
+    let final_granule = pre_skip as u64 + expected_48k.min(produced_48k);
+    let mut last = std::mem::take(&mut pending);
+    last.resize(FRAME, 0.0);
+    let p = enc.encode_vec_float(&last, 4000).context("encode tail")?;
+    writer
+        .write_packet(p, serial, PacketWriteEndInfo::EndStream, final_granule)
+        .context("write tail")?;
     Ok(())
 }
 

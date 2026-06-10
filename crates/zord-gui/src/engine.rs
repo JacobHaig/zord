@@ -7,7 +7,7 @@
 //! the GUI over a `tokio` unbounded channel; the GUI sends [`RecorderCmd`] /
 //! [`DbCmd`] over std channels.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -367,6 +367,12 @@ pub enum DbCmd {
     },
     /// Mix the session's per-speaker tracks into one WAV (Phase 30e).
     ExportAudio(String),
+    /// Compress kept WAV tracks of ended sessions to Opus (Phase 37).
+    /// `ignore_age` (the "compress now" button) processes everything;
+    /// otherwise only sessions older than `compress_after_days`.
+    CompressAudio {
+        ignore_age: bool,
+    },
     Rename {
         id: String,
         title: String,
@@ -654,6 +660,24 @@ impl Engine {
             thread::spawn(move || {
                 let sup = ev.clone();
                 supervise("playback", &sup, move || play_loop(play_rx, ev));
+            });
+        }
+        {
+            // Age-based compression sweep (Phase 37): shortly after startup,
+            // then periodically. The worker re-reads settings on every run,
+            // so toggling the feature needs no restart.
+            let db_tx = db_tx.clone();
+            thread::spawn(move || {
+                thread::sleep(std::time::Duration::from_secs(90));
+                loop {
+                    if db_tx
+                        .send(DbCmd::CompressAudio { ignore_age: false })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_secs(6 * 3600));
+                }
             });
         }
         (
@@ -1512,6 +1536,42 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     jobs.end(&ev, &jid);
                 });
             }
+            DbCmd::CompressAudio { ignore_age } => {
+                // Encoding hours of audio is heavy — off the db thread, as a
+                // visible, cancellable job.
+                let ev = ev.clone();
+                let db_path = db_path.clone();
+                let jobs = jobs.clone();
+                thread::spawn(move || {
+                    let jid = "compress-audio".to_string();
+                    let token = jobs.begin(&ev, &jid, "compress", "Compressing kept audio");
+                    supervise("audio compression", &ev, || {
+                        match compress_sweep(&db_path, ignore_age, &token) {
+                            Ok((sessions, bytes)) if sessions > 0 => {
+                                let _ = ev.send(Event::Notice(format!(
+                                    "Compressed {sessions} session(s) — reclaimed {:.1} MB.",
+                                    bytes as f64 / 1_048_576.0
+                                )));
+                                if let Ok(store) = Store::open(&db_path) {
+                                    emit_sessions(&store, &ev);
+                                }
+                            }
+                            Ok(_) => {
+                                if ignore_age {
+                                    let _ = ev.send(Event::Notice(
+                                        "Nothing to compress — kept audio is already Opus."
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                let _ = ev.send(Event::Notice(format!("audio compression: {e}")));
+                            }
+                        }
+                    });
+                    jobs.end(&ev, &jid);
+                });
+            }
             DbCmd::Rename { id, title } => {
                 let _ = store.set_session_title(&id, &title);
                 emit_sessions(&store, &ev);
@@ -2027,6 +2087,106 @@ fn exports_dir() -> anyhow::Result<PathBuf> {
         .join("exports");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Compress one kept track in place (Phase 37): WAV → `<stem>.opus` via a
+/// `.partial` — verify the decoded length, promote, and only then delete the
+/// WAV. Returns the bytes reclaimed.
+fn compress_track(wav: &Path, bitrate: i32) -> anyhow::Result<u64> {
+    let opus = wav.with_extension("opus");
+    let partial = wav.with_extension("opus.partial");
+    let _ = std::fs::remove_file(&partial); // stale from a crash
+    zord_audio::compress_wav_to_opus(wav, &partial, bitrate)?;
+    // Verify before deleting anything: decoded length within 1% (+1 frame).
+    let (wav_samples, wav_rate) = zord_audio::wav_duration(wav)?;
+    let expect_48k = wav_samples * 48_000 / wav_rate.max(1) as u64;
+    let got = zord_audio::OpusBlocks::open(&partial)?
+        .total_samples()
+        .ok_or_else(|| anyhow::anyhow!("compressed file carries no length"))?;
+    let tolerance = expect_48k / 100 + 960;
+    anyhow::ensure!(
+        got.abs_diff(expect_48k) <= tolerance,
+        "verification failed: {got} vs {expect_48k} samples"
+    );
+    let wav_bytes = std::fs::metadata(wav)?.len();
+    std::fs::rename(&partial, &opus)?;
+    let opus_bytes = std::fs::metadata(&opus)?.len();
+    std::fs::remove_file(wav)?;
+    Ok(wav_bytes.saturating_sub(opus_bytes))
+}
+
+/// The compression sweep (Phase 37): every **ended** session with kept WAV
+/// tracks, old enough per `compress_after_days` (all of them when
+/// `ignore_age`), gets each track compressed via [`compress_track`]. Returns
+/// `(sessions touched, bytes reclaimed)`. Cancellable between tracks.
+fn compress_sweep(
+    db_path: &PathBuf,
+    ignore_age: bool,
+    token: &Arc<AtomicBool>,
+) -> anyhow::Result<(usize, u64)> {
+    let settings = zord_config::Settings::load();
+    if settings.compress_after_days.is_none() && !ignore_age {
+        return Ok((0, 0)); // compression turned off
+    }
+    let bitrate = zord_audio::opus_bitrate(&settings.compress_quality);
+    let min_age_ms = settings.compress_after_days.unwrap_or(0) as u64 * 86_400_000;
+    let now = now_ms();
+    let store = Store::open(db_path)?;
+    let (mut touched, mut reclaimed) = (0usize, 0u64);
+    for s in store.list_sessions()? {
+        if cancelled(token) {
+            break;
+        }
+        let Some(prefix) = s.audio_path else { continue };
+        if s.ended_at.is_none() {
+            continue; // never the live session
+        }
+        if !ignore_age && now.saturating_sub(s.started_at) < min_age_ms {
+            continue;
+        }
+        let dir = PathBuf::from(&prefix);
+        let mut wavs: Vec<PathBuf> = if dir.is_dir() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.ends_with(".partial") {
+                    let _ = std::fs::remove_file(&p); // orphan from a crash
+                } else if p.extension().is_some_and(|x| x == "wav") {
+                    found.push(p);
+                }
+            }
+            found
+        } else {
+            // Legacy flat layout: <prefix>.<role>.wav
+            ["me", "others"]
+                .iter()
+                .map(|r| PathBuf::from(format!("{prefix}.{r}.wav")))
+                .filter(|p| p.is_file())
+                .collect()
+        };
+        wavs.sort();
+        let mut any = false;
+        for wav in wavs {
+            if cancelled(token) {
+                return Ok((touched, reclaimed));
+            }
+            match compress_track(&wav, bitrate) {
+                Ok(b) => {
+                    reclaimed += b;
+                    any = true;
+                }
+                Err(e) => tracing::warn!("compress {}: {e}", wav.display()),
+            }
+        }
+        if any {
+            touched += 1;
+        }
+    }
+    Ok((touched, reclaimed))
 }
 
 /// Render a session and write it to the app data `exports/` directory.
@@ -3380,6 +3540,32 @@ mod tests {
         // Sub-30ms shortfall is jitter, not a gap.
         let out = pad_to_wallclock(start, 48_000 - 480 - 100, frame.clone(), rate);
         assert_eq!(out, frame);
+    }
+
+    #[test]
+    fn compress_track_swaps_wav_for_opus() {
+        let dir = std::env::temp_dir().join(format!("zord-ctrack-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("me.wav");
+        let mut w = zord_audio::WavWriter::create(&wav, 16_000).unwrap();
+        let tone: Vec<f32> = (0..16_000)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 16_000.0).sin() * 0.4)
+            .collect();
+        w.write(&tone).unwrap();
+        w.finalize().unwrap();
+        // A stale partial from a "crash" must not break the swap.
+        std::fs::write(dir.join("me.opus.partial"), b"garbage").unwrap();
+
+        let reclaimed = compress_track(&wav, 32_000).unwrap();
+        assert!(!wav.exists(), "wav must be deleted after verify");
+        assert!(dir.join("me.opus").exists());
+        assert!(!dir.join("me.opus.partial").exists());
+        assert!(reclaimed > 0);
+        // The result decodes to ~1 s at 48k.
+        let (decoded, rate) = zord_audio::read_audio_mono_f32(&dir.join("me.opus")).unwrap();
+        assert_eq!(rate, 48_000);
+        assert!((decoded.len() as i64 - 48_000).unsigned_abs() < 1_000);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

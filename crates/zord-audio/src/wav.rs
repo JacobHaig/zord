@@ -119,6 +119,15 @@ pub fn repair_wav_header(path: impl AsRef<Path>) -> Result<bool> {
     }
 }
 
+/// A WAV's length in samples (per channel) and its sample rate, from the
+/// header only — cheap, used to verify compression before deleting the WAV.
+pub fn wav_duration(path: impl AsRef<Path>) -> Result<(u64, u32)> {
+    let reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    validate_wav_spec(spec)?;
+    Ok((reader.duration() as u64, spec.sample_rate))
+}
+
 /// Read the `[start_ms, end_ms)` span of a WAV as mono `f32` in `[-1, 1]`,
 /// returning `(samples, sample_rate)`. Rate-agnostic (Phase 25d): offsets are
 /// computed from the file's own header, so a wall-clock-aligned track maps
