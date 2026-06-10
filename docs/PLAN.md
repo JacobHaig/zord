@@ -1038,7 +1038,8 @@ Sub-phases (all shipped):
 ## Platform integrations (Phases 27–31) — major initiative
 
 > 📐 ASCII reference diagrams for this initiative live in
-> [`docs/diagrams/integrations.md`](diagrams/integrations.md).
+> [`docs/diagrams/integrations.md`](diagrams/integrations.md). A user + service
+> flow walkthrough is in [`docs/discord-integration.md`](discord-integration.md).
 
 Today every voice the app hears arrives as one **mixed** stream: the system
 loopback ("Others"), which blends all remote participants together. Per-speaker

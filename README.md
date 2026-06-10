@@ -116,6 +116,9 @@ transcripts in a browser. Both are local-only.
 git clone <your-fork-url> zord && cd zord
 cargo build            # debug
 cargo build --release  # optimized (recommended for real use)
+
+# What we use for release
+cargo build -p zord-gui --release --features parakeet --features diarization --features llm-remote --features llm-local
 ```
 
 That produces two binaries:
@@ -205,6 +208,9 @@ source — that's what the C toolchain/CMake are for. Discord enforces
 [DAVE](https://discord.com/blog/meet-dave-e2ee-for-audio-video) (E2EE) on all
 voice; songbird 0.6 implements it, so the bot can still receive and decrypt
 audio. The first build of this feature is slow (it compiles songbird + serenity).
+
+How it works (user flow + behind-the-hood services):
+[`docs/discord-integration.md`](docs/discord-integration.md).
 
 Status: the receive/decrypt path is **verified working** via a de-risking spike
 (`cargo run -p zord-integrations --features discord --bin discord-spike`, driven
