@@ -1037,6 +1037,9 @@ Sub-phases (all shipped):
 
 ## Platform integrations (Phases 27–31) — major initiative
 
+> 📐 ASCII reference diagrams for this initiative live in
+> [`docs/diagrams/integrations.md`](diagrams/integrations.md).
+
 Today every voice the app hears arrives as one **mixed** stream: the system
 loopback ("Others"), which blends all remote participants together. Per-speaker
 diarization (Phase 16) recovers identity from that mix by *clustering* — error-
