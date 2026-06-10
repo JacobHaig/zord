@@ -1595,6 +1595,24 @@ pre-existing clippy warnings ahead of the `-D warnings` CI gate.
   sandbox constraints (ScreenCaptureKit loopback under sandbox) before
   committing.
 
+### Phase 36 — Premium UX pass
+- **36a ✅ DONE (June 2026) — UI polish + theming.** Token layer in
+  `style.css` (spacing/radius/elevation/motion/focus + color roles split:
+  `--accent` interactive (themable, defaults to the old cyan), `--danger`
+  fixed record/destructive red, `--me`/`--others` channels (themable, with
+  computed `-fg` pairs), `--discord` fixed); shared button-state primitives
+  via selector groups (hover/press/focus-visible/disabled — no markup churn);
+  pop-in entrances on menus/dialogs/toasts, elevation tokens, themed
+  scrollbars, session-action hover fades, gradient+glow Record buttons; fixed
+  latent undefined `var(--fg)`/`var(--rec)` bugs. **Theme panel**: 6 accent
+  presets + custom hex for accent/Me/Others, luminance-picked readable
+  foregrounds, live apply via root custom properties, reset. Default palette
+  pixel-identical. Spec:
+  `docs/superpowers/specs/2026-06-10-ui-polish-theming-design.md`.
+- **36b — First-run guided setup wizard** (next): intent questions, mic
+  check, permissions walk-through, optional Discord/integrations setup.
+  To be specced.
+
 ---
 
 ## 10. Open questions to revisit during build
