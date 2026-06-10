@@ -26,6 +26,10 @@ in `docs/PLAN.md` → "Productionization & official release".
 - **Discord 30d/30e land BEFORE the release** (headline feature).
 - **Order: 32 → 33 → 30d/30e → 34 → release; 35 (stores) can trail.**
 
+**Status:** Phase 32 ✅ (all six sub-phases, one commit) and Phase 33 ✅
+(ci.yml gate on macos-15 + first tests for zord-core/transcribe/capture/gui)
+landed June 2026, merged to main. Next: Discord 30d/30e, then Phase 34.
+
 **Audit top findings (verified, June 2026):**
 1. `engine.rs` WAV `let _ = w.finalize()` — errors swallowed; panic mid-proc
    drops writer unfinalized → unplayable WAV (data loss).
