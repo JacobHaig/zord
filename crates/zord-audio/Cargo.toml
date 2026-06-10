@@ -10,3 +10,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 rubato = "3.0"
 hound = "3.5"
+# Opus compression for kept recordings (Phase 37). opus2 is the same libopus
+# wrapper songbird uses, so discord builds share one native libopus build;
+# ogg is the pure-Rust container.
+opus2 = "0.4"
+ogg = "0.9"
