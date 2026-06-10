@@ -2,12 +2,35 @@
 //! full-text search. Everything stays on-device.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use zord_core::{
     ItemKind, ItemStatus, Project, ProjectItem, ProjectStatus, Segment, Session, Source, Word,
 };
+
+/// Maximum number of raw samples kept per enrolled person. Older samples beyond
+/// this cap are pruned on each [`Store::enroll_voiceprint`] call so the rolling
+/// bank stays bounded while the centroid improves with newer recordings.
+const VOICEPRINT_SAMPLE_CAP: i64 = 8;
+
+/// One known person in the voiceprint library (Speakers view row).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceprintInfo {
+    /// Stable database id.
+    pub id: i64,
+    /// Display name (unique in the library).
+    pub name: String,
+    /// Embedding model id; all samples for this person are in this embedding space.
+    pub model: String,
+    /// Number of raw samples stored (≤ [`VOICEPRINT_SAMPLE_CAP`]).
+    pub samples: u32,
+    /// When the last sample was enrolled, as Unix epoch seconds.
+    pub updated_at: u64,
+    /// `(session_id, session_title)` pairs where this person was auto-identified,
+    /// ordered newest-first.
+    pub appearances: Vec<(String, String)>,
+}
 
 /// Process-wide database passphrase. Set once at startup (after unlocking);
 /// every `Store::open` applies it as the SQLCipher key. `None` = no encryption.
@@ -691,6 +714,345 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 38: voiceprint library — enroll, match, manage
+    // -----------------------------------------------------------------------
+
+    /// Add (or update) a voiceprint entry for `name` / `model`, appending
+    /// `embedding` as a new sample. If the stored model differs from `model`
+    /// the old samples are dropped and the model is updated before the new
+    /// sample is inserted (embeddings are not comparable across models).
+    /// The rolling sample bank is capped at [`VOICEPRINT_SAMPLE_CAP`]; the
+    /// oldest samples beyond that cap are pruned after each insert.
+    /// Returns the voiceprint id (stable across calls for the same name).
+    pub fn enroll_voiceprint(
+        &self,
+        name: &str,
+        model: &str,
+        embedding: &[f32],
+        session_id: Option<&str>,
+    ) -> Result<i64> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Upsert the voiceprint row.
+        tx.execute(
+            "INSERT INTO voiceprints (name, model, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at",
+            params![name, model, now_secs],
+        )?;
+        let vp_id: i64 = tx.query_row(
+            "SELECT id, model FROM voiceprints WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
+
+        // If the stored model differs, old samples are incomparable — wipe them
+        // and switch to the new model.
+        let stored_model: String = tx.query_row(
+            "SELECT model FROM voiceprints WHERE id = ?1",
+            params![vp_id],
+            |r| r.get(0),
+        )?;
+        if stored_model != model {
+            tx.execute(
+                "DELETE FROM voiceprint_samples WHERE voiceprint_id = ?1",
+                params![vp_id],
+            )?;
+            tx.execute(
+                "UPDATE voiceprints SET model = ?2, updated_at = ?3 WHERE id = ?1",
+                params![vp_id, model, now_secs],
+            )?;
+        }
+
+        // Insert new sample.
+        tx.execute(
+            "INSERT INTO voiceprint_samples (voiceprint_id, session_id, embedding, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![vp_id, session_id, embedding_to_blob(embedding), now_secs],
+        )?;
+
+        // Prune to the newest VOICEPRINT_SAMPLE_CAP samples.
+        tx.execute(
+            "DELETE FROM voiceprint_samples
+             WHERE voiceprint_id = ?1
+               AND rowid IN (
+                   SELECT rowid FROM voiceprint_samples
+                   WHERE voiceprint_id = ?1
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT -1 OFFSET ?2
+               )",
+            params![vp_id, VOICEPRINT_SAMPLE_CAP],
+        )?;
+
+        tx.commit()?;
+        Ok(vp_id)
+    }
+
+    /// All voiceprints with sample counts and session appearances, ordered by
+    /// most-recently updated first.
+    pub fn voiceprints(&self) -> Result<Vec<VoiceprintInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, model,
+                    (SELECT COUNT(*) FROM voiceprint_samples WHERE voiceprint_id = voiceprints.id),
+                    updated_at
+             FROM voiceprints
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, u32>(3)?,
+                r.get::<_, i64>(4)? as u64,
+            ))
+        })?;
+        let mut infos = Vec::new();
+        for row in rows {
+            let (id, name, model, samples, updated_at) = row?;
+            // Collect sessions where this voiceprint was identified, newest first.
+            let mut app_stmt = self.conn.prepare(
+                "SELECT sn.session_id, COALESCE(s.title, '') \
+                 FROM speaker_names sn \
+                 JOIN sessions s ON s.id = sn.session_id \
+                 WHERE sn.voiceprint_id = ?1 \
+                 ORDER BY s.started_at DESC",
+            )?;
+            let appearances: Vec<(String, String)> = app_stmt
+                .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            infos.push(VoiceprintInfo {
+                id,
+                name,
+                model,
+                samples,
+                updated_at,
+                appearances,
+            });
+        }
+        Ok(infos)
+    }
+
+    /// Compute the mean (centroid) embedding for every enrolled person that has
+    /// samples under `model`, then L2-normalise it. Persons with no samples or
+    /// inconsistent embedding dimensions are silently skipped.
+    ///
+    /// Returns `(voiceprint_id, name, normalised_centroid)` triples; pass the
+    /// result directly to [`best_voiceprint_match`].
+    pub fn voiceprint_centroids(&self, model: &str) -> Result<Vec<(i64, String, Vec<f32>)>> {
+        // Fetch all samples grouped by person.
+        let mut stmt = self.conn.prepare(
+            "SELECT vp.id, vp.name, vs.embedding
+             FROM voiceprints vp
+             JOIN voiceprint_samples vs ON vs.voiceprint_id = vp.id
+             WHERE vp.model = ?1
+             ORDER BY vp.id",
+        )?;
+        let rows = stmt.query_map(params![model], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+
+        // Group samples by person.
+        let mut grouped: Vec<(i64, String, Vec<Vec<f32>>)> = Vec::new();
+        for row in rows {
+            let (id, name, blob) = row?;
+            let emb = blob_to_embedding(&blob);
+            match grouped.last_mut() {
+                Some(last) if last.0 == id => last.2.push(emb),
+                _ => grouped.push((id, name, vec![emb])),
+            }
+        }
+
+        let mut result = Vec::new();
+        for (id, name, samples) in grouped {
+            if samples.is_empty() {
+                continue;
+            }
+            let dim = samples[0].len();
+            // Skip if any sample has an inconsistent dimension.
+            if samples.iter().any(|s| s.len() != dim) || dim == 0 {
+                continue;
+            }
+            // Mean.
+            let mut centroid = vec![0.0f32; dim];
+            for s in &samples {
+                for (c, v) in centroid.iter_mut().zip(s) {
+                    *c += v;
+                }
+            }
+            let n = samples.len() as f32;
+            for c in &mut centroid {
+                *c /= n;
+            }
+            // L2-normalise.
+            let norm: f32 = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm == 0.0 {
+                continue;
+            }
+            for c in &mut centroid {
+                *c /= norm;
+            }
+            result.push((id, name, centroid));
+        }
+        Ok(result)
+    }
+
+    /// Rename a voiceprint. If `name` is already taken by **another** voiceprint,
+    /// the two are merged: this entry's samples are moved to the target, the
+    /// target is pruned to [`VOICEPRINT_SAMPLE_CAP`] newest samples,
+    /// `speaker_names.voiceprint_id` is repointed to the target, and the source
+    /// row is deleted. Otherwise the voiceprint is renamed in place and
+    /// `updated_at` is bumped.
+    pub fn rename_voiceprint(&self, id: i64, name: &str) -> Result<()> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Check if the target name belongs to a different existing voiceprint.
+        let target_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM voiceprints WHERE name = ?1 AND id <> ?2",
+                params![name, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if let Some(target) = target_id {
+            // Merge: move samples, repoint speaker_names, delete source.
+            tx.execute(
+                "UPDATE voiceprint_samples SET voiceprint_id = ?1 WHERE voiceprint_id = ?2",
+                params![target, id],
+            )?;
+            // Prune merged target to cap.
+            tx.execute(
+                "DELETE FROM voiceprint_samples
+                 WHERE voiceprint_id = ?1
+                   AND rowid IN (
+                       SELECT rowid FROM voiceprint_samples
+                       WHERE voiceprint_id = ?1
+                       ORDER BY created_at DESC, rowid DESC
+                       LIMIT -1 OFFSET ?2
+                   )",
+                params![target, VOICEPRINT_SAMPLE_CAP],
+            )?;
+            tx.execute(
+                "UPDATE speaker_names SET voiceprint_id = ?1 WHERE voiceprint_id = ?2",
+                params![target, id],
+            )?;
+            // Delete source — voiceprint_samples already moved so no orphans.
+            tx.execute("DELETE FROM voiceprints WHERE id = ?1", params![id])?;
+            tx.execute(
+                "UPDATE voiceprints SET updated_at = ?2 WHERE id = ?1",
+                params![target, now_secs],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE voiceprints SET name = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, name, now_secs],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove a single voiceprint and all its samples from the library.
+    /// Any `speaker_names` rows that pointed to it have their `voiceprint_id`
+    /// cleared so history is preserved. The samples are deleted via cascade
+    /// (or explicitly if FK enforcement is off).
+    pub fn forget_voiceprint(&self, id: i64) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE speaker_names SET voiceprint_id = NULL WHERE voiceprint_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM voiceprint_samples WHERE voiceprint_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM voiceprints WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Wipe the entire voiceprint library — all people and all samples.
+    /// `speaker_names.voiceprint_id` is cleared for every row first.
+    pub fn forget_all_voiceprints(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE speaker_names SET voiceprint_id = NULL", [])?;
+        tx.execute("DELETE FROM voiceprint_samples", [])?;
+        tx.execute("DELETE FROM voiceprints", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Persist the computed embedding for a diarized speaker slot. Overwrites
+    /// any previously stored embedding for the same `(session_id, speaker)` pair.
+    pub fn set_session_speaker_embedding(
+        &self,
+        session_id: &str,
+        speaker: i32,
+        model: &str,
+        embedding: &[f32],
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO session_speaker_embeddings
+             (session_id, speaker, model, embedding)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, speaker, model, embedding_to_blob(embedding)],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch the stored embedding for a diarized speaker slot, if any.
+    /// Returns `(model_id, embedding)`.
+    pub fn session_speaker_embedding(
+        &self,
+        session_id: &str,
+        speaker: i32,
+    ) -> Result<Option<(String, Vec<f32>)>> {
+        let result = self
+            .conn
+            .query_row(
+                "SELECT model, embedding FROM session_speaker_embeddings
+                 WHERE session_id = ?1 AND speaker = ?2",
+                params![session_id, speaker],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        Ok(result.map(|(m, b)| (m, blob_to_embedding(&b))))
+    }
+
+    /// Record that a diarized speaker slot belongs to a known voiceprint.
+    /// The `speaker_names` row **must already exist** (call [`set_speaker_name`]
+    /// first); this method only updates the `voiceprint_id` column.
+    pub fn link_speaker_voiceprint(
+        &self,
+        session_id: &str,
+        speaker: i32,
+        voiceprint_id: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE speaker_names SET voiceprint_id = ?3
+             WHERE session_id = ?1 AND speaker = ?2",
+            params![session_id, speaker, voiceprint_id],
+        )?;
+        Ok(())
+    }
 }
 
 /// Best-effort `ALTER TABLE`s for columns added after the base schema; each is
@@ -712,6 +1074,11 @@ fn add_late_columns(conn: &Connection) {
     // Free-form per-session notes written by the host (links, action items,
     // reminders). Searchable, and fed to the AI features as authoritative input.
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN notes TEXT", []);
+    // Phase 38 — links a per-session speaker slot to a known voiceprint.
+    let _ = conn.execute(
+        "ALTER TABLE speaker_names ADD COLUMN voiceprint_id INTEGER",
+        [],
+    );
 }
 
 /// Create the base tables, indexes, FTS virtual table, and sync triggers
@@ -805,6 +1172,35 @@ fn create_schema(conn: &Connection) -> Result<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_history_project ON project_history(project_id, at);
 
+            -- Phase 38: persistent cross-session speaker identity library.
+            -- One row per known person; `model` ties the embedding space.
+            CREATE TABLE IF NOT EXISTS voiceprints (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL UNIQUE,
+                model      TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            -- Rolling sample bank (max 8 per person, oldest pruned).
+            -- `session_id` is informational (no FK — the sample outlives its session).
+            CREATE TABLE IF NOT EXISTS voiceprint_samples (
+                voiceprint_id INTEGER NOT NULL REFERENCES voiceprints(id) ON DELETE CASCADE,
+                session_id    TEXT,
+                embedding     BLOB NOT NULL,
+                created_at    INTEGER NOT NULL
+            );
+
+            -- One cached embedding per diarized speaker slot per session,
+            -- used by the engine to propose a voiceprint match.
+            CREATE TABLE IF NOT EXISTS session_speaker_embeddings (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                speaker    INTEGER NOT NULL,
+                model      TEXT NOT NULL,
+                embedding  BLOB NOT NULL,
+                PRIMARY KEY (session_id, speaker)
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS segments_fts USING fts5(
                 text,
                 content='segments',
@@ -845,6 +1241,70 @@ fn get_u64(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<u64> {
 #[inline]
 fn get_opt_u64(r: &rusqlite::Row, idx: usize) -> rusqlite::Result<Option<u64>> {
     Ok(r.get::<_, Option<i64>>(idx)?.map(|x| x as u64))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 38: voiceprint helpers — blob codec, cosine similarity, matcher
+// ---------------------------------------------------------------------------
+
+/// Serialise a float vector as a little-endian f32 blob for SQLite storage.
+fn embedding_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Deserialise a little-endian f32 blob back into a float vector.
+fn blob_to_embedding(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Cosine similarity of two equal-length vectors. Returns `-1.0` for
+/// zero-length, mismatched-dim, or zero-norm inputs.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return -1.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        -1.0
+    } else {
+        dot / (na * nb)
+    }
+}
+
+/// Return the best-matching enrolled voiceprint for `query` from `cands`
+/// (id, name, centroid). The winner must both clear `threshold` **and** beat
+/// the runner-up by at least `margin`; this open-set safety margin prevents
+/// forcing a match when two people sound similar.
+///
+/// `cands` are `(voiceprint_id, name, centroid_embedding)` triples, as
+/// returned by [`Store::voiceprint_centroids`].
+pub fn best_voiceprint_match(
+    cands: &[(i64, String, Vec<f32>)],
+    query: &[f32],
+    threshold: f32,
+    margin: f32,
+) -> Option<(i64, String, f32)> {
+    let mut scored: Vec<(usize, f32)> = cands
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, cosine_similarity(&c.2, query)))
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let &(best_i, best) = scored.first()?;
+    if best < threshold {
+        return None;
+    }
+    if let Some(&(_, second)) = scored.get(1) {
+        if best - second < margin {
+            return None;
+        }
+    }
+    let c = &cands[best_i];
+    Some((c.0, c.1.clone(), best))
 }
 
 /// Build a `Session` from a row selected as `(id, started_at, ended_at, title,
@@ -1279,6 +1739,221 @@ mod ledger_tests {
         // Sessions themselves are untouched by a ledger wipe.
         assert_eq!(s.list_sessions().unwrap().len(), 1);
 
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod voiceprint_tests {
+    use super::*;
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zord-vp-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    fn mk_store(tag: &str) -> (Store, std::path::PathBuf) {
+        let db = tmp_db(tag);
+        let s = Store::open(&db).unwrap();
+        (s, db)
+    }
+
+    fn mk_session(s: &Store, id: &str) {
+        s.create_session(&Session {
+            id: id.into(),
+            started_at: 1,
+            ended_at: None,
+            title: Some(format!("Session {id}")),
+            audio_path: None,
+            model: "m".into(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn voiceprint_enroll_match_and_forget() {
+        let (s, db) = mk_store("enroll");
+
+        // Two enrollments for the same name → same id, two samples.
+        let id = s
+            .enroll_voiceprint("Alex", "titanet_small", &[1.0, 0.0, 0.0], None)
+            .unwrap();
+        let id2 = s
+            .enroll_voiceprint("Alex", "titanet_small", &[0.9, 0.1, 0.0], None)
+            .unwrap();
+        assert_eq!(id, id2);
+
+        let cands = s.voiceprint_centroids("titanet_small").unwrap();
+        assert_eq!(cands.len(), 1);
+
+        // Centroid must be L2-normalised.
+        let norm: f32 = cands[0].2.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "norm={norm}");
+
+        // Different model is invisible.
+        assert!(s.voiceprint_centroids("resnet34").unwrap().is_empty());
+
+        // Forget removes the entry entirely.
+        s.forget_voiceprint(id).unwrap();
+        assert!(s.voiceprint_centroids("titanet_small").unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn voiceprint_samples_prune_to_eight() {
+        let (s, db) = mk_store("prune");
+
+        for i in 0..12i32 {
+            s.enroll_voiceprint("Sam", "m", &[i as f32, 1.0], None)
+                .unwrap();
+        }
+
+        let infos = s.voiceprints().unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(
+            infos[0].samples, 8,
+            "expected 8 samples, got {}",
+            infos[0].samples
+        );
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn session_speaker_embeddings_roundtrip_and_cascade() {
+        let (s, db) = mk_store("cascade");
+        mk_session(&s, "s1");
+
+        s.set_session_speaker_embedding("s1", 0, "m", &[0.5, 0.5])
+            .unwrap();
+
+        let got = s.session_speaker_embedding("s1", 0).unwrap().unwrap();
+        assert_eq!(got.0, "m");
+        assert_eq!(got.1, vec![0.5_f32, 0.5_f32]);
+
+        // Deleting the session should cascade-delete the embedding row.
+        s.delete_session("s1").unwrap();
+        assert!(
+            s.session_speaker_embedding("s1", 0).unwrap().is_none(),
+            "embedding should have been deleted with the session"
+        );
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn best_match_respects_threshold_and_margin() {
+        let cands = vec![
+            (1i64, "Alex".to_string(), vec![1.0f32, 0.0]),
+            (2i64, "Sam".to_string(), vec![0.96f32, 0.28]), // cos vs [1,0] ≈ 0.96
+        ];
+
+        // Both candidates are within 0.05 of each other → ambiguous → None.
+        let m = best_voiceprint_match(&cands, &[1.0, 0.0], 0.72, 0.05);
+        assert!(m.is_none(), "expected None for ambiguous match");
+
+        // With runner-up removed, Alex matches.
+        let m = best_voiceprint_match(&cands[..1], &[1.0, 0.0], 0.72, 0.05).unwrap();
+        assert_eq!(m.0, 1);
+
+        // Below threshold → None.
+        assert!(
+            best_voiceprint_match(&cands[..1], &[0.0, 1.0], 0.72, 0.05).is_none(),
+            "expected None below threshold"
+        );
+    }
+
+    #[test]
+    fn rename_voiceprint_plain() {
+        let (s, db) = mk_store("rename");
+        let id = s
+            .enroll_voiceprint("Alice", "m", &[1.0, 0.0], None)
+            .unwrap();
+        s.rename_voiceprint(id, "Alicia").unwrap();
+        let infos = s.voiceprints().unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "Alicia");
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn rename_voiceprint_merge() {
+        let (s, db) = mk_store("merge");
+
+        // Two people — merge Bob into Alex.
+        let alex_id = s.enroll_voiceprint("Alex", "m", &[1.0, 0.0], None).unwrap();
+        let bob_id = s.enroll_voiceprint("Bob", "m", &[0.0, 1.0], None).unwrap();
+        assert_ne!(alex_id, bob_id);
+
+        // Give Bob 7 more samples so after merge we exceed cap.
+        for i in 0..7i32 {
+            s.enroll_voiceprint("Bob", "m", &[i as f32 * 0.1, 1.0], None)
+                .unwrap();
+        }
+
+        // Renaming Bob → "Alex" should merge into Alex's entry.
+        s.rename_voiceprint(bob_id, "Alex").unwrap();
+
+        let infos = s.voiceprints().unwrap();
+        assert_eq!(infos.len(), 1, "only Alex should remain after merge");
+        assert_eq!(infos[0].name, "Alex");
+        // Cap enforced on merged bank.
+        assert_eq!(infos[0].samples, 8, "merged bank must be pruned to 8");
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn forget_all_voiceprints_clears_library() {
+        let (s, db) = mk_store("forgetall");
+        s.enroll_voiceprint("P1", "m", &[1.0], None).unwrap();
+        s.enroll_voiceprint("P2", "m", &[0.0], None).unwrap();
+        assert_eq!(s.voiceprints().unwrap().len(), 2);
+
+        s.forget_all_voiceprints().unwrap();
+        assert!(s.voiceprints().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn link_speaker_voiceprint_roundtrip() {
+        let (s, db) = mk_store("link");
+        mk_session(&s, "s1");
+        let vp_id = s
+            .enroll_voiceprint("Jordan", "m", &[1.0, 0.0], None)
+            .unwrap();
+
+        // speaker_names row must pre-exist for link to work.
+        s.set_speaker_name("s1", 0, "Jordan").unwrap();
+        s.link_speaker_voiceprint("s1", 0, vp_id).unwrap();
+
+        // Appearances should show up in voiceprint info.
+        let infos = s.voiceprints().unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].appearances.len(), 1);
+        assert_eq!(infos[0].appearances[0].0, "s1");
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn model_switch_clears_old_samples() {
+        let (s, db) = mk_store("modelswitch");
+        for _ in 0..3 {
+            s.enroll_voiceprint("Dev", "model_a", &[1.0, 0.0], None)
+                .unwrap();
+        }
+        // Switch to a different model — old samples should be dropped.
+        s.enroll_voiceprint("Dev", "model_b", &[0.0, 1.0], None)
+            .unwrap();
+        let infos = s.voiceprints().unwrap();
+        assert_eq!(infos[0].samples, 1, "model switch should clear old samples");
+        assert_eq!(infos[0].model, "model_b");
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }
