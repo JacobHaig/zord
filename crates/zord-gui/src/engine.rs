@@ -1842,10 +1842,13 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                     record_system,
                     live,
                 };
-                // Hidden dev trigger (Phase 29b): exercise the integration path
-                // with the built-in fake provider. The real Discord provider +
-                // Settings UI replace this in Phase 30.
-                let ended = if std::env::var("ZORD_FAKE_INTEGRATION").is_ok() {
+                // Integration session when the capture mode is "discord" (Phase
+                // 30d UI) or a dev trigger is set — `ZORD_DISCORD` (real provider)
+                // / `ZORD_FAKE_INTEGRATION` (fake). Else a normal recording.
+                let integration = zord_config::Settings::load().capture_mode == "discord"
+                    || std::env::var("ZORD_DISCORD").is_ok()
+                    || std::env::var("ZORD_FAKE_INTEGRATION").is_ok();
+                let ended = if integration {
                     run_integration_session(opts, &rx, &ev, &db_path)
                 } else {
                     run_session(opts, &rx, &ev, &db_path)
@@ -2337,9 +2340,14 @@ fn run_integration_session(
             (session_id.clone(), db_path.clone(), session_dir.clone(), procs.clone());
         let (others_mode, others_gain) =
             (settings.others_level_mode.clone(), settings.others_gain_db);
+        let (discord_token, discord_user, force_fake) = (
+            settings.discord_bot_token.clone(),
+            settings.discord_user_id.trim().parse::<u64>().ok(),
+            std::env::var("ZORD_FAKE_INTEGRATION").is_ok(),
+        );
         thread::spawn(move || {
             let store = Store::open(&db_path).ok();
-            let mut provider = zord_integrations::FakeProvider::default();
+            let mut provider = build_integration_provider(discord_token, discord_user, force_fake);
             let announce = |idx: i32, name: &str| {
                 if let Some(s) = store.as_ref() {
                     let _ = s.set_speaker_name(&session_id, idx, name);
@@ -2373,7 +2381,7 @@ fn run_integration_session(
                     announce(idx, &name);
                 }
             };
-            match zord_integrations::drive_session(&mut provider, &stopping, on_join, on_rename) {
+            match zord_integrations::drive_session(provider.as_mut(), &stopping, on_join, on_rename) {
                 Ok(reason) => tracing::info!("integration session ended: {reason:?}"),
                 Err(e) => {
                     let _ = ev.send(Event::Notice(format!("integration error: {e}")));
@@ -2420,6 +2428,39 @@ fn run_integration_session(
     emit_sessions(&store, ev);
     tracing::info!("control: integration session torn down");
     shutdown
+}
+
+/// Pick the integration backend: the real Discord provider when built with the
+/// `discord` feature and a token + user id are configured (and the fake isn't
+/// forced); otherwise the dependency-free `FakeProvider` (dev / no-feature).
+fn build_integration_provider(
+    _token: String,
+    _user: Option<u64>,
+    _force_fake: bool,
+) -> Box<dyn zord_integrations::Integration> {
+    #[cfg(feature = "discord")]
+    {
+        if !_force_fake {
+            // Settings first; fall back to env vars (same as the spike's
+            // config.temp) so the real provider is testable before the 30d UI.
+            let token = if _token.is_empty() {
+                std::env::var("DISCORD_TOKEN").unwrap_or_default()
+            } else {
+                _token
+            };
+            let user = _user.or_else(|| {
+                std::env::var("DISCORD_USER_ID")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+            });
+            if let (false, Some(uid)) = (token.is_empty(), user) {
+                tracing::info!("integration: using Discord provider (following user {uid})");
+                return Box::new(zord_integrations::DiscordProvider::new(token, uid));
+            }
+        }
+    }
+    tracing::info!("integration: using fake provider");
+    Box::new(zord_integrations::FakeProvider::default())
 }
 
 /// On-demand re-transcription of a past session (the 🔁 button / Phase 25):

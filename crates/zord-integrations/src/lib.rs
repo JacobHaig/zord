@@ -20,10 +20,14 @@
 //! Discord implementation (Phase 30) lands behind the `discord` feature; the
 //! `discord-spike` bin (Phase 27) remains as the DAVE receive proof.
 
+#[cfg(feature = "discord")]
+mod discord;
 mod fake;
 mod integration;
 mod session;
 
+#[cfg(feature = "discord")]
+pub use discord::DiscordProvider;
 pub use fake::FakeProvider;
 pub use integration::{AudioStream, Integration, IntegrationEvent, Participant};
 pub use session::{drive_session, EndReason, TrackRole};

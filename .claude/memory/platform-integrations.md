@@ -134,9 +134,16 @@ single-file** export (mix session-aligned tracks — cheap since aligned).
   config.
 - **30b ✅** `is_me`/`TrackRole` seam + engine routes Me/Others, no local mic;
   FakeProvider marks p0 as me; tests green.
-- **30c** real `DiscordProvider` (songbird, behind feature): follow-user join,
-  per-SSRC → ParticipantJoined (followed id → is_me), SSRC→user mapping fix, leave
-  on user-leave; revisit 5-min pad cap.
+- **30c ✅ (build-verified)** `zord-integrations/src/discord.rs`: serenity +
+  songbird on a dedicated tokio thread bridging into the std mpsc event channel;
+  follows the user (cache_ready scan + voice_state_update), announces on
+  SpeakingStateUpdate (SSRC→user, name via REST nick→global→username, is_me =
+  followed id), routes VoiceTick PCM (downmix→mono) per stream, Ended on leave.
+  Engine `build_integration_provider` picks Discord when capture_mode=="discord" /
+  `ZORD_DISCORD` (+ feature + token; settings or DISCORD_TOKEN/DISCORD_USER_ID env
+  fallback) else fake. Runtime = live-call user step. v1 trade-off: announce-on-
+  speaking-state (already-talking-at-join misses first utterance — Phase 27 gap);
+  5-min pad cap still to revisit.
 - **30d** Settings → Integrations tab (token/user-id/help, Invite-bot button,
   Test-connection, capture-mode "Discord", capability-aware).
 - **30e** in-channel announcement + merged-file export.

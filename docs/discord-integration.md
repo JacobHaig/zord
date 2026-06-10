@@ -5,11 +5,13 @@ How Zord records a Discord voice call: what the **user** does, and what happens
 [`docs/PLAN.md`](PLAN.md) → "Platform integrations (Phases 27–31)"; for diagrams
 see [`docs/diagrams/integrations.md`](diagrams/integrations.md).
 
-> **Status (June 2026).** The receive/decrypt path is **proven** (Phase 27 spike)
-> and the engine + storage seam are **built** (Phases 28–30b). The *real*
-> in-app Discord provider and Settings UI (Phases 30c–e) are **in progress** —
-> today the engine path is exercised with a built-in `FakeProvider`. Where a step
-> isn't wired yet, it's marked _(planned: 30x)_.
+> **Status (June 2026).** The receive/decrypt path is **proven** (Phase 27 spike),
+> and the engine, storage seam, and the **real `DiscordProvider`** are **built**
+> (Phases 28–30c) — compile-verified; runtime-verified by you on a live call. The
+> **Settings → Integrations UI** and the announcement / merged-file extras
+> (Phases 30d–e) are **in progress**; until the UI lands, configure via
+> `config.json` (or the `DISCORD_TOKEN`/`DISCORD_USER_ID` env vars) + capture mode
+> "discord". Steps not yet wired are marked _(planned: 30x)_.
 
 ---
 
@@ -65,34 +67,34 @@ permission (audio comes from Discord), or label speakers by hand (names are real
 ## 3. Behind the hood — the moving parts
 
 ```
-┌──────────────────────────── zord-gui (desktop app) ───────────────────────────┐
+┌──────────────────────────── zord-gui (desktop app) ────────────────────────────┐
 │  Settings → Integrations        engine control thread                          │
 │  (token, user id) ─────────────► run_integration_session                       │
-│                                        │                                        │
-│                                        │ owns a job channel + a transcribe       │
-│                                        │ thread + the integration thread         │
+│                                        │                                       │
+│                                        │ owns a job channel + a transcribe     │
+│                                        │ thread + the integration thread       │
 └────────────────────────────────────────┼───────────────────────────────────────┘
-                                          │
-        ┌─────────────────────────────────┼───────────────────────────────────┐
-        │ zord-integrations               │                                   │
-        │   drive_session(provider) ◄──────┘  (assigns each participant a       │
-        │        │                              TrackRole: Me or Speaker(n))     │
-        │        ▼                                                               │
-        │   Integration (trait)                                                  │
-        │     └─ DiscordProvider  (feature `discord`)  ── songbird + serenity ──┐ │
-        └───────────────────────────────────────────────────────────────────────┘ │
-                                                                                    │
-                                              Discord voice gateway (DAVE E2EE) ◄────┘
+                                         │
+       ┌─────────────────────────────────┼───────────────────────────────────────┐
+       │ zord-integrations               │                                       │
+       │   drive_session(provider) ◄─────┘   (assigns each participant a         │
+       │        │                              TrackRole: Me or Speaker(n))      │
+       │        ▼                                                                │
+       │   Integration (trait)                                                   │
+       │     └─ DiscordProvider  (feature `discord`)  ── songbird + serenity ──┐ │
+       └───────────────────────────────────────────────────────────────────────┘ │
+                                                                                 │
+                                          Discord voice gateway (DAVE E2EE) ◄────┘
 ```
 
 - **`zord-integrations`** holds the backend-agnostic seam: the `Integration`
   trait, `drive_session` (assigns speaker indices / the Me role), and `FakeProvider`
   (a dependency-free stand-in). The seam is in the *default* build — only the
   concrete `DiscordProvider` pulls the heavy libraries, behind `--features discord`.
-- **`DiscordProvider`** _(planned: 30c)_ wraps **songbird** (the Rust Discord voice
-  library) + **serenity** (the gateway client). It connects with your token,
-  follows you into voice, and turns Discord's per-user RTP streams into plain
-  mono-PCM streams.
+- **`DiscordProvider`** (built, behind `--features discord`) wraps **songbird**
+  (the Rust Discord voice library) + **serenity** (the gateway client) on a
+  dedicated tokio runtime thread. It connects with your token, follows you into
+  voice, and turns Discord's per-user RTP streams into plain mono-PCM streams.
 - **`zord-gui`'s engine** (`run_integration_session`) wires those streams into the
   same recording pipeline everything else uses: resample → voice-activity
   segmentation → Whisper → SQLite.

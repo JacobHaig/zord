@@ -1280,7 +1280,7 @@ dep lands. Designed so a **local vs hosted backend swap** is feasible later.
   Record button, so no separate minimal UI is needed now; the proper start/stop +
   per-speaker live state lands with the Settings → Integrations tab in Phase 30.
 
-### Phase 30 — Discord integration (full) 🟡 30a–b DONE
+### Phase 30 — Discord integration (full) 🟡 30a–c DONE (30c build-verified)
 The real `discord` `Integration` on the Phase 29 seam, using the Phase 27 receive
 code, plus the Settings UI.
 
@@ -1317,15 +1317,25 @@ code, plus the Settings UI.
   `Source::Me`/`me.wav` and `Speaker(idx)` → `Others`/`spk-N.wav`, **with no local
   mic** (Me comes from the provider). `FakeProvider` marks participant 0 as `is_me`
   for testing; unit tests updated + green.
-- **30c — the real `DiscordProvider`** (behind `discord`, built from the spike):
-  connect with the token, **follow-the-user** join (guild-agnostic; leave when the
-  user leaves), per-SSRC PCM → `ParticipantJoined` (the followed user's id →
-  `is_me: true`), and the **SSRC→user→name mapping fix** (seed from voice states +
-  speaking/client-connect events on join; `ParticipantRenamed` for late
-  resolution; fall back to "Speaker N"). Engine picks `DiscordProvider` when
-  `capture_mode == "discord"` (+ feature + token); else the env-var `FakeProvider`
-  for dev. **Revisit the 5-min silence-pad cap** so a participant joining well into
-  a long call still aligns (drive padding from the session clock).
+- **30c — the real `DiscordProvider`.** ✅ **DONE (build-verified).**
+  `crates/zord-integrations/src/discord.rs` (behind `discord`): a serenity client +
+  songbird voice receiver on a dedicated tokio runtime thread, bridging into the
+  std `mpsc` event channel. Follows the configured user (`cache_ready` scan +
+  `voice_state_update`), joins their VC, and on each `SpeakingStateUpdate` maps
+  SSRC→user, resolves a name (server nick → global → username, cached, via REST),
+  and emits `ParticipantJoined` (followed id → `is_me`); `VoiceTick` decoded PCM
+  is downmixed to mono and routed to that participant's stream; leaving voice →
+  `Ended`. Engine selects it via `build_integration_provider` when
+  `capture_mode == "discord"` / `ZORD_DISCORD` (+ feature + token; settings or
+  `DISCORD_TOKEN`/`DISCORD_USER_ID` env fallback); else `FakeProvider`. Builds
+  (default + `--features discord`) + clippy + tests green. **Runtime = user step**
+  (live DAVE call with their bot — not headless-testable).
+  - **Known v1 trade-offs / follow-ups:** mapping is announce-on-`SpeakingStateUpdate`
+    (the reliable carrier) — a participant already mid-sentence when the bot joins
+    isn't captured until their next speaking transition (the Phase 27 gap); seeding
+    from voice states + `ParticipantRenamed` backfill is the planned hardening.
+    The **5-min silence-pad cap** still needs revisiting for very-late joiners
+    (drive padding from the session clock).
 - **30d — Settings → Integrations tab.** New `stab` "integrations"; Discord
   section: token field (masked) + user-id field + "how to find your user id" help;
   **"Invite bot to a server"** button (REST `GET /oauth2/applications/@me` →
