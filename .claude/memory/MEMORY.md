@@ -22,6 +22,6 @@
 - [Verification limits](verification-limits.md) — what can't run headlessly (live audio, LLM/ASR, Windows, signing)
 - [ASR/diarization model watchlist](asr-diarization-model-watchlist.md) — Parakeet v3 is the ceiling; Reverb added; Sortformer rejected; revisit triggers
 - [Canonical docs](docs-canonical.md) — docs/PLAN.md is the phase tracker; README + RELEASE roles
-- [Platform integrations](platform-integrations.md) — Phases 27–30: separated per-participant feeds (Discord/songbird) reuse the diarization speaker surface; DAVE is the feasibility gate
-- [Productionization](productionization.md) — Phases 32–35 official release: stability hardening, PR CI, channel-aware updates (stores own updates; `self-update` feature for GitHub builds), unsigned for now
+- [Platform integrations](platform-integrations.md) — Phases 27–30: per-participant Discord capture (songbird/DAVE); unified spk-N tracks, "me" is a session tag not a channel
+- [Productionization](productionization.md) — Phases 32–35 + v0.3.0 release learnings: FEATURES vs CLI_FEATURES split, re-tag-on-workflow-fix, develop-only CI, asset names are an API
 - [Voiceprints](voiceprints.md) — Phase 38 cross-session speaker identity: tables, matcher params (0.72/0.05/3s/30s/cap 8), implicit enrollment paths, kill-switch, legal memo, storage subtlety

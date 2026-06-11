@@ -45,4 +45,13 @@ populated from day-one recordings the moment the user opts in, without needing
 to re-diarize. Matching and enrollment are gated on the runtime toggle; raw
 persistence is not.
 
+**UX trap (hit live, June 2026): matching only runs at OFFLINE diarization
+time.** With `diarize_auto` off, normal recordings never trigger the library
+match — the live labeler's provisional "Speaker N" indices don't consult the
+library, and a manual rename without a prior diarize pass enrolls nothing
+(no session embedding exists yet). Voiceprints-enabled + diarize_auto-off =
+the feature looks dead on mic/desktop sessions. Discord sessions are immune
+(ground-truth names, auto-enroll post-stop, no diarization). Open idea: the
+consent flow should offer to enable `diarize_auto` too.
+
 Related: [[diarization-design]], [[feature-flags]], [[data-locations]].

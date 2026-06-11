@@ -37,6 +37,20 @@ then `git tag v0.2.x && git push origin v0.2.x`. Store publishing (35a-c)
 needs store accounts. ⚠ Release asset names are an API — the updater
 downloads `Zord-<ver>-windows-x64-gui.exe` by exact name.
 
+**v0.3.0 release learnings (June 2026):**
+- ⚠ **release.yml has TWO feature lists** — `FEATURES` (GUI bundle: full set
+  incl. voiceprints/discord + channel-appended self-update) and
+  `CLI_FEATURES` (zord-app: only `diarization,llm-local,llm-remote,parakeet`).
+  The CLI does NOT declare voiceprints/discord/self-update; passing the GUI
+  list fails `cargo build -p zord-app` instantly. When adding a new feature,
+  decide which list(s) it belongs to. v0.3.0's first tag run failed on this.
+- A failed tag run publishes nothing → safe to `git tag -d` + delete remote
+  tag + re-tag on the fix commit (the workflow runs from the TAG's tree, so
+  workflow fixes need a re-tag, not a re-run).
+- CI (ci.yml) runs on **develop pushes + PRs only** — main is always a
+  fast-forward of develop, so main pushes were duplicate runs (removed).
+- Release notes live in the annotated tag message.
+
 **Audit top findings (verified, June 2026):**
 1. `engine.rs` WAV `let _ = w.finalize()` — errors swallowed; panic mid-proc
    drops writer unfinalized → unplayable WAV (data loss).

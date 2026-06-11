@@ -124,16 +124,24 @@ reuses Record; real UI = Settings → Integrations tab).
 
 **Phase 30 decisions (June 2026):** feature flag = **`discord`** (per-platform,
 zord-gui/app → zord-integrations/discord). Trigger = `capture_mode == "discord"`
-(mutually exclusive with desktop loopback — no double-capture). **"Me" = the
-followed user's own Discord stream (NOT a local mic)** — everyone captured via
-Discord so its noise-suppression applies uniformly; `Participant.is_me` →
-`TrackRole::Me` → `Source::Me`; no mic, no self-dedupe. Consent = **optional
-in-channel announcement** (bot posts "recording started"). **Optional merged
-single-file** export (mix session-aligned tracks — cheap since aligned).
+(mutually exclusive with desktop loopback — no double-capture). **Everyone —
+the app user included — is captured via Discord** (NOT a local mic) so its
+noise-suppression applies uniformly. Consent = **optional in-channel
+announcement** (bot posts "recording started"). **Optional merged single-file**
+export (mix session-aligned tracks — cheap since aligned).
 - **30a ✅** `discord` feature on zord-gui + `discord_bot_token`/`discord_user_id`
   config.
-- **30b ✅** `is_me`/`TrackRole` seam + engine routes Me/Others, no local mic;
-  FakeProvider marks p0 as me; tests green.
+- **30b ✅, REWORKED June 2026 (unified tracks):** `TrackRole` is GONE. Every
+  participant gets a sequential 0-based speaker index → uniform
+  `Others`/`spk-N.wav` track named from the platform; "me" is a session TAG
+  (`sessions.me_speaker`, from `Participant.is_me`/the configured user ID)
+  used for styling/perspective only — NOT a separate channel, so replay,
+  voiceprints, and re-transcription treat the user like any participant.
+  New integration sessions write NO `me.wav` (old ones keep working). The
+  original Me-channel design caused three bugs (spk-N replay gap, the -1
+  name sentinel, SSRC late-mapping mislabeling) — don't reintroduce it.
+  `drive_session` callbacks: `on_join(idx, name, is_me, rate, audio)` /
+  `on_rename(idx, name)`.
 - **30c ✅ (build-verified)** `zord-integrations/src/discord.rs`: serenity +
   songbird on a dedicated tokio thread bridging into the std mpsc event channel;
   follows the user (cache_ready scan + voice_state_update), announces on
