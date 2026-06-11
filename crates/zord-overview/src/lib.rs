@@ -213,7 +213,7 @@ pub fn build_update_input(doc: &str, session_input: &str, session_label: &str) -
 pub fn strip_code_fence(s: &str) -> &str {
     let s = s.trim();
 
-    // Accept ``` optionally followed by "markdown" (case-insensitive).
+    // Accept ``` optionally followed by "markdown".
     let after_open = if let Some(rest) = s.strip_prefix("```markdown") {
         rest
     } else if let Some(rest) = s.strip_prefix("```") {
@@ -222,8 +222,7 @@ pub fn strip_code_fence(s: &str) -> &str {
         return s;
     };
 
-    // The opening fence must be followed by a newline (possibly with trailing
-    // spaces) before the content starts.
+    // The opening fence must be followed by a newline before the content starts.
     let body = if let Some(body) = after_open.strip_prefix('\n') {
         body
     } else if let Some(body) = after_open.strip_prefix("\r\n") {
@@ -271,6 +270,11 @@ pub fn update_document(
     // Reserve space for: the system prompt + chat template overhead (600 t),
     // the document itself, and the separator / label text (~50 chars).
     // Whatever remains is the budget for session_input.
+    //
+    // `opts.max_transcript_chars` is unused here; we compute our own per-field
+    // budget so the doc is never truncated (only session_input is).
+    // `input_budget` subtracts `opts.max_new_tokens + 600` from n_ctx
+    // independently of GenOpts' internal reserve.
     let total_budget = input_budget(n_ctx, opts.max_new_tokens);
     let sep_overhead = session_label.len() + 60; // "--- New meeting (…) ---\n\n" etc.
     let doc_tokens = llm.count_tokens(doc)?;
