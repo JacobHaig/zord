@@ -6,9 +6,10 @@ license.workspace = true
 
 [features]
 default = []
-# Real synthesis needs an LLM backend from zord-summarize — the local llama.cpp
-# engine and/or the remote OpenAI-compatible client. Without either, the crate
-# still compiles but only `load` (reading a stored rollup) is available.
+# Document updates need an LLM backend from zord-summarize — the local
+# llama.cpp engine and/or the remote OpenAI-compatible client. Without either,
+# the crate still compiles but only the pure helpers and `load` (reading the
+# legacy stored rollup) are available.
 llama = ["dep:zord-summarize", "zord-summarize/llama"]
 remote = ["dep:zord-summarize", "zord-summarize/remote"]
 
@@ -18,6 +19,3 @@ zord-store = { workspace = true }
 zord-config = { workspace = true }
 zord-summarize = { workspace = true, optional = true }
 anyhow = { workspace = true }
-tracing = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }

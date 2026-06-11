@@ -9710,9 +9710,6 @@ name = "zord-overview"
 version = "0.2.18"
 dependencies = [
  "anyhow",
- "serde",
- "serde_json",
- "tracing",
  "zord-config",
  "zord-core",
  "zord-store",

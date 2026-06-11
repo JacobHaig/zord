@@ -275,28 +275,6 @@ pub fn chat_system_prompt() -> &'static str {
      meeting by its date/title. Keep answers concise."
 }
 
-/// System prompt for the cross-meeting **Overview** synthesis (Phase 23). Input
-/// is the per-meeting dense compressions (each headed by date + title), newest
-/// first; output is one holistic, project-grouped Markdown rollup oriented around
-/// the user ("Me").
-pub fn overview_prompt() -> &'static str {
-    "You are given dense, machine-written summaries of the user's recent meetings, \
-     each headed by its date and title and ordered newest first. The user is \
-     \"Me\". Synthesize ONE holistic, current picture across all of them — not a \
-     per-meeting recap. Group everything by project/topic: infer the projects \
-     yourself and merge duplicate or near-duplicate names into one consistent \
-     label. Output Markdown. Start with \"## My open action items\": a checklist \
-     of what *Me* still owns or is waiting on, most urgent first, each citing the \
-     meeting it came from. Then one \"## <Project>\" section per project, each \
-     with: a one-line **State** (where it stands now); **Pending** (in-progress / \
-     upcoming work as owner → task → status); **Done** (recently completed + who); \
-     **Owners**; and **Open questions** (unknowns / blockers). When meetings \
-     conflict, prefer the most recent; drop items that were resolved or closed. \
-     Attribute to names where known and cite source meetings by title in \
-     parentheses. Be faithful and specific — do not invent facts, owners, or \
-     statuses; if something is unknown, say so."
-}
-
 /// System prompt for **compressing** a meeting transcript into a faithful
 /// line-by-line condensation (Phase 39). Each speaker's utterance is reworded
 /// to its shortest faithful form while preserving speaker labels and original
@@ -327,77 +305,6 @@ pub fn overview_doc_prompt() -> &'static str {
      older than 30 days. Preserve any user-written content and wording you are \
      not updating — the user edits this document too. Output the FULL updated \
      document and nothing else — no commentary, no code fences."
-}
-
-/// System prompt for the Phase 26 **structured extract**: read ONE meeting and
-/// emit a machine-readable JSON delta (projects touched + action items, open
-/// questions, and decisions, plus which prior threads this meeting resolved).
-/// Stateless — it sees only this meeting; the merge engine reconciles the
-/// output against the running ledger. The strict JSON shape is what
-/// `zord-overview`'s parser expects; any prose around it is tolerated but the
-/// object must be valid.
-pub fn extract_prompt() -> &'static str {
-    "You read the transcript (or dense summary) of ONE meeting and extract its \
-     concrete, trackable content as JSON. The user is \"Me\"; other speakers \
-     appear by name or as \"Speaker N\". Output ONLY a single JSON object — no \
-     markdown, no commentary, no code fences — with this exact shape:\n\
-     {\n\
-       \"projects\": [{\"name\": string, \"summary\": string}],\n\
-       \"items\": [{\"project\": string, \"kind\": \"action\"|\"question\"|\"decision\", \"text\": string, \"owner\": string|null, \"done\": boolean}],\n\
-       \"resolved\": [{\"project\": string, \"text\": string}]\n\
-     }\n\
-     Rules: \"projects\" lists every distinct project/topic/workstream this \
-     meeting touched, each with a one-line state \"summary\". Use a short, stable, \
-     human \"name\" you'd reuse across meetings (e.g. \"Billing migration\"), not a \
-     date or generic word like \"Meeting\". Every item's \"project\" MUST be one of \
-     those names. \"items\": \"action\" = a task someone will do (set \"owner\" to the \
-     responsible person, or null if unclear; \"done\":true only if it was reported \
-     completed IN THIS meeting). \"question\" = an unresolved/open question raised. \
-     \"decision\" = a choice the group made (owner usually null, done usually true). \
-     \"resolved\": things described as now finished, answered, or closed that were \
-     likely started in an EARLIER meeting — short descriptions the reconciler can \
-     match to existing open items (do NOT also list these as items). Attribute to \
-     real names from the transcript; never invent owners, tasks, decisions, or \
-     completions. If the meeting has no trackable content, return empty arrays. \
-     Keep every \"text\" to one concise sentence."
-}
-
-/// System prompt for the Phase 26 **reconcile** pass: fold one meeting's
-/// structured extract into the running ledger. The model is given the existing
-/// ledger (projects + their still-open items, each with a stable id) and the new
-/// extract, and must decide — *referencing only real ids* — which existing
-/// projects/items the meeting maps to, which open items it closed, and what is
-/// genuinely new. The strict JSON shape is what `zord-overview`'s reconciler
-/// parses; every id it returns is validated against the real ledger afterward,
-/// so inventing an id simply drops that operation.
-pub fn reconcile_prompt() -> &'static str {
-    "You maintain a running project ledger by folding in ONE new meeting. You are \
-     given EXISTING LEDGER (projects, each with an id and its still-open items, \
-     each item with an id) and a NEW EXTRACT from the latest meeting. Decide how \
-     the meeting updates the ledger and output ONLY a single JSON object — no \
-     markdown, no commentary, no code fences — with this exact shape:\n\
-     {\n\
-       \"projects\": [{\"match_id\": string|null, \"name\": string, \"summary\": string}],\n\
-       \"complete\": [{\"id\": string, \"why\": string}],\n\
-       \"add\": [{\"project\": string, \"kind\": \"action\"|\"question\"|\"decision\", \"text\": string, \"owner\": string|null, \"done\": boolean}]\n\
-     }\n\
-     Rules. \"projects\": one entry per project the meeting touched. If it is the \
-     SAME project as an existing one (same work, even if named slightly \
-     differently), set \"match_id\" to that project's id and reuse its existing \
-     \"name\"; otherwise set \"match_id\" to null to create it. \"summary\" is the \
-     updated one-line state. \"complete\": existing open items (BY THEIR id) that \
-     this meeting reports finished, answered, or closed. Work through EACH \
-     resolved mention in the extract, EACH task it says got done, and EACH open \
-     question it answered; find the EXISTING LEDGER item that matches it by \
-     meaning (the wording will differ) and put that item's id here. This is how \
-     finished work leaves the ledger — do not skip it. Only ever cite an id that \
-     appears in EXISTING LEDGER; never invent one, and never mark something done \
-     unless the meeting actually says so. \"add\": genuinely NEW items not already \
-     in the ledger — do NOT re-add an existing open item, and do NOT add an item \
-     you also listed in \"complete\". Each add's \"project\" MUST equal one of the \
-     \"name\" values above. Set \"done\":true only for items completed in this very \
-     meeting (e.g. a decision). Attribute owners only to real names; null if \
-     unclear. If the meeting changes nothing, return empty arrays."
 }
 
 /// System prompt for auto-titling a recorded session from its summary/transcript.

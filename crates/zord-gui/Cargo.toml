@@ -16,10 +16,20 @@ parakeet = ["zord-transcribe/parakeet"]
 encryption = ["zord-store/encryption", "zord-config/encryption"]
 # AI features (summaries, compression, Overview, chat, auto-titles) with the
 # built-in local LLM (llama.cpp — heavy build).
-llm-local = ["dep:zord-summarize", "zord-summarize/llama", "dep:zord-overview", "zord-overview/llama"]
+llm-local = [
+    "dep:zord-summarize",
+    "zord-summarize/llama",
+    "dep:zord-overview",
+    "zord-overview/llama",
+]
 # Same AI features against a user-provided OpenAI-compatible server (LM Studio,
 # Ollama, vLLM, …). Pure HTTP — no llama.cpp toolchain. Composes with llm-local.
-llm-remote = ["dep:zord-summarize", "zord-summarize/remote", "dep:zord-overview", "zord-overview/remote"]
+llm-remote = [
+    "dep:zord-summarize",
+    "zord-summarize/remote",
+    "dep:zord-overview",
+    "zord-overview/remote",
+]
 # Enable per-speaker diarization (sherpa-onnx).
 diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 # Persistent cross-session speaker identification (voiceprints). Opt-in at
@@ -41,20 +51,20 @@ zord-store = { workspace = true }
 zord-config = { workspace = true }
 zord-export = { workspace = true }
 zord-integrations = { workspace = true }
+zord-net = { workspace = true }
+zord-summarize = { workspace = true, optional = true }
+zord-overview = { workspace = true, optional = true }
+zord-diarize = { workspace = true, optional = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = "0.2"
 dioxus = { version = "0.7", features = ["desktop"] }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
-zord-summarize = { workspace = true, optional = true }
-zord-overview = { workspace = true, optional = true }
-zord-diarize = { workspace = true, optional = true }
 arboard = "3"
 # Open external URLs (bot-invite authorize page, release downloads) in the
 # system browser.
 open = "5"
-zord-net = { workspace = true }
 # Windows portable-EXE update swap (rename running exe aside, write the new one).
 self-replace = { version = "1", optional = true }
 # Per-line transcript playback (Sink + SamplesBuffer only — we read WAVs with
@@ -64,4 +74,6 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Markdown rendering for the living Overview document (Phase 39d).
 # default-features = false drops the html5ever/SIMD deps; we only need push_html.
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.12", default-features = false, features = [
+    "html",
+] }
