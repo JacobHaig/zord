@@ -4,6 +4,7 @@
 
 mod engine;
 mod osutil;
+mod speakers;
 #[cfg(feature = "self-update")]
 mod update;
 mod wizard;
@@ -53,6 +54,7 @@ fn icon_paths(name: &str) -> &'static str {
         "sparkles" => "<path d='M12 3l1.7 5.3a2 2 0 0 0 1.3 1.3L20.3 11l-5.3 1.7a2 2 0 0 0-1.3 1.3L12 19.3l-1.7-5.3a2 2 0 0 0-1.3-1.3L3.7 11l5.3-1.7a2 2 0 0 0 1.3-1.3z'/>",
         "archive" => "<rect x='3' y='4' width='18' height='4' rx='1'/><path d='M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8'/><line x1='10' y1='12' x2='14' y2='12'/>",
         "users" => "<circle cx='9' cy='8' r='3.5'/><path d='M3 20v-1a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v1'/><path d='M16 5.5a3.5 3.5 0 0 1 0 6.8'/><path d='M21 20v-1a5 5 0 0 0-3.5-4.8'/>",
+        "people" => "<circle cx='8' cy='8' r='3'/><path d='M2 20v-1a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v1'/><circle cx='16' cy='8' r='3'/><path d='M22 20v-1a5 5 0 0 0-4-4.9'/>",
         "refresh" => "<path d='M3 12a9 9 0 0 1 15-6.7L21 8'/><path d='M21 3v5h-5'/><path d='M21 12a9 9 0 0 1-15 6.7L3 16'/><path d='M3 21v-5h5'/>",
         "plus" => "<line x1='12' y1='5' x2='12' y2='19'/><line x1='5' y1='12' x2='19' y2='12'/>",
         "chat" => "<path d='M21 12a8 8 0 0 1-11.3 7.3L3 21l1.7-6.7A8 8 0 1 1 21 12z'/>",
@@ -171,6 +173,7 @@ enum View {
     Session(String),
     Search,
     Overview,
+    Speakers,
 }
 
 /// A running background job, mirrored from the engine's `Event::JobStarted`
@@ -504,6 +507,8 @@ fn MainApp() -> Element {
     let mut jobs = use_signal(Vec::<JobView>::new);
     let mut job_tick = use_signal(|| 0u64);
     let mut diarize_est_secs = use_signal(|| Option::<u64>::None);
+    // Phase 38d: voiceprint library (updated by Event::Voiceprints).
+    let mut voiceprints = use_signal(Vec::<zord_store::VoiceprintInfo>::new);
 
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
@@ -636,8 +641,8 @@ fn MainApp() -> Element {
                     jobs.write().retain(|j| j.id != id);
                 }
                 Event::Playing(v) => playing_seg.set(v),
-                // Phase 38: voiceprint library updates — GUI state wired in T4.
-                Event::Voiceprints(_) => {}
+                // Phase 38d: voiceprint library — update the Speakers view signal.
+                Event::Voiceprints(v) => voiceprints.set(v),
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
                         notice.set(Some(format!("External LLM: {e}")));
@@ -693,6 +698,9 @@ fn MainApp() -> Element {
         });
         let _ = engine.db_tx.send(DbCmd::ListSessions);
         let _ = engine.model_tx.send(ModelCmd::List);
+        // Phase 38d: pre-load the voiceprint library so the Speakers view is
+        // ready when the user first navigates to it (harmless when empty).
+        let _ = engine.db_tx.send(DbCmd::Voiceprints);
         engine
     });
 
@@ -1004,6 +1012,17 @@ fn MainApp() -> Element {
     // Open the dedicated search view (does not clear the prior query/results).
     let on_open_search = move |_| view.set(View::Search);
 
+    // Open the Speakers view and refresh the voiceprint list.
+    let on_open_speakers = {
+        let engine = engine.clone();
+        move |_| {
+            if cfg!(feature = "voiceprints") {
+                view.set(View::Speakers);
+                let _ = engine.db_tx.send(DbCmd::Voiceprints);
+            }
+        }
+    };
+
     // Run a query from the search view's input.
     let on_query = {
         let engine = engine.clone();
@@ -1084,6 +1103,27 @@ fn MainApp() -> Element {
         }
     };
 
+    // Same as on_open_session but a second independent closure for the
+    // Speakers view (EventHandler consumes the closure on construction).
+    let on_open_from_speakers = {
+        let engine = engine.clone();
+        move |id: String| {
+            view.set(View::Session(id.clone()));
+            last_export.set(None);
+            summary.set(None);
+            compressed.set(None);
+            summarizing.set(false);
+            compressing.set(false);
+            diarizing.set(false);
+            retranscribing.set(false);
+            diar_speakers.set(String::new());
+            audio_files.set((None, None));
+            let _ = engine.play_tx.send(PlayCmd::Stop);
+            reset_chat(chat, chat_input, chat_busy, chat_scope);
+            let _ = engine.db_tx.send(DbCmd::Load(id));
+        }
+    };
+
     // Back to the live view; drop any panels left from a saved session viewed
     // mid-recording (the sidebar's pinned "Current recording" row).
     let on_show_live = move |_: ()| {
@@ -1134,6 +1174,7 @@ fn MainApp() -> Element {
                 show_jobs,
                 on_open_overview,
                 on_open_search,
+                on_open_speakers,
                 on_toggle_settings,
             }
             // ---- Sidebar: session history + Record ----
@@ -1253,6 +1294,18 @@ fn MainApp() -> Element {
                         query: search_query,
                         on_query,
                         on_open: on_open_result,
+                    }
+                } else if *view.read() == View::Speakers {
+                    {
+                        let engine = engine.clone();
+                        rsx! {
+                            speakers::SpeakersView {
+                                voiceprints,
+                                settings,
+                                engine,
+                                on_open_session: on_open_from_speakers,
+                            }
+                        }
                     }
                 } else {
                     div { class: "transcript",
@@ -1375,6 +1428,7 @@ fn IconRail(
     mut show_jobs: Signal<bool>,
     on_open_overview: EventHandler<MouseEvent>,
     on_open_search: EventHandler<MouseEvent>,
+    on_open_speakers: EventHandler<MouseEvent>,
     on_toggle_settings: EventHandler<MouseEvent>,
 ) -> Element {
     rsx! {
@@ -1392,6 +1446,14 @@ fn IconRail(
                         title: "Search across every meeting's transcript",
                         onclick: move |e| on_open_search.call(e),
                         {icon("search")}
+                    }
+                    if cfg!(feature = "voiceprints") {
+                        button {
+                            class: if matches!(&*view.read(), View::Speakers) { "rail-btn active" } else { "rail-btn" },
+                            title: "Speakers — people Zord can recognize across meetings",
+                            onclick: move |e| on_open_speakers.call(e),
+                            {icon("people")}
+                        }
                     }
                 }
                 div { class: "rail-bottom",
@@ -2794,6 +2856,8 @@ fn SpeakersSettings(
                                         }
                                     }
                                 }
+                                // Phase 38d: voice-identification settings block.
+                                speakers::VoiceprintSettings { settings, engine: engine.clone() }
     }
 }
 
