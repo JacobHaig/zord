@@ -462,6 +462,13 @@ fn MainApp() -> Element {
     let show_export_menu = use_signal(|| false);
     // The contextual "Generate ▾" menu (Summarize/Compress/Identify/Re-transcribe).
     let show_generate_menu = use_signal(|| false);
+    // Phase 40: find-in-session bar state.
+    let mut find_open = use_signal(|| false);
+    let find_query = use_signal(String::new);
+    let mut find_active = use_signal(|| 0usize);
+    // Computed hit-id list for the active view (live vs saved). Updated whenever
+    // the query or transcript changes; empty when find is closed.
+    let mut find_hits_computed = use_signal(Vec::<i64>::new);
     // Active tab in the settings overlay's left nav (Phase 3).
     let settings_tab = use_signal(|| "transcription".to_string());
     // Authoritative list of running background jobs (Phase: cancellable jobs),
@@ -777,6 +784,25 @@ fn MainApp() -> Element {
                     highlight_seg.set(None);
                 }
             });
+        }
+    });
+
+    // Phase 40: recompute find hits whenever the query, transcript, or live
+    // segments change (subscribes to all three by reading them).
+    use_effect(move || {
+        let q = find_query.read().clone();
+        let is_live = *view.read() == View::Live;
+        let hits = if q.is_empty() || !*find_open.read() {
+            Vec::new()
+        } else if is_live {
+            find_hits(&live_segments.read(), &q)
+        } else {
+            find_hits(&segments.read(), &q)
+        };
+        // Only write if the list actually changed to avoid spurious re-renders.
+        if *find_hits_computed.peek() != hits {
+            find_hits_computed.set(hits);
+            find_active.set(0);
         }
     });
 
@@ -1174,6 +1200,34 @@ fn MainApp() -> Element {
                         confirm_retranscribe,
                         show_export_menu,
                         show_generate_menu,
+                        find_open,
+                    }
+                }
+
+                // Find button for the Live view (Session view has it in the toolbar).
+                if *view.read() == View::Live {
+                    div { class: "live-find-row",
+                        button {
+                            class: if *find_open.read() { "tbtn find-active" } else { "tbtn" },
+                            title: "Find in live transcript",
+                            onclick: move |_| {
+                                let v = *find_open.peek();
+                                find_open.set(!v);
+                            },
+                            {icon("search")}
+                            "Find"
+                        }
+                    }
+                }
+
+                // Phase 40: find-in-session bar (shown below toolbar for both views).
+                if matches!(&*view.read(), View::Session(_) | View::Live) {
+                    FindBar {
+                        find_open,
+                        find_query,
+                        find_active,
+                        find_hits: find_hits_computed,
+                        highlight: highlight_seg,
                     }
                 }
 
@@ -1245,10 +1299,10 @@ fn MainApp() -> Element {
                                     }
                                 }
                             } else {
-                                TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment }
+                                TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment, find_hits: find_hits_computed }
                             }
                         } else {
-                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment }
+                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment, find_hits: find_hits_computed }
                         }
                     }
                 }
@@ -1629,6 +1683,7 @@ fn SessionToolbar(
     confirm_retranscribe: Signal<Option<String>>,
     show_export_menu: Signal<bool>,
     show_generate_menu: Signal<bool>,
+    find_open: Signal<bool>,
 ) -> Element {
     let sid = id.clone();
     let eng_sum = engine.clone();
@@ -1765,6 +1820,16 @@ fn SessionToolbar(
             // --- Output cluster (right) ---
             div { class: "export-spacer" }
             button {
+                class: if *find_open.read() { "tbtn find-active" } else { "tbtn" },
+                title: "Find in transcript (search within this session)",
+                onclick: move |_| {
+                    let v = *find_open.peek();
+                    find_open.set(!v);
+                },
+                {icon("search")}
+                "Find"
+            }
+            button {
                 class: "tbtn",
                 title: "Copy the transcript to the clipboard",
                 onclick: move |_| {
@@ -1829,6 +1894,112 @@ fn SessionToolbar(
 }
 
 /// Collapsible AI-summary panel for the viewed (or live) session.
+/// Phase 40: find-in-session bar. Shown when `find_open` is true, dismissed by
+/// Esc, Enter, or the × button. Enter cycles forward, Shift-Enter cycles back.
+/// The active hit is scrolled into view by setting `highlight`, which reuses the
+/// existing scroll-to-segment mechanism.
+#[component]
+fn FindBar(
+    find_open: Signal<bool>,
+    find_query: Signal<String>,
+    find_active: Signal<usize>,
+    find_hits: Signal<Vec<i64>>,
+    highlight: Signal<Option<i64>>,
+) -> Element {
+    if !*find_open.read() {
+        return rsx! {};
+    }
+    let hits = find_hits.read().clone();
+    let total = hits.len();
+    let active = (*find_active.read()).min(total.saturating_sub(1));
+    let count_label = if total == 0 {
+        "no matches".to_string()
+    } else {
+        format!("{} of {}", active + 1, total)
+    };
+
+    // Scroll the active hit into view by reusing the highlight signal.
+    let mut scroll_to_active = move |idx: usize| {
+        let h = find_hits.read();
+        if let Some(&id) = h.get(idx) {
+            highlight.set(Some(id));
+            let _ = document::eval(&format!(
+                "requestAnimationFrame(()=>{{const e=document.getElementById('seg-{id}');if(e){{e.scrollIntoView({{block:'center',behavior:'smooth'}});}}}})"
+            ));
+        }
+    };
+
+    // nav_step: +1 = forward, -1 = backward. Used from both onclick and onkeydown.
+    let mut nav = move |forward: bool| {
+        let t = find_hits.read().len();
+        if t == 0 {
+            return;
+        }
+        let cur = *find_active.peek();
+        let next = if forward {
+            (cur + 1) % t
+        } else {
+            if cur == 0 {
+                t - 1
+            } else {
+                cur - 1
+            }
+        };
+        find_active.set(next);
+        scroll_to_active(next);
+    };
+
+    rsx! {
+        div { class: "find-bar",
+            {icon("search")}
+            input {
+                class: "find-input",
+                r#type: "text",
+                placeholder: "Find in transcript…",
+                value: "{find_query}",
+                autofocus: true,
+                oninput: move |e| find_query.set(e.value()),
+                onkeydown: move |e| match e.key() {
+                    Key::Enter => {
+                        nav(!e.modifiers().shift());
+                    }
+                    Key::Escape => {
+                        find_open.set(false);
+                        find_query.set(String::new());
+                        highlight.set(None);
+                    }
+                    _ => {}
+                },
+            }
+            span { class: "find-count", "{count_label}" }
+            button {
+                class: "find-nav",
+                title: "Previous match (Shift+Enter)",
+                disabled: total == 0,
+                onclick: move |_| nav(false),
+                "▲"
+            }
+            button {
+                class: "find-nav",
+                title: "Next match (Enter)",
+                disabled: total == 0,
+                onclick: move |_| nav(true),
+                "▼"
+            }
+            button {
+                class: "find-close",
+                title: "Close find bar (Esc)",
+                onclick: move |_| {
+                    find_open.set(false);
+                    find_query.set(String::new());
+                    highlight.set(None);
+                },
+                {icon("close")}
+            }
+        }
+    }
+}
+
 #[component]
 fn SummaryPanel(
     view: Signal<View>,
@@ -3415,12 +3586,17 @@ fn TranscriptView(
     playing: Signal<Option<i64>>,
     /// Replay a line: `Some((wav, segment_id, start_ms, end_ms))`, or `None` to stop.
     on_play: EventHandler<Option<(String, i64, u64, u64)>>,
+    /// Phase 40: find-in-session hit set. The active hit is in `highlight`
+    /// (reuses the scroll mechanism); this set drives the soft background on
+    /// all other hits. Empty when the find bar is closed.
+    find_hits: Signal<Vec<i64>>,
 ) -> Element {
     let mut editing = use_signal(|| Option::<i64>::None);
     let mut buf = use_signal(String::new);
     let segs = segments.read();
     let names = speaker_names.read();
     let hl = *highlight.read();
+    let fhits = find_hits.read();
     if segs.is_empty() {
         return rsx! { div { class: "empty", "Press Record, or pick a session." } };
     }
@@ -3454,7 +3630,16 @@ fn TranscriptView(
                 let (t0, t1) = (seg.t_start_ms, seg.t_end_ms);
                 // DOM anchor + flash highlight so a search result can jump here.
                 let dom_id = sid.map(|i| format!("seg-{i}")).unwrap_or_default();
-                let hit = if sid.is_some() && sid == hl { " hit" } else { "" };
+                // `hit` = cross-session search-result flash.  Find-in-session:
+                // active hit reuses the same flash class; other hits get a softer
+                // `find-hit` background so all matches are visible at once.
+                let hit = if sid.is_some() && sid == hl {
+                    " hit"
+                } else if sid.is_some() && fhits.contains(&sid.unwrap()) {
+                    " find-hit"
+                } else {
+                    ""
+                };
                 rsx! {
                     div {
                         key: "{seg.source.as_str()}-{seg.t_start_ms}",
@@ -4374,6 +4559,20 @@ fn readable_fg(hex: &str) -> &'static str {
     }
 }
 
+/// Returns the db ids of transcript segments whose text contains `query`
+/// (case-insensitive substring match). Segments without a db id are skipped.
+/// Empty query returns an empty vec. Order follows transcript order.
+fn find_hits(segments: &[Segment], query: &str) -> Vec<i64> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let q = query.to_lowercase();
+    segments
+        .iter()
+        .filter_map(|s| s.id.filter(|_| s.text.to_lowercase().contains(&q)))
+        .collect()
+}
+
 /// CSS custom-property overrides for the `.app` root from the theme settings.
 /// Only valid `#rrggbb` values are emitted (inputs are also validated at the
 /// settings layer; this is the second gate before a style attribute).
@@ -4392,6 +4591,73 @@ fn theme_style(s: &Settings) -> String {
         }
     }
     css.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::*;
+    use zord_core::{Segment, Source};
+
+    fn seg(id: Option<i64>, text: &str) -> Segment {
+        Segment {
+            id,
+            source: Source::Me,
+            t_start_ms: 0,
+            t_end_ms: 1000,
+            text: text.into(),
+            words: vec![],
+            speaker: None,
+        }
+    }
+
+    #[test]
+    fn empty_query_returns_empty() {
+        let segs = vec![seg(Some(1), "hello world")];
+        assert!(find_hits(&segs, "").is_empty());
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        let segs = vec![seg(Some(1), "Hello World"), seg(Some(2), "foo bar")];
+        assert_eq!(find_hits(&segs, "hello"), vec![1]);
+        assert_eq!(find_hits(&segs, "WORLD"), vec![1]);
+        assert_eq!(find_hits(&segs, "FOO"), vec![2]);
+    }
+
+    #[test]
+    fn no_match_returns_empty() {
+        let segs = vec![seg(Some(1), "hello"), seg(Some(2), "world")];
+        assert!(find_hits(&segs, "zzz").is_empty());
+    }
+
+    #[test]
+    fn segments_without_id_are_skipped() {
+        let segs = vec![seg(None, "hello"), seg(Some(2), "hello")];
+        assert_eq!(find_hits(&segs, "hello"), vec![2]);
+    }
+
+    #[test]
+    fn order_follows_transcript_order() {
+        let segs = vec![
+            seg(Some(10), "apple"),
+            seg(Some(5), "pineapple"),
+            seg(Some(7), "mango"),
+        ];
+        // "apple" matches id 10 and 5 — order follows slice order
+        let hits = find_hits(&segs, "apple");
+        assert_eq!(hits, vec![10, 5]);
+    }
+
+    #[test]
+    fn multiple_hits_across_segments() {
+        let segs = vec![
+            seg(Some(1), "the quick brown fox"),
+            seg(Some(2), "jumped over the lazy dog"),
+            seg(Some(3), "the end"),
+        ];
+        let hits = find_hits(&segs, "the");
+        assert_eq!(hits, vec![1, 2, 3]);
+    }
 }
 
 #[cfg(test)]

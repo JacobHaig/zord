@@ -500,8 +500,44 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .notes-drawer-input::placeholder { color: var(--muted); }
 .notes-drawer-foot { padding: 10px 16px; border-top: 1px solid var(--line); font-size: 10px; color: var(--muted); }
 
-/* Flash-highlight a transcript line jumped to from search. */
+/* Flash-highlight a transcript line jumped to from search or find-in-session. */
 .line.hit { background: rgba(94,166,255,0.18); border-radius: var(--r-sm); transition: background 0.4s ease; }
+/* Phase 40: find-in-session — all hits (soft), active hit reuses .hit above. */
+.line.find-hit { background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: var(--r-sm); }
+
+/* Phase 40: find bar — a compact floating strip below the toolbar. */
+.find-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; margin-bottom: 6px;
+  background: var(--panel); border: 1px solid var(--accent);
+  border-radius: var(--r-md); animation: pop-in var(--t-pop) var(--ease);
+  box-shadow: var(--elev-1);
+}
+.find-bar .ic { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
+.find-input {
+  flex: 1; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 4px 8px; font: inherit; font-size: 13px; outline: none;
+  min-width: 0;
+}
+.find-input:focus { border-color: var(--accent); }
+.find-count { font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 60px; text-align: right; }
+.find-nav {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--text); cursor: pointer; padding: 2px 7px; font-size: 12px; line-height: 1.4;
+}
+.find-nav:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.find-nav:disabled { opacity: 0.4; cursor: default; }
+.find-close {
+  background: transparent; border: none; color: var(--muted); cursor: pointer;
+  display: inline-flex; align-items: center; padding: 2px; border-radius: var(--r-sm);
+}
+.find-close:hover { color: var(--text); }
+.find-close .ic { width: 14px; height: 14px; }
+/* Active-state indicator on the toolbar Find button. */
+.tbtn.find-active { border-color: var(--accent); color: var(--accent); }
+/* Minimal row that holds the Find button on the Live view (no full toolbar). */
+.live-find-row { display: flex; justify-content: flex-end; margin-bottom: 2px; }
 
 /* Background-jobs indicator + panel */
 .jobs-spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--accent); border-top-color: transparent; display: inline-block; animation: jobspin 0.9s linear infinite; }

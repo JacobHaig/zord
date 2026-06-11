@@ -1696,19 +1696,18 @@ inert. Implemented and gate-verified; live LLM pass pending.
 Spec: `docs/superpowers/specs/2026-06-11-living-overview-design.md` ·
 Plan: `docs/superpowers/plans/2026-06-11-living-overview.md`.
 
-### Phase 40 — Find in session (planned)
-Search *within* the open session, not just across all sessions. A small
-find bar — NOT a permanently visible panel (the compression panel's
-always-there presence is the anti-pattern to avoid): a search icon in the
-session toolbar (plus Cmd/Ctrl-F while a session is open) toggles it; Esc or
-× closes it and clears highlights. Client-side over the loaded transcript
-(the segments are already in memory — no DbCmd/FTS needed):
-case-insensitive substring match, hit count ("3 of 17"), prev/next buttons
-+ Enter/Shift-Enter cycling, the active hit scrolled into view (reuse the
-existing scroll-to-segment mechanism from search-result opens) and all hits
-highlighted via the existing search-hit styling. Works on the Live view's
-transcript too. Small phase: one toolbar button, one component, one pure
-match helper (unit-tested), CSS from tokens.
+### Phase 40 — Find in session ✅ DONE (June 2026)
+`FindBar` component toggled by a "Find" button in the session toolbar (and a
+matching button on the Live-view header). Esc or × closes it and clears
+highlights. Client-side over the loaded transcript: `find_hits(segments,
+query)` — case-insensitive substring, skips id-less segments, unit-tested (6
+tests). Hit count badge ("N of M"), ▲/▼ prev/next buttons + Enter/Shift-Enter
+cycling; active hit scrolled into view by reusing the existing
+`highlight_seg`/`scrollIntoView` mechanism; all other hits get a soft
+`find-hit` background class; closing reverts all highlights. Works on both
+saved-session and Live views. Cmd/Ctrl-F was not added — no existing global
+keydown pattern exists in the Dioxus desktop app; the button is the entry
+point, consistent with every other floating panel in the app.
 
 ### Phase 41 — Parallel post-stop transcription ✅ DONE (June 2026)
 New `Settings::transcribe_workers: u32` (default 1, clamped 1..=4). Effective
