@@ -643,6 +643,10 @@ fn MainApp() -> Element {
                 // Phase 38d: voiceprint library — update the Speakers view signal.
                 Event::Voiceprints(v) => voiceprints.set(v),
 
+                // Phase 42a data layer: timeline lanes computed by the engine
+                // worker.  The panel UI that consumes them lands in Phase 42c.
+                Event::Timeline { .. } => {}
+
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
                         notice.set(Some(format!("External LLM: {e}")));

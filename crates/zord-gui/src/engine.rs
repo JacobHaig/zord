@@ -187,6 +187,30 @@ pub enum Event {
         markdown: String,
         updated_at: u64,
     },
+    /// Per-track amplitude profiles for the session timeline (Phase 42a).
+    /// One lane per retained audio file; the GUI panel lands in Phase 42c.
+    /// Fields read by the panel in Phase 42c.
+    #[allow(dead_code)]
+    Timeline {
+        id: String,
+        lanes: Vec<TimelineLane>,
+    },
+}
+
+/// One audio track's amplitude profile for the session timeline (Phase 42a).
+/// The GUI resolves display names from `speaker_names` / `me_speaker`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineLane {
+    /// Track suffix: "me", "others", "spk-0", "spk-1", …
+    pub track: String,
+    /// Diarized/integration speaker index for `spk-N` lanes; `None` for
+    /// the `me` and `others` tracks.
+    pub speaker: Option<i32>,
+    /// Duration of the track in milliseconds.
+    pub duration_ms: u64,
+    /// Normalized 0..=1 peak per bucket
+    /// ([`zord_audio::PEAK_BUCKETS`] buckets covering the full track).
+    pub peaks: Vec<f32>,
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -395,6 +419,12 @@ pub enum DbCmd {
     SaveOverviewDoc(String),
     /// Revert the last AI update: swap doc and prev in the store + emit (Phase 39).
     RevertOverviewDoc,
+    /// Compute (or serve cached) per-track amplitude lanes for the session
+    /// timeline (Phase 42a). Replies with [`Event::Timeline`].
+    /// The worker streams each track block-by-block — never loads whole files.
+    /// Call sites wired in Phase 42c (panel UI).
+    #[allow(dead_code)]
+    LoadTimeline(String),
 }
 
 /// Replay commands for the playback worker. The rodio output stream is `!Send`
@@ -1569,6 +1599,12 @@ fn overview_session_label(session: &Session) -> String {
 // DB query thread
 // ---------------------------------------------------------------------------
 
+/// Shared timeline cache: session_id → (fingerprint, lanes). Accessed by the
+/// db thread (read) and by the timeline worker thread (write), so it is wrapped
+/// in `Arc<Mutex>`.
+type TimelineCache =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<TimelineLane>)>>>;
+
 fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathBuf, jobs: Jobs) {
     let store = match Store::open(&db_path) {
         Ok(s) => s,
@@ -1577,6 +1613,12 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             return;
         }
     };
+    // Phase 42a: in-process timeline cache — fingerprint (sum of file len + mtime)
+    // keyed by session id.  Capped at 8 entries: simple eviction by clearing when
+    // we exceed the limit (the next load refills from disk).
+    // Wrapped in Arc<Mutex> so spawned worker threads can insert their results.
+    let timeline_cache: TimelineCache =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     while let Ok(cmd) = rx.recv() {
         match cmd {
             DbCmd::ListSessions => {
@@ -1819,6 +1861,78 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     jobs.end(&ev, &jid);
                 });
             }
+            DbCmd::LoadTimeline(id) => {
+                // Discover tracks for this session so we can fingerprint them.
+                let prefix = store
+                    .get_session(&id)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.audio_path);
+                let Some(prefix) = prefix else {
+                    // No audio retained — emit an empty timeline immediately.
+                    let _ = ev.send(Event::Timeline {
+                        id,
+                        lanes: Vec::new(),
+                    });
+                    continue;
+                };
+                let tracks = discover_session_tracks(&prefix);
+                if tracks.is_empty() {
+                    let _ = ev.send(Event::Timeline {
+                        id,
+                        lanes: Vec::new(),
+                    });
+                    continue;
+                }
+
+                // Build a fingerprint: sum of (file_len + mtime_secs) over all
+                // track files. Cheap and sufficient for detecting re-compression
+                // or file replacement.
+                let fingerprint: u64 = tracks
+                    .iter()
+                    .filter_map(|(_, p)| std::fs::metadata(p).ok())
+                    .map(|m| {
+                        let len = m.len();
+                        let mtime = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        len.wrapping_add(mtime)
+                    })
+                    .fold(0u64, u64::wrapping_add);
+
+                // Cache hit — serve immediately without spawning a job.
+                if let Ok(cache) = timeline_cache.lock() {
+                    if let Some((cached_fp, cached_lanes)) = cache.get(&id) {
+                        if *cached_fp == fingerprint {
+                            let _ = ev.send(Event::Timeline {
+                                id,
+                                lanes: cached_lanes.clone(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                // Cap the cache at 8 sessions (simple eviction on next insert).
+                // The worker clears + inserts under the lock when done.
+
+                // Cache miss — spawn a supervised job to stream-compute peaks.
+                // The job is cancellable between tracks via the cancel token.
+                let ev2 = ev.clone();
+                let jobs2 = jobs.clone();
+                let cache2 = Arc::clone(&timeline_cache);
+                thread::spawn(move || {
+                    let jid = format!("timeline:{id}");
+                    let token = jobs2.begin(&ev2, &jid, "timeline", "Building timeline");
+                    supervise("timeline", &ev2, || {
+                        build_timeline(&id, &tracks, &token, &ev2, fingerprint, &cache2);
+                    });
+                    jobs2.end(&ev2, &jid);
+                });
+            }
         }
     }
 }
@@ -1826,6 +1940,51 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
 // ---------------------------------------------------------------------------
 // Playback thread (replay one transcript line from a retained WAV)
 // ---------------------------------------------------------------------------
+
+/// Discover every retained audio track for a session, returning a list of
+/// `(suffix, path)` pairs, e.g. `[("me", …), ("others", …), ("spk-0", …)]`.
+///
+/// Handles both the folder layout (Phase 28+) and the legacy flat prefix, and
+/// honours the Phase 37 `.opus` fallback via [`zord_config::resolve_track`].
+/// Shared between [`session_audio_files`] and the Phase 42a timeline worker so
+/// the spk-N enumeration logic lives in exactly one place.
+fn discover_session_tracks(prefix: &str) -> Vec<(String, PathBuf)> {
+    let resolve =
+        |role: &str| zord_config::resolve_track(prefix, role).map(|p| (role.to_string(), p));
+
+    // Enumerate spk-N indices from the directory (integration sessions only).
+    let folder = std::path::Path::new(prefix);
+    let mut spk_indices: Vec<i32> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let stem = name
+                .strip_prefix("spk-")?
+                .strip_suffix(".wav")
+                .or_else(|| name.strip_prefix("spk-")?.strip_suffix(".opus"))?;
+            stem.parse::<i32>().ok()
+        })
+        .collect::<std::collections::HashSet<i32>>()
+        .into_iter()
+        .collect();
+    spk_indices.sort_unstable();
+
+    let mut tracks: Vec<(String, PathBuf)> = Vec::new();
+    for role in &["me", "others"] {
+        if let Some(pair) = resolve(role) {
+            tracks.push(pair);
+        }
+    }
+    for idx in spk_indices {
+        let suffix = format!("spk-{idx}");
+        if let Some(pair) = resolve(&suffix) {
+            tracks.push(pair);
+        }
+    }
+    tracks
+}
 
 /// Absolute paths of the retained per-channel WAVs that actually exist on disk
 /// for a session. Returns an [`AudioFiles`] covering the standard `me`/`others`
@@ -1841,46 +2000,78 @@ fn session_audio_files(store: &Store, session_id: &str) -> AudioFiles {
     let Some(prefix) = prefix else {
         return AudioFiles::default();
     };
-    // Resolve in the new folder layout or the legacy flat layout (Phase 28).
-    let existing =
-        |role: &str| zord_config::resolve_track(&prefix, role).map(|p| p.display().to_string());
-    // Enumerate per-speaker tracks (integration sessions only, folder layout).
-    // Scan for spk-*.wav / spk-*.opus; collect unique indices, then resolve
-    // through resolve_track so the Phase 37 .opus fallback is honoured.
-    let speakers: std::collections::HashMap<i32, String> = {
-        let folder = std::path::Path::new(&prefix);
-        let mut indices: Vec<i32> = std::fs::read_dir(folder)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().into_string().ok()?;
-                let stem = name
-                    .strip_prefix("spk-")?
-                    .strip_suffix(".wav")
-                    .or_else(|| {
-                        // Borrow `name` again for the .opus branch.
-                        name.strip_prefix("spk-")?.strip_suffix(".opus")
-                    })?;
-                stem.parse::<i32>().ok()
-            })
-            .collect::<std::collections::HashSet<i32>>()
-            .into_iter()
-            .collect();
-        indices.sort_unstable();
-        indices
-            .into_iter()
-            .filter_map(|idx| {
-                let path = existing(&format!("spk-{idx}"))?;
-                Some((idx, path))
-            })
-            .collect()
-    };
-    AudioFiles {
-        me: existing("me"),
-        others: existing("others"),
-        speakers,
+    let mut af = AudioFiles::default();
+    for (suffix, path) in discover_session_tracks(&prefix) {
+        let path_str = path.display().to_string();
+        if suffix == "me" {
+            af.me = Some(path_str);
+        } else if suffix == "others" {
+            af.others = Some(path_str);
+        } else if let Some(idx_str) = suffix.strip_prefix("spk-") {
+            if let Ok(idx) = idx_str.parse::<i32>() {
+                af.speakers.insert(idx, path_str);
+            }
+        }
     }
+    af
+}
+
+// ---------------------------------------------------------------------------
+// Phase 42a: timeline peak computation worker
+// ---------------------------------------------------------------------------
+
+/// Compute per-track amplitude peaks for `tracks` (streaming, never slurps
+/// whole files), emit [`Event::Timeline`], and insert into the shared cache.
+/// Called from a detached supervised thread; checks `token` between tracks so
+/// the job is cancellable.
+fn build_timeline(
+    session_id: &str,
+    tracks: &[(String, PathBuf)],
+    token: &Arc<AtomicBool>,
+    ev: &UnboundedSender<Event>,
+    fingerprint: u64,
+    cache: &TimelineCache,
+) {
+    let mut lanes: Vec<TimelineLane> = Vec::with_capacity(tracks.len());
+    for (suffix, path) in tracks {
+        if cancelled(token) {
+            return; // aborted between tracks
+        }
+        match zord_audio::compute_track_peaks(path) {
+            Ok((peaks, duration_ms)) => {
+                let speaker = suffix
+                    .strip_prefix("spk-")
+                    .and_then(|s| s.parse::<i32>().ok());
+                lanes.push(TimelineLane {
+                    track: suffix.clone(),
+                    speaker,
+                    duration_ms,
+                    peaks,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session = session_id,
+                    track = %suffix,
+                    path = %path.display(),
+                    "timeline: skipping track — {e}"
+                );
+            }
+        }
+    }
+
+    // Insert into cache (evict when at the 8-entry cap).
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 8 {
+            guard.clear();
+        }
+        guard.insert(session_id.to_string(), (fingerprint, lanes.clone()));
+    }
+
+    let _ = ev.send(Event::Timeline {
+        id: session_id.to_string(),
+        lanes,
+    });
 }
 
 /// Owns the audio output stream (created lazily on first play) and plays one
