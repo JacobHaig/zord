@@ -45,6 +45,19 @@ pub enum Status {
     Error(String),
 }
 
+/// Retained per-channel audio files that exist on disk for a session.
+/// Used as the GUI signal type so call sites don't carry wide tuples.
+#[derive(Debug, Clone, Default)]
+pub struct AudioFiles {
+    /// Absolute path to `me.wav`/`me.opus`, if present.
+    pub me: Option<String>,
+    /// Absolute path to `others.wav`/`others.opus`, if present.
+    pub others: Option<String>,
+    /// Per-participant tracks from integration sessions (`spk-N`), keyed by
+    /// 0-based speaker index. Empty for normal sessions.
+    pub speakers: std::collections::HashMap<i32, String>,
+}
+
 /// Events from the engine to the GUI.
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -126,13 +139,9 @@ pub enum Event {
     },
     /// The viewed session's saved expected-speaker count (0 = auto-detect).
     DiarizeSpeakers(u32),
-    /// Which retained per-channel WAVs exist on disk for the viewed session
-    /// (absolute paths, me/others). Lines from a channel without a file get no
-    /// replay button.
-    AudioFiles {
-        me: Option<String>,
-        others: Option<String>,
-    },
+    /// Which retained per-channel WAVs exist on disk for the viewed session.
+    /// Lines from a channel without a file get no replay button.
+    AudioFiles(AudioFiles),
     /// The transcript line (db id) currently playing back. `None` = stopped or
     /// finished.
     Playing(Option<i64>),
@@ -1523,8 +1532,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = ev.send(Event::DiarizeSpeakers(
                     store.get_diarize_speakers(&id).ok().flatten().unwrap_or(0),
                 ));
-                let (me, others) = session_audio_files(&store, &id);
-                let _ = ev.send(Event::AudioFiles { me, others });
+                let _ = ev.send(Event::AudioFiles(session_audio_files(&store, &id)));
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
                 Ok(path) => {
@@ -1789,22 +1797,59 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
 // ---------------------------------------------------------------------------
 
 /// Absolute paths of the retained per-channel WAVs that actually exist on disk
-/// for a session, as (me, others). Either may be missing: with default settings
-/// only the Others track is kept (for re-diarization), and retention may have
-/// deleted old audio.
-fn session_audio_files(store: &Store, session_id: &str) -> (Option<String>, Option<String>) {
+/// for a session. Returns an [`AudioFiles`] covering the standard `me`/`others`
+/// roles and any per-participant `spk-N` tracks written by integration sessions.
+/// Either `me`/`others` may be absent (retention or default settings may have
+/// removed them). `speakers` is empty for normal (non-integration) sessions.
+fn session_audio_files(store: &Store, session_id: &str) -> AudioFiles {
     let prefix = store
         .get_session(session_id)
         .ok()
         .flatten()
         .and_then(|s| s.audio_path);
     let Some(prefix) = prefix else {
-        return (None, None);
+        return AudioFiles::default();
     };
     // Resolve in the new folder layout or the legacy flat layout (Phase 28).
     let existing =
         |role: &str| zord_config::resolve_track(&prefix, role).map(|p| p.display().to_string());
-    (existing("me"), existing("others"))
+    // Enumerate per-speaker tracks (integration sessions only, folder layout).
+    // Scan for spk-*.wav / spk-*.opus; collect unique indices, then resolve
+    // through resolve_track so the Phase 37 .opus fallback is honoured.
+    let speakers: std::collections::HashMap<i32, String> = {
+        let folder = std::path::Path::new(&prefix);
+        let mut indices: Vec<i32> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let stem = name
+                    .strip_prefix("spk-")?
+                    .strip_suffix(".wav")
+                    .or_else(|| {
+                        // Borrow `name` again for the .opus branch.
+                        name.strip_prefix("spk-")?.strip_suffix(".opus")
+                    })?;
+                stem.parse::<i32>().ok()
+            })
+            .collect::<std::collections::HashSet<i32>>()
+            .into_iter()
+            .collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .filter_map(|idx| {
+                let path = existing(&format!("spk-{idx}"))?;
+                Some((idx, path))
+            })
+            .collect()
+    };
+    AudioFiles {
+        me: existing("me"),
+        others: existing("others"),
+        speakers,
+    }
 }
 
 /// Owns the audio output stream (created lazily on first play) and plays one

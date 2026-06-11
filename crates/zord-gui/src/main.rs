@@ -12,8 +12,8 @@ mod wizard;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{
-    ChatScope, DbCmd, Engine, Event, ItemView, LedgerView, ModelCmd, ModelInfo, OverviewData,
-    PlayCmd, ProjectView, RecorderCmd, Status, SummCmd,
+    AudioFiles, ChatScope, DbCmd, Engine, Event, ItemView, LedgerView, ModelCmd, ModelInfo,
+    OverviewData, PlayCmd, ProjectView, RecorderCmd, Status, SummCmd,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -436,9 +436,10 @@ fn MainApp() -> Element {
     // Expected speaker count for the viewed session's diarization, as typed
     // (empty = auto-detect). Loaded from / persisted on the session row.
     let mut diar_speakers = use_signal(String::new);
-    // Retained WAV paths (me, others) that exist on disk for the viewed session.
-    // A line only gets a replay button when its channel's file is present.
-    let mut audio_files = use_signal(|| (Option::<String>::None, Option::<String>::None));
+    // Retained WAV paths that exist on disk for the viewed session. A line only
+    // gets a replay button when its channel's file is present. `speakers` holds
+    // per-participant tracks for integration sessions (spk-N).
+    let mut audio_files = use_signal(AudioFiles::default);
     // The transcript line (db id) currently playing back.
     let mut playing_seg = use_signal(|| Option::<i64>::None);
     // Cross-meeting Overview rollup (Phase 23c) + whether a synthesis is running.
@@ -623,7 +624,7 @@ fn MainApp() -> Element {
                 Event::DiarizeSpeakers(n) => {
                     diar_speakers.set(if n > 0 { n.to_string() } else { String::new() });
                 }
-                Event::AudioFiles { me, others } => audio_files.set((me, others)),
+                Event::AudioFiles(af) => audio_files.set(af),
                 Event::Retranscribing => retranscribing.set(true),
                 Event::Retranscribed => retranscribing.set(false),
                 Event::JobStarted { id, kind, label } => {
@@ -859,7 +860,7 @@ fn MainApp() -> Element {
                 compressing.set(false);
                 diarizing.set(false);
                 retranscribing.set(false);
-                audio_files.set((None, None));
+                audio_files.set(AudioFiles::default());
                 let _ = engine.play_tx.send(PlayCmd::Stop);
                 reset_chat(chat, chat_input, chat_busy, chat_scope);
                 speaker_names.write().clear();
@@ -1098,7 +1099,7 @@ fn MainApp() -> Element {
             diarizing.set(false);
             retranscribing.set(false);
             diar_speakers.set(String::new());
-            audio_files.set((None, None));
+            audio_files.set(AudioFiles::default());
             let _ = engine.play_tx.send(PlayCmd::Stop);
             reset_chat(chat, chat_input, chat_busy, chat_scope);
             let _ = engine.db_tx.send(DbCmd::Load(id));
@@ -1674,7 +1675,7 @@ fn SessionToolbar(
     sessions: Signal<Vec<Session>>,
     summary: Signal<Option<String>>,
     compressed: Signal<Option<String>>,
-    audio_files: Signal<(Option<String>, Option<String>)>,
+    audio_files: Signal<AudioFiles>,
     last_export: Signal<Option<String>>,
     segments: Signal<Vec<Segment>>,
     speaker_names: Signal<std::collections::HashMap<i32, String>>,
@@ -1711,8 +1712,11 @@ fn SessionToolbar(
     // Contextual state for the Generate menu rows.
     let has_summary = summary.read().is_some();
     let has_compressed = compressed.read().is_some();
-    let has_others_audio = audio_files.read().1.is_some();
-    let has_any_audio = audio_files.read().0.is_some() || audio_files.read().1.is_some();
+    let has_others_audio = audio_files.read().others.is_some();
+    let has_any_audio = {
+        let af = audio_files.read();
+        af.me.is_some() || af.others.is_some() || !af.speakers.is_empty()
+    };
     let gen_busy = summarizing() || compressing() || diarizing() || retranscribing();
     rsx! {
         div { class: "toolbar",
@@ -3386,8 +3390,8 @@ fn TranscriptView(
     speaker_names: Signal<std::collections::HashMap<i32, String>>,
     highlight: Signal<Option<i64>>,
     on_edit: EventHandler<(i64, String)>,
-    /// Retained WAV paths (me, others) that exist on disk for this session.
-    audio: Signal<(Option<String>, Option<String>)>,
+    /// Retained WAV paths that exist on disk for this session.
+    audio: Signal<AudioFiles>,
     /// The line (db id) currently playing back.
     playing: Signal<Option<i64>>,
     /// Replay a line: `Some((wav, segment_id, start_ms, end_ms))`, or `None` to stop.
@@ -3409,10 +3413,21 @@ fn TranscriptView(
                 let text = seg.text.clone();
                 let text_for_edit = text.clone();
                 let who = seg.speaker_label(&names);
-                // Replay is offered only when this channel's WAV exists on disk.
-                let wav = match seg.source {
-                    Source::Me => audio.read().0.clone(),
-                    Source::Others => audio.read().1.clone(),
+                // Replay is offered only when this channel's audio file exists.
+                // For integration sessions the Others channel is split into
+                // per-participant spk-N tracks; prefer the per-speaker file
+                // when present and fall back to others.wav so normal diarized
+                // sessions (speaker indices but a single others.wav) keep their
+                // replay buttons.
+                let wav = {
+                    let af = audio.read();
+                    match (seg.source, seg.speaker) {
+                        (Source::Me, _) => af.me.clone(),
+                        (Source::Others, Some(idx)) => {
+                            af.speakers.get(&idx).cloned().or_else(|| af.others.clone())
+                        }
+                        (Source::Others, None) => af.others.clone(),
+                    }
                 };
                 let can_play = sid.is_some() && wav.is_some();
                 let wav_play = wav.unwrap_or_default();
