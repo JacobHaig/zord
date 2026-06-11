@@ -150,7 +150,9 @@ mod tests {
     fn announces_participants_then_streams_audio() {
         let mut fake = FakeProvider::new(2, 1);
         let rx = fake.start().unwrap();
-        let timeout = Duration::from_secs(3);
+        // Generous: the provider thread only sleeps ~20 ms between events, but
+        // shared CI runners stall hard under load — 3 s flaked on GitHub macOS.
+        let timeout = Duration::from_secs(15);
 
         // Two distinct participants are announced, each with an audio stream.
         let mut joined = Vec::new();

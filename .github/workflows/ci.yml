@@ -5,9 +5,13 @@ name: CI
 # heavy optional engines (diarization/llm/parakeet — long native builds) are
 # checked weekly + on demand, and always at release time (release.yml builds
 # them all on a tag).
+#
+# develop-only on purpose: main is always a fast-forward of develop in this
+# repo, so a main push would re-test the identical tree; releases get their
+# own full build via release.yml on the version tag.
 on:
   push:
-    branches: [develop, main]
+    branches: [develop]
   pull_request: {}
   schedule:
     - cron: "17 6 * * 1" # weekly heavy-feature check (Mondays)
