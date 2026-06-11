@@ -528,6 +528,16 @@ impl Jobs {
             }
         }
     }
+
+    /// Whether a job with this id is currently registered (between `begin`
+    /// and `end`). Used to skip spawning a duplicate worker for the same key
+    /// (e.g. two rapid `LoadTimeline`s for one session).
+    fn is_running(&self, id: &str) -> bool {
+        self.tokens
+            .lock()
+            .map(|m| m.contains_key(id))
+            .unwrap_or(false)
+    }
 }
 
 /// True if a cancel was requested for this job's token.
@@ -1916,17 +1926,24 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     }
                 }
 
-                // Cap the cache at 8 sessions (simple eviction on next insert).
-                // The worker clears + inserts under the lock when done.
+                // Already building this session's timeline? Don't spawn a
+                // duplicate worker — the running one will emit the event when
+                // done (two rapid re-opens would otherwise double-compute and
+                // make the job bar flicker).
+                let jid = format!("timeline:{id}");
+                if jobs.is_running(&jid) {
+                    continue;
+                }
 
                 // Cache miss — spawn a supervised job to stream-compute peaks.
                 // The job is cancellable between tracks via the cancel token.
+                // `begin` runs HERE (db thread) so the in-flight check above is
+                // race-free: registration is visible before the next command.
+                let token = jobs.begin(&ev, &jid, "timeline", "Building timeline");
                 let ev2 = ev.clone();
                 let jobs2 = jobs.clone();
                 let cache2 = Arc::clone(&timeline_cache);
                 thread::spawn(move || {
-                    let jid = format!("timeline:{id}");
-                    let token = jobs2.begin(&ev2, &jid, "timeline", "Building timeline");
                     supervise("timeline", &ev2, || {
                         build_timeline(&id, &tracks, &token, &ev2, fingerprint, &cache2);
                     });
