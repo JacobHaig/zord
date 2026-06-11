@@ -143,7 +143,9 @@ pub fn read_wav_slice_ms(
     let spec = reader.spec();
     validate_wav_spec(spec)?;
     let rate = spec.sample_rate;
-    let start_sample = (start_ms * rate as u64 / 1000) as u32;
+    // Clamp instead of wrapping: a u32 sample index overflows past ~24.8 h at
+    // 48 kHz; clamping seeks to EOF (empty slice) rather than a wrong offset.
+    let start_sample = (start_ms * rate as u64 / 1000).min(u32::MAX as u64) as u32;
     let len = (end_ms.saturating_sub(start_ms) * rate as u64 / 1000) as u32;
     let channels = spec.channels.max(1) as usize;
     reader.seek(start_sample)?;
@@ -531,7 +533,9 @@ impl MixReader {
                 let spec = reader.spec();
                 validate_wav_spec(spec)?;
                 let rate = spec.sample_rate;
-                let start_sample = (start_ms * rate as u64 / 1000) as u32;
+                // Clamp instead of wrapping: a u32 sample index overflows past
+                // ~24.8 h at 48 kHz; clamping seeks to EOF (silent track).
+                let start_sample = (start_ms * rate as u64 / 1000).min(u32::MAX as u64) as u32;
                 reader.seek(start_sample)?;
                 MixSrc::Wav {
                     channels: spec.channels.max(1) as usize,

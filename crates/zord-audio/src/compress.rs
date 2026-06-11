@@ -200,6 +200,9 @@ pub fn compress_wav_to_opus(src: &Path, dst: &Path, bitrate: i32) -> Result<()> 
 pub struct OpusBlocks {
     reader: PacketReader<BufReader<File>>,
     decoder: Decoder,
+    /// The stream's full pre-skip (from OpusHead) — granule ↔ sample
+    /// conversions need it even after `pre_skip_left` is consumed.
+    pre_skip: u64,
     pre_skip_left: u64,
     emitted: u64,
     total: Option<u64>,
@@ -216,6 +219,7 @@ impl OpusBlocks {
         let mut me = Self {
             reader: PacketReader::new(file),
             decoder: Decoder::new(OPUS_RATE, Channels::Mono).context("opus decoder")?,
+            pre_skip: 0,
             pre_skip_left: 0,
             emitted: 0,
             total: None,
@@ -223,9 +227,9 @@ impl OpusBlocks {
             carry_after_seek: Vec::new(),
         };
         let pre_skip = me.read_headers()?;
+        me.pre_skip = pre_skip as u64;
         me.pre_skip_left = pre_skip as u64;
         me.total = total.map(|g| g.saturating_sub(pre_skip as u64));
-        me.carry_after_seek = Vec::new();
         Ok(me)
     }
 
@@ -262,67 +266,162 @@ impl OpusBlocks {
     /// Seek to `start_ms` so that subsequent [`next_block`] calls deliver
     /// audio from that offset onward.
     ///
-    /// Uses the page-granule coarse-seek + pre-roll decode-discard strategy:
-    /// seeks `SEEK_BACK` samples before the target, decodes forward, discards
-    /// until the first page boundary (where the absolute granule is known),
-    /// then discards further packets until the exact sample offset is reached.
-    /// Falls back to sequential linear decode for offsets near the start.
-    /// After this call `next_block()` delivers samples starting at `start_ms`.
+    /// Coarse-seek strategy. The only absolute positions in an Ogg stream are
+    /// page-END granules, and Zord-written pages span up to 255 packets
+    /// (~5.1 s) — wider than the `SEEK_BACK` margin — so the page
+    /// `seek_absgp` lands on may itself contain `start`. The resync handles
+    /// every landing:
+    ///
+    /// 1. `seek_absgp(start − SEEK_BACK)`, then decode-discard the landing
+    ///    page; its end granule pins the absolute position.
+    /// 2. Page ends at/before `start` → walk packets forward to the exact
+    ///    offset (the discarded page doubles as decoder pre-roll).
+    /// 3. Page ends after `start` (it contains the target) → retreat the seek
+    ///    target by one page-span and retry, so the *previous* page becomes
+    ///    the landing page and case 2 applies.
+    /// 4. Target retreats to 0 → the data lives on the first audio page;
+    ///    `seek_absgp(0)` lands right after the headers, where the absolute
+    ///    position is known (stream start), so buffer that page and cut the
+    ///    carry at `start + pre_skip` (front-anchored, exact).
+    ///
+    /// Offsets ≤ `SEEK_BACK` decode linearly instead. After this call
+    /// `next_block()` delivers samples starting at `start_ms`.
     pub fn seek_ms(&mut self, start_ms: u64) -> Result<()> {
+        /// Raw granule span of a maximal Zord-written page (255 packets of
+        /// 960 samples). Generic files may differ — the retry cap below keeps
+        /// pathological layouts from looping.
+        const PAGE_SPAN: u64 = 255 * FRAME as u64;
+
         let start = start_ms * OPUS_RATE as u64 / 1000;
-        let pre_skip_total = self.pre_skip_left; // non-zero only when called right after open()
-        if start > SEEK_BACK + FRAME as u64 {
-            // Granule includes pre-skip, so add it to find the right page.
-            let target = start + pre_skip_total - SEEK_BACK;
-            if self.reader.seek_absgp(None, target).is_ok() {
-                self.pre_skip_left = 0; // we're past the pre-skip region
-                                        // Resync: decode & discard until we find a page boundary whose
-                                        // granule tells us the exact absolute position; then continue
-                                        // forward until we're at `start`, stashing the overlap in carry.
-                let mut cur_pos: Option<u64> = None;
-                loop {
-                    let Some(pkt) = self.reader.read_packet().context("seek_ms read packet")?
-                    else {
-                        break;
-                    };
-                    let mut pcm = vec![0.0f32; FRAME * 2];
-                    let n = self
-                        .decoder
-                        .decode_float(&pkt.data, &mut pcm, false)
-                        .context("seek_ms decode")?;
-                    pcm.truncate(n);
-                    if cur_pos.is_none() {
-                        if pkt.last_in_page() {
-                            // Granule = total samples through this packet incl. pre-skip.
-                            // Subtract pre-skip to get our "emitted" coordinate.
-                            cur_pos = Some(pkt.absgp_page().saturating_sub(pre_skip_total));
-                        }
-                        // Discard pre-roll until page position is known.
-                        continue;
-                    }
-                    // cur_pos is the stream position at the END of the last packet.
-                    let pkt_end = cur_pos.unwrap();
-                    let pkt_start = pkt_end.saturating_sub(pcm.len() as u64);
-                    // Advance for next iteration.
-                    *cur_pos.as_mut().unwrap() = pkt_end + pcm.len() as u64;
-                    if pkt_end <= start {
-                        // Entirely before the target — discard.
-                        continue;
-                    }
-                    // This packet overlaps the target: trim the pre-target prefix.
-                    let from = start.saturating_sub(pkt_start) as usize;
-                    self.carry_after_seek = pcm[from.min(pcm.len())..].to_vec();
+        if start <= SEEK_BACK + FRAME as u64 {
+            return self.seek_linear(start);
+        }
+        // Granules include pre-skip, so add it to find the right page.
+        let mut target = (start + self.pre_skip).saturating_sub(SEEK_BACK);
+        for _ in 0..32 {
+            if self.reader.seek_absgp(None, target).is_err() {
+                // Unseekable stream — shouldn't happen for a file. Bail loudly
+                // rather than decoding from an unknown position.
+                bail!("opus seek failed (unseekable stream)");
+            }
+            self.pre_skip_left = 0; // pre-skip handling is manual from here
+            if target == 0 {
+                // Landed right after the headers (probed: granule-0 header
+                // pages are skipped): the buffer's absolute start is known, so
+                // front-anchor — exact even on a padded final page.
+                return self.resync_from_stream_start(start);
+            }
+            // Decode-discard the landing page; its end granule tells us where
+            // we are. The discarded audio is the decoder pre-roll.
+            match self.discard_landing_page()? {
+                // EOF without a page end (truncated file) — give up: emitted ≥
+                // total makes next_block() report end-of-stream.
+                None => {
                     self.emitted = start;
                     return Ok(());
                 }
-                self.emitted = start;
-                return Ok(());
+                Some(page_end) if page_end <= start => {
+                    return self.walk_to(start, page_end);
+                }
+                // Landing page contains `start` — retreat one page-span so the
+                // previous page becomes the landing page.
+                Some(_) => target = target.saturating_sub(PAGE_SPAN),
             }
-            // seek_absgp failed (e.g. unseekable stream) — fall through to
-            // linear scan. This path shouldn't happen with real files.
         }
-        // Linear scan: decode forward, discarding until we reach `start`.
-        // Note: next_block() tracks self.emitted and handles total-trim.
+        // Pathological page layout: fall back to the exact stream-start path.
+        if self.reader.seek_absgp(None, 0).is_err() {
+            bail!("opus seek failed (unseekable stream)");
+        }
+        self.resync_from_stream_start(start)
+    }
+
+    /// Decode and discard packets until the end of the current page, returning
+    /// the page-end position in *sample* coordinates (granule − pre-skip), or
+    /// `None` at end of stream.
+    fn discard_landing_page(&mut self) -> Result<Option<u64>> {
+        loop {
+            let Some(pkt) = self.reader.read_packet().context("seek_ms read packet")? else {
+                return Ok(None);
+            };
+            let mut pcm = vec![0.0f32; FRAME * 2];
+            self.decoder
+                .decode_float(&pkt.data, &mut pcm, false)
+                .context("seek_ms decode")?;
+            if pkt.last_in_page() {
+                return Ok(Some(pkt.absgp_page().saturating_sub(self.pre_skip)));
+            }
+        }
+    }
+
+    /// Walk packets forward from the known absolute position `pos` until the
+    /// packet straddling `start`; stash the overlap as the carry. A padded
+    /// final packet may leak into the carry — `next_block`'s end-trim cuts it.
+    fn walk_to(&mut self, start: u64, mut pos: u64) -> Result<()> {
+        loop {
+            let Some(pkt) = self.reader.read_packet().context("seek_ms read packet")? else {
+                break; // seek past EOF: emitted ≥ total ends the stream
+            };
+            let mut pcm = vec![0.0f32; FRAME * 2];
+            let n = self
+                .decoder
+                .decode_float(&pkt.data, &mut pcm, false)
+                .context("seek_ms decode")?;
+            pcm.truncate(n);
+            let pkt_start = pos;
+            let pkt_end = pkt_start + pcm.len() as u64;
+            pos = pkt_end;
+            if pkt_end <= start {
+                continue; // entirely before the target — discard
+            }
+            // Straddles the target: trim the pre-start prefix.
+            let from = start.saturating_sub(pkt_start) as usize;
+            self.carry_after_seek = pcm[from.min(pcm.len())..].to_vec();
+            break;
+        }
+        self.emitted = start;
+        Ok(())
+    }
+
+    /// Exact resync when reading from the stream start (after
+    /// `seek_absgp(0)`): buffer the first audio page; its absolute start is
+    /// sample 0 (raw, pre-skip included), so the carry is cut front-anchored
+    /// at `start + pre_skip`. Walks on if `start` is beyond the first page.
+    /// Skips any header packets in case the seek landed before them.
+    fn resync_from_stream_start(&mut self, start: u64) -> Result<()> {
+        let mut buf: Vec<f32> = Vec::new();
+        loop {
+            let Some(pkt) = self.reader.read_packet().context("seek_ms read packet")? else {
+                self.emitted = start; // truncated file — end the stream
+                return Ok(());
+            };
+            if pkt.data.starts_with(b"OpusHead") || pkt.data.starts_with(b"OpusTags") {
+                continue;
+            }
+            let mut pcm = vec![0.0f32; FRAME * 2];
+            let n = self
+                .decoder
+                .decode_float(&pkt.data, &mut pcm, false)
+                .context("seek_ms decode")?;
+            pcm.truncate(n);
+            buf.extend_from_slice(&pcm);
+            if pkt.last_in_page() {
+                let raw_start = start + self.pre_skip; // buf[0] is raw sample 0
+                if (raw_start as usize) < buf.len() {
+                    self.carry_after_seek = buf.split_off(raw_start as usize);
+                    self.emitted = start;
+                    return Ok(());
+                }
+                // `start` lies beyond the first page — walk from its end.
+                let page_end = pkt.absgp_page().saturating_sub(self.pre_skip);
+                return self.walk_to(start, page_end);
+            }
+        }
+    }
+
+    /// Linear resync for offsets near the stream start: decode forward via
+    /// `next_block` (which handles pre-skip + end-trim), discarding until
+    /// `start`, and stash the straddling block's tail as the carry.
+    fn seek_linear(&mut self, start: u64) -> Result<()> {
         let mut pos: u64 = 0;
         loop {
             match self.next_block()? {
@@ -471,16 +570,19 @@ pub fn read_audio_slice_ms(path: &Path, start_ms: u64, end_ms: u64) -> Result<(V
     blocks.seek_ms(start_ms)?;
     let start = start_ms * OPUS_RATE as u64 / 1000;
 
-    // Collect samples in [start, end).
+    // Collect samples in [start, end). seek_ms already discarded [0, start),
+    // but keep the pre-refactor `from` trim as a defense: if a seek ever
+    // delivered a misaligned carry, pre-start samples must not leak through.
     let mut out = Vec::new();
-    let mut pos: u64 = start; // emitted by seek_ms already discards [0,start)
+    let mut pos: u64 = start;
     while let Some(pcm) = blocks.next_block()? {
         let pkt_start = pos;
         let pkt_end = pos + pcm.len() as u64;
         pos = pkt_end;
+        let from = start.saturating_sub(pkt_start) as usize;
         let to = (end.saturating_sub(pkt_start) as usize).min(pcm.len());
-        if to > 0 {
-            out.extend_from_slice(&pcm[..to]);
+        if from < to {
+            out.extend_from_slice(&pcm[from..to]);
         }
         if pkt_end >= end {
             break;
@@ -571,6 +673,99 @@ mod tests {
         // 200 ms inside the leading silence.
         let (quiet, _) = read_audio_slice_ms(&opus, 300, 500).unwrap();
         assert!(rms(&quiet) < 0.05, "leading silence rms {}", rms(&quiet));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression (Phase 42b review): the coarse granule-seek path (offsets
+    /// beyond `SEEK_BACK`, ~2.1 s) must deliver samples starting *exactly* at
+    /// the target — an off-by-one-packet in `seek_ms`'s position bookkeeping
+    /// dropped the packet straddling the seek target, shifting everything
+    /// ~20 ms later. `slice_matches_window` seeks only 1 200 ms and never
+    /// exercises this branch.
+    #[test]
+    fn coarse_seek_starts_exactly_at_target() {
+        let dir = std::env::temp_dir().join(format!("zord-opus-cseek-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (wav, opus) = (dir.join("t.wav"), dir.join("t.opus"));
+
+        // 48 kHz (no resampler → sample-exact alignment): 3 s silence, then a
+        // 100 ms tone burst starting exactly at 3 000 ms, then silence.
+        let rate = 48_000u32;
+        let mut w = WavWriter::create(&wav, rate).unwrap();
+        let mut samples = vec![0.0f32; rate as usize * 3];
+        samples.extend(
+            (0..rate / 10)
+                .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5),
+        );
+        samples.extend(std::iter::repeat_n(0.0f32, rate as usize));
+        w.write(&samples).unwrap();
+        w.finalize().unwrap();
+        compress_wav_to_opus(&wav, &opus, 32_000).unwrap();
+
+        // Slice [3000, 3400) — start > SEEK_BACK, so this takes the coarse path.
+        let (slice, rate) = read_audio_slice_ms(&opus, 3_000, 3_400).unwrap();
+        assert_eq!(rate, 48_000);
+        assert!(slice.len() >= 4_800, "slice too short: {}", slice.len());
+
+        // Tone must be present immediately (no leading gap)…
+        let head = rms(&slice[..960]); // first 20 ms (one packet)
+        assert!(head > 0.1, "first 20 ms should be tone, rms {head}");
+        // …and still present right up to the burst's true end at +100 ms. The
+        // buggy bookkeeping shifted content ~one packet later, leaving this
+        // window silent.
+        let tail = rms(&slice[3_840..4_800]); // last 20 ms of the burst window
+        assert!(
+            tail > 0.1,
+            "burst end misaligned (shifted seek?), rms {tail}"
+        );
+        // After the burst (+ a packet of lossy smear): silence.
+        let after = rms(&slice[5_760..]);
+        assert!(after < 0.05, "post-burst should be silent, rms {after}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Companion to [`coarse_seek_starts_exactly_at_target`] for a multi-page
+    /// file: Zord pages span 255 packets (~5.1 s), so seeking to 10 s in a
+    /// 12 s file lands on the page that *contains* the target — exercising
+    /// the retreat-one-page + walk-forward resync rather than the
+    /// front-anchored first-page path.
+    #[test]
+    fn coarse_seek_multi_page_retreat_path() {
+        let dir = std::env::temp_dir().join(format!("zord-opus-cseek2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (wav, opus) = (dir.join("t.wav"), dir.join("t.opus"));
+
+        // 12 s at 48 kHz (~3 ogg pages): silence, a 100 ms tone burst starting
+        // exactly at 10 000 ms, silence.
+        let rate = 48_000u32;
+        let mut w = WavWriter::create(&wav, rate).unwrap();
+        let mut samples = vec![0.0f32; rate as usize * 10];
+        samples.extend(
+            (0..rate / 10)
+                .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5),
+        );
+        samples.extend(std::iter::repeat_n(
+            0.0f32,
+            rate as usize * 2 - rate as usize / 10,
+        ));
+        w.write(&samples).unwrap();
+        w.finalize().unwrap();
+        compress_wav_to_opus(&wav, &opus, 32_000).unwrap();
+
+        let (slice, rate) = read_audio_slice_ms(&opus, 10_000, 10_400).unwrap();
+        assert_eq!(rate, 48_000);
+        assert!(slice.len() >= 4_800, "slice too short: {}", slice.len());
+        let head = rms(&slice[..960]);
+        assert!(head > 0.1, "first 20 ms should be tone, rms {head}");
+        let tail = rms(&slice[3_840..4_800]);
+        assert!(
+            tail > 0.1,
+            "burst end misaligned (shifted seek?), rms {tail}"
+        );
+        let after = rms(&slice[5_760..]);
+        assert!(after < 0.05, "post-burst should be silent, rms {after}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

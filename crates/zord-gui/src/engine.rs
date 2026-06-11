@@ -2124,6 +2124,9 @@ struct TimelineState {
     paused: bool,
     /// Wall-clock instant of the last position-tick event.
     last_tick: std::time::Instant,
+    /// The `MixReader` returned `None` — every track is fully read; we're only
+    /// waiting for the sink to drain. Don't re-poll the reader.
+    exhausted: bool,
 }
 
 impl TimelineState {
@@ -2274,6 +2277,7 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                             elapsed_before_resume: 0,
                             paused: false,
                             last_tick: now,
+                            exhausted: false,
                         });
                         let _ = ev.send(Event::TimelinePos { ms: Some(start_ms) });
                     }
@@ -2317,13 +2321,13 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 // Timeline streaming: feed blocks into the sink while active.
                 if let Some(ref mut state) = tl {
                     if !state.paused {
-                        // Keep ~2–3 blocks buffered in the sink.
-                        let target_queued = 3;
-                        let queued = sink.as_ref().map(|s| s.len()).unwrap_or(0);
-                        if queued < target_queued {
-                            let blocks_to_add = target_queued - queued;
-                            let mut exhausted = false;
-                            for _ in 0..blocks_to_add {
+                        // Keep ~2–3 blocks buffered in the sink — but once the
+                        // reader has reported end-of-stream, don't re-poll it
+                        // while the queued audio drains.
+                        if !state.exhausted {
+                            let target_queued = 3;
+                            let queued = sink.as_ref().map(|s| s.len()).unwrap_or(0);
+                            for _ in queued..target_queued {
                                 match state.reader.next_block() {
                                     Ok(Some(block)) => {
                                         if let Some(ref player) = sink {
@@ -2338,24 +2342,24 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                                         }
                                     }
                                     Ok(None) => {
-                                        exhausted = true;
+                                        state.exhausted = true;
                                         break;
                                     }
                                     Err(e) => {
                                         tracing::warn!("timeline read error: {e}");
-                                        exhausted = true;
+                                        state.exhausted = true;
                                         break;
                                     }
                                 }
                             }
-                            // If exhausted and sink drained, signal completion.
-                            if exhausted && sink.as_ref().is_some_and(|s| s.empty()) {
-                                tl = None;
-                                if let Some(s) = sink.take() {
-                                    s.stop();
-                                }
-                                let _ = ev.send(Event::TimelinePos { ms: None });
+                        }
+                        // Exhausted and the sink drained → playback finished.
+                        if state.exhausted && sink.as_ref().is_some_and(|s| s.empty()) {
+                            tl = None;
+                            if let Some(s) = sink.take() {
+                                s.stop();
                             }
+                            let _ = ev.send(Event::TimelinePos { ms: None });
                         }
 
                         // Position tick every ~250 ms.
