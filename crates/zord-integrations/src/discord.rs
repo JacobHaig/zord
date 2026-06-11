@@ -4,7 +4,8 @@
 //! receiver, following a configured user into voice and turning Discord's
 //! per-SSRC streams (decrypted through DAVE, decoded from Opus) into one
 //! [`IntegrationEvent::ParticipantJoined`] per speaker. The followed user's own
-//! stream is flagged `is_me` so the engine routes it to the "Me" track.
+//! stream is flagged `is_me` so the engine can tag which uniform spk-N track is
+//! the app user (styling/perspective only — every participant records alike).
 //!
 //! Threading: serenity/songbird need a tokio runtime, but [`Integration`] is a
 //! sync interface, so `start()` spawns a thread that owns a runtime and bridges

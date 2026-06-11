@@ -1311,12 +1311,15 @@ code, plus the Settings UI.
 - **30a — feature flag + config.** ✅ **DONE.** `discord` feature on `zord-gui`
   (→ `zord-integrations/discord`); `discord_bot_token` + `discord_user_id`
   settings (plaintext, mirroring `llm_api_key`). Default + feature builds green.
-- **30b — "Me from platform" seam + engine.** ✅ **DONE.** `Participant.is_me`
-  marks the followed user; `drive_session` maps it to `TrackRole::Me` (others →
-  `TrackRole::Speaker(idx)`); `run_integration_session` routes `Me` →
-  `Source::Me`/`me.wav` and `Speaker(idx)` → `Others`/`spk-N.wav`, **with no local
-  mic** (Me comes from the provider). `FakeProvider` marks participant 0 as `is_me`
-  for testing; unit tests updated + green.
+- **30b — "Me from platform" seam + engine.** ✅ **DONE** (reworked June 2026:
+  unified tracks). `Participant.is_me` marks the followed user; `drive_session`
+  assigns **every** participant — the user included — the next 0-based speaker
+  index, and `run_integration_session` records them all as uniform
+  `Others`/`spk-N.wav` tracks named from the platform, **with no local mic**.
+  "Me" is a session tag (`sessions.me_speaker`, from `is_me`) driving styling
+  and perspective only — not a separate channel, so replay, voiceprints, and
+  re-transcription treat the user like any participant. `FakeProvider` marks
+  one participant `is_me` for testing; unit tests updated + green.
 - **30c — the real `DiscordProvider`.** ✅ **DONE (build-verified).**
   `crates/zord-integrations/src/discord.rs` (behind `discord`): a serenity client +
   songbird voice receiver on a dedicated tokio runtime thread, bridging into the
