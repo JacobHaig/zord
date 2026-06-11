@@ -447,7 +447,8 @@ impl Store {
     /// Sessions not yet folded into the ledger, oldest first (fold order).
     pub fn unapplied_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, started_at, ended_at, title, audio_path, model FROM sessions
+            "SELECT id, started_at, ended_at, title, audio_path, model, overview_folded_ms
+             FROM sessions
              WHERE id NOT IN (SELECT session_id FROM session_overview_state)
              ORDER BY started_at",
         )?;
@@ -488,8 +489,8 @@ impl Store {
 
     pub fn create_session(&self, session: &Session) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, started_at, ended_at, title, audio_path, model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO sessions (id, started_at, ended_at, title, audio_path, model, overview_folded_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session.id,
                 i64v(session.started_at),
@@ -497,7 +498,19 @@ impl Store {
                 session.title,
                 session.audio_path,
                 session.model,
+                opt_i64v(session.overview_folded_ms),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp a session as folded into the living overview document (Phase 39):
+    /// `at_ms` records when the fold ran. Unstamped (`NULL`) sessions are the
+    /// ones a fold-all picks up.
+    pub fn set_overview_folded(&self, session_id: &str, at_ms: u64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET overview_folded_ms = ?2 WHERE id = ?1",
+            params![session_id, i64v(at_ms)],
         )?;
         Ok(())
     }
@@ -582,7 +595,7 @@ impl Store {
     /// Fetch a single session by id.
     pub fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, started_at, ended_at, title, audio_path, model
+            "SELECT id, started_at, ended_at, title, audio_path, model, overview_folded_ms
              FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], row_to_session)?;
@@ -595,7 +608,7 @@ impl Store {
     /// All sessions, newest first.
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, started_at, ended_at, title, audio_path, model
+            "SELECT id, started_at, ended_at, title, audio_path, model, overview_folded_ms
              FROM sessions ORDER BY started_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_session)?;
@@ -1109,6 +1122,12 @@ fn add_late_columns(conn: &Connection) {
     // (every Discord participant records as a uniform speaker track; "me" is a
     // tag from the configured user ID, not a separate audio channel).
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN me_speaker INTEGER", []);
+    // Phase 39 — when this session was folded into the living overview
+    // document (epoch ms). NULL = not folded yet, so fold-all retries it.
+    let _ = conn.execute(
+        "ALTER TABLE sessions ADD COLUMN overview_folded_ms INTEGER",
+        [],
+    );
 }
 
 /// Create the base tables, indexes, FTS virtual table, and sync triggers
@@ -1390,6 +1409,7 @@ fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
         title: r.get(3)?,
         audio_path: r.get(4)?,
         model: r.get(5)?,
+        overview_folded_ms: get_opt_u64(r, 6)?,
     })
 }
 
@@ -1535,6 +1555,7 @@ mod enc_tests {
                 title: None,
                 audio_path: None,
                 model: "m".into(),
+                overview_folded_ms: None,
             })
             .unwrap();
         }
@@ -1576,6 +1597,7 @@ mod ledger_tests {
             title: None,
             audio_path: None,
             model: "m".into(),
+            overview_folded_ms: None,
         })
         .unwrap();
     }
@@ -1699,6 +1721,7 @@ mod ledger_tests {
                 title: None,
                 audio_path: None,
                 model: "m".into(),
+                overview_folded_ms: None,
             })
             .unwrap();
         }
@@ -1730,6 +1753,7 @@ mod ledger_tests {
             title: None,
             audio_path: None,
             model: "m".into(),
+            overview_folded_ms: None,
         })
         .unwrap();
         s.create_project(&Project {
@@ -1799,6 +1823,7 @@ mod voiceprint_tests {
             title: Some(format!("Session {id}")),
             audio_path: None,
             model: "m".into(),
+            overview_folded_ms: None,
         })
         .unwrap();
     }

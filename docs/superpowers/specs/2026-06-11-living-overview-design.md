@@ -61,12 +61,16 @@ Two compounding issues:
 - Setting `overview_auto: bool` (default **true**) — "Update the Overview
   automatically after each recording is transcribed & compressed."
 
-### Storage (zord-store — reuse `app_meta`, no schema change)
+### Storage (zord-store — `app_meta` for the doc + one late session column)
 - `overview_doc` — the document; `overview_doc_prev` — snapshot taken
   before each AI edit (one-step "Revert last AI update").
-- `overview_doc_fold_ms` — high-water mark: sessions with `ended_at` newer
-  than this are un-folded; the manual button folds them oldest-first, the
-  auto path folds the just-finished session. Both bump the mark.
+- `sessions.overview_folded_ms` (late column, NULL on old rows) — per-session
+  fold stamp: NULL means the session hasn't joined the living overview yet.
+  The manual button folds unstamped ended sessions oldest-first; the auto
+  path folds the just-finished session. Each successful fold stamps its
+  session with the fold time; sanity-floor failures skip that session and
+  continue; unstamped sessions are retried next fold-all (so a newer
+  session folding never hides an older one, unlike a high-water mark).
 
 ### zord-overview (rework)
 - New `update_document(doc: &str, session_input: &str, today: &str, llm) ->

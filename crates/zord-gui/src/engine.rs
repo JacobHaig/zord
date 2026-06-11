@@ -1114,8 +1114,7 @@ fn update_overview_doc(
         }
     } else {
         let all = store.list_sessions().unwrap_or_default();
-        let mark = overview_fold_mark(&store);
-        unfolded_sessions(&all, mark).into_iter().cloned().collect()
+        unfolded_sessions(&all).into_iter().cloned().collect()
     };
 
     if sessions_to_fold.is_empty() {
@@ -1133,8 +1132,8 @@ fn update_overview_doc(
         // Build the session input: stored compression first, else raw transcript.
         let segs = store.segments(&session.id).unwrap_or_default();
         if segs.is_empty() {
-            // No transcript — skip (no mark bump: a later re-transcription can
-            // still make this session foldable before anything newer folds).
+            // No transcript — skip without stamping: a later re-transcription
+            // makes this session foldable, and the next fold-all retries it.
             continue;
         }
         let session_input = match store.get_compressed(&session.id).ok().flatten() {
@@ -1196,12 +1195,14 @@ fn update_overview_doc(
         };
 
         // Sanity floor: when folding into a non-empty document, reject output
-        // shorter than 20% of it — keep the old doc (and _prev) and stop.
+        // shorter than 20% of it — keep the old doc (and _prev), leave this
+        // session unstamped (the next fold-all retries it), and continue with
+        // the rest: each fold is independent and the document was kept intact.
         if !base.trim().is_empty() && folded.len() < base.len() / 5 {
             let _ = ev.send(Event::Notice(
                 "overview update looked destructive — kept the previous document".to_string(),
             ));
-            break;
+            continue;
         }
 
         // Snapshot the current doc to _prev, then write the new one.
@@ -1209,9 +1210,8 @@ fn update_overview_doc(
             let _ = ev.send(Event::Notice(format!("overview write failed: {e}")));
             break;
         }
-        if let Some(ended) = session.ended_at {
-            let _ = bump_overview_fold_mark(&store, ended);
-        }
+        // Stamp the session as folded so it isn't picked up again.
+        let _ = store.set_overview_folded(&session.id, now_ms());
 
         // Emit the updated document.
         let (markdown, updated_at) = load_overview_doc(&store);
@@ -1703,8 +1703,6 @@ fn emit_sessions(store: &Store, ev: &UnboundedSender<Event>) {
 
 const OVERVIEW_DOC_KEY: &str = "overview_doc";
 const OVERVIEW_DOC_PREV_KEY: &str = "overview_doc_prev";
-#[allow(dead_code)] // fold bookkeeping is used by the llm-gated worker + tests
-const OVERVIEW_FOLD_MS_KEY: &str = "overview_doc_fold_ms";
 
 /// Load the living overview document. Returns `("", 0)` when nothing is stored yet.
 fn load_overview_doc(store: &Store) -> (String, u64) {
@@ -1727,36 +1725,15 @@ fn save_overview_doc_with_snapshot(store: &Store, doc: &str) -> anyhow::Result<(
     Ok(())
 }
 
-/// Return the high-water fold mark (epoch ms). Sessions with `ended_at > mark`
-/// have not yet been folded. `0` means no fold has ever run.
-#[allow(dead_code)] // used by the llm-gated fold worker + tests
-fn overview_fold_mark(store: &Store) -> u64 {
-    store
-        .get_meta(OVERVIEW_FOLD_MS_KEY)
-        .ok()
-        .flatten()
-        .and_then(|(v, _)| v.parse::<u64>().ok())
-        .unwrap_or(0)
-}
-
-/// Advance the high-water fold mark to `to_ms` (never decreases).
-#[allow(dead_code)] // used by the llm-gated fold worker + tests
-fn bump_overview_fold_mark(store: &Store, to_ms: u64) -> anyhow::Result<()> {
-    let current = overview_fold_mark(store);
-    if to_ms > current {
-        store.set_meta(OVERVIEW_FOLD_MS_KEY, &to_ms.to_string())?;
-    }
-    Ok(())
-}
-
-/// Ended sessions with `ended_at > mark`, sorted oldest-first (sessions still
+/// Ended sessions not yet stamped into the living overview
+/// (`overview_folded_ms IS NULL`), sorted oldest-first (sessions still
 /// recording — `ended_at == None` — never qualify). Transcript presence is
 /// checked by the fold worker, keeping this pure for unit tests.
 #[allow(dead_code)] // used by the llm-gated fold worker + tests
-fn unfolded_sessions(sessions: &[Session], mark: u64) -> Vec<&Session> {
+fn unfolded_sessions(sessions: &[Session]) -> Vec<&Session> {
     let mut out: Vec<&Session> = sessions
         .iter()
-        .filter(|s| s.ended_at.is_some_and(|t| t > mark))
+        .filter(|s| s.ended_at.is_some() && s.overview_folded_ms.is_none())
         .collect();
     out.sort_by_key(|s| s.ended_at.unwrap_or(0));
     out
@@ -3054,6 +3031,7 @@ fn run_session(
             None
         },
         model: model.name().to_string(),
+        overview_folded_ms: None,
     });
     // Tell the GUI which session is live so it can attach notes during capture.
     let _ = ev.send(Event::SessionStarted(session_id.clone()));
@@ -3426,6 +3404,7 @@ fn run_integration_session(
         title: None,
         audio_path: Some(session_dir.display().to_string()),
         model: model.name().to_string(),
+        overview_folded_ms: None,
     });
     let _ = ev.send(Event::SessionStarted(session_id.clone()));
     // Fresh session: no "me" speaker tagged yet (integration on_join sets it).
@@ -4323,26 +4302,37 @@ mod tests {
             title: None,
             audio_path: None,
             model: "test".to_string(),
+            overview_folded_ms: None,
         }
     }
 
-    #[test]
-    fn unfolded_sessions_empty_when_all_below_mark() {
-        let sessions = vec![make_session("a", Some(1000)), make_session("b", Some(2000))];
-        let result = unfolded_sessions(&sessions, 2000);
-        assert!(result.is_empty(), "no sessions above mark 2000");
+    fn stamped(mut s: zord_core::Session, at_ms: u64) -> zord_core::Session {
+        s.overview_folded_ms = Some(at_ms);
+        s
     }
 
     #[test]
-    fn unfolded_sessions_returns_above_mark_oldest_first() {
+    fn unfolded_sessions_empty_when_all_stamped() {
+        let sessions = vec![
+            stamped(make_session("a", Some(1000)), 5000),
+            stamped(make_session("b", Some(2000)), 5000),
+        ];
+        let result = unfolded_sessions(&sessions);
+        assert!(result.is_empty(), "stamped sessions must not be selected");
+    }
+
+    #[test]
+    fn unfolded_sessions_returns_unstamped_oldest_first() {
         let sessions = vec![
             make_session("newest", Some(5000)),
+            stamped(make_session("folded", Some(4000)), 9000),
             make_session("middle", Some(3000)),
             make_session("old", Some(1000)),
         ];
-        let result = unfolded_sessions(&sessions, 500);
+        let result = unfolded_sessions(&sessions);
         assert_eq!(result.len(), 3);
-        // oldest-first order by ended_at
+        // oldest-first order by ended_at; the stamped one is excluded even
+        // though it sits between unstamped ones (no high-water skipping).
         assert_eq!(result[0].id, "old");
         assert_eq!(result[1].id, "middle");
         assert_eq!(result[2].id, "newest");
@@ -4352,21 +4342,22 @@ mod tests {
     fn unfolded_sessions_skips_live_sessions() {
         // Sessions with ended_at = None are still recording — must not appear.
         let sessions = vec![make_session("live", None), make_session("done", Some(2000))];
-        let result = unfolded_sessions(&sessions, 1000);
+        let result = unfolded_sessions(&sessions);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "done");
     }
 
     #[test]
-    fn unfolded_sessions_mark_is_exclusive() {
-        // ended_at == mark is NOT considered un-folded.
+    fn unfolded_sessions_retries_older_unstamped_after_newer_fold() {
+        // The regression the per-session stamp fixes: a newer session folding
+        // (auto path) must NOT hide an older session that never folded.
         let sessions = vec![
-            make_session("at-mark", Some(1000)),
-            make_session("after-mark", Some(1001)),
+            stamped(make_session("auto-folded-new", Some(9000)), 9001),
+            make_session("missed-old", Some(1000)),
         ];
-        let result = unfolded_sessions(&sessions, 1000);
+        let result = unfolded_sessions(&sessions);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, "after-mark");
+        assert_eq!(result[0].id, "missed-old");
     }
 
     #[test]
@@ -4411,24 +4402,39 @@ mod tests {
     }
 
     #[test]
-    fn fold_mark_round_trips() {
-        let dir = std::env::temp_dir().join(format!("zord-fmark-{}", std::process::id()));
+    fn overview_folded_stamp_round_trips() {
+        let dir = std::env::temp_dir().join(format!("zord-fstamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("t.db");
         let _ = std::fs::remove_file(&db);
         let store = zord_store::Store::open(&db).unwrap();
 
-        assert_eq!(overview_fold_mark(&store), 0);
+        store.create_session(&make_session("sess-1", None)).unwrap();
+        // New session: unstamped through both lookup paths.
+        assert_eq!(
+            store
+                .get_session("sess-1")
+                .unwrap()
+                .unwrap()
+                .overview_folded_ms,
+            None
+        );
+        store.end_session("sess-1", 2000).unwrap();
 
-        bump_overview_fold_mark(&store, 12345).unwrap();
-        assert_eq!(overview_fold_mark(&store), 12345);
-
-        // Bumping to a lower value must not decrease the mark.
-        bump_overview_fold_mark(&store, 100).unwrap();
-        assert_eq!(overview_fold_mark(&store), 12345);
-
-        bump_overview_fold_mark(&store, 99999).unwrap();
-        assert_eq!(overview_fold_mark(&store), 99999);
+        store.set_overview_folded("sess-1", 12345).unwrap();
+        assert_eq!(
+            store
+                .get_session("sess-1")
+                .unwrap()
+                .unwrap()
+                .overview_folded_ms,
+            Some(12345)
+        );
+        // The listing the fold selection reads surfaces the stamp too.
+        let listed = store.list_sessions().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].overview_folded_ms, Some(12345));
+        assert!(unfolded_sessions(&listed).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

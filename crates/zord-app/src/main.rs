@@ -678,6 +678,7 @@ fn cmd_file(path: PathBuf, model: &str, db: Option<PathBuf>) -> Result<()> {
         title: Some(path.display().to_string()),
         audio_path: Some(path.display().to_string()),
         model: model_id.name().to_string(),
+        overview_folded_ms: None,
     })?;
 
     let count = pipeline::run_file(
@@ -793,6 +794,7 @@ fn cmd_record(
         title: None,
         audio_path: keep_audio.as_ref().map(|p| p.display().to_string()),
         model: model_id.name().to_string(),
+        overview_folded_ms: None,
     })?;
 
     let what = capture_description(record_mic, record_system);

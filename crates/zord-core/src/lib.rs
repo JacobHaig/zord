@@ -138,6 +138,10 @@ pub struct Session {
     pub audio_path: Option<String>,
     /// Which whisper model produced this transcript.
     pub model: String,
+    /// When this session was folded into the living overview document
+    /// (Phase 39), epoch ms. `None` = not folded yet (fold-all retries it).
+    #[serde(default)]
+    pub overview_folded_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
