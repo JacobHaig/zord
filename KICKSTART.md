@@ -75,13 +75,14 @@ opt-in Cargo features so you compile only what you use — combine freely with
 | `llm-local` | AI features on a built-in local LLM (compiles llama.cpp; Metal on Apple Silicon) | none | minutes |
 | `llm-remote` | AI features against your own OpenAI-compatible server (LM Studio, Ollama, vLLM, …) | none (pure HTTP) | fast |
 | `diarization` | per-speaker labels within the Others channel (sherpa-onnx) | none | ~1 min |
+| `voiceprints` | opt-in speaker memory: name someone once, Zord auto-names them in future sessions; per-person deletable; requires `diarization` | none | negligible |
 | `discord` | record Discord calls with one separated track per speaker | none (compiles libopus + the DAVE E2EE stack — slow first build) | minutes |
 | `encryption` | SQLCipher at-rest database encryption | **perl** at build time | ~1 min |
 | `self-update` | in-app update check + Windows in-place install | none (GitHub-channel release builds only) | fast |
 
 ```bash
 # What official releases ship (plus self-update on the GitHub channel):
-cargo build --release -p zord-gui --features parakeet,diarization,llm-local,llm-remote,discord
+cargo build --release -p zord-gui --features parakeet,diarization,voiceprints,llm-local,llm-remote,discord
 cargo build --release -p zord-app --features parakeet,diarization,llm-local,llm-remote
 ```
 

@@ -21,7 +21,9 @@ zord-transcribe `model_cache_dir`, zord-diarize `models_dir`.)
 
 Layout: `config.json` (settings), `zord.db` (SQLite: sessions + segments +
 FTS5; `summary` column on sessions; `speaker` column on segments +
-`speaker_names` table), `models/` (Whisper `.bin`, Parakeet dirs, summary
+`speaker_names` table; `voiceprints` + `voiceprint_samples` (rolling 8
+embeddings/person) + `session_speaker_embeddings` tables under the
+`voiceprints` feature), `models/` (Whisper `.bin`, Parakeet dirs, summary
 GGUFs, diarization ONNX), `logs/` (Phase 17: `zord.log` via tracing-appender,
 alongside stderr; always in app-data), `audio/` (kept per-channel tracks when
 keep-audio is on — WAV while fresh, compressed to `.opus` after

@@ -76,7 +76,8 @@ jobs:
       matrix:
         # Mirrors release.yml's FEATURES, checked one at a time so a break
         # names its feature. (encryption stays out, as in release.yml.)
-        feature: [diarization, llm-local, llm-remote, parakeet]
+        # voiceprints requires diarization, so checked together.
+        feature: [diarization, "diarization,voiceprints", llm-local, llm-remote, parakeet]
     steps:
       - uses: actions/checkout@v4
 

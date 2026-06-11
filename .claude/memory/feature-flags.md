@@ -21,6 +21,11 @@ build (and Windows CI) stays lean and fast:
   internal crate feature is `sherpa`, like summarize's `llama`). Reuses the same
   sherpa-onnx version as `parakeet`; cargo unifies the sys crate so both can be
   enabled together. See [[diarization-design]].
+- `voiceprints` → cross-session speaker identity (requires `diarization`): per-cluster
+  embeddings persisted to `zord-store`; cosine matcher auto-names recognized speakers
+  post-diarization; implicit enrollment via rename + Discord ground-truth tracks;
+  Speakers rail view + consent dialog + per-person Forget. Build-time kill-switch;
+  runtime toggle `voiceprints_enabled` (default off) is the second gate. See [[voiceprints]].
 
 Each consuming binary (`zord-app`, `zord-gui`) has a **passthrough** feature of
 the same name that enables the underlying crate feature. Default build never

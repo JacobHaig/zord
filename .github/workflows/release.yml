@@ -27,7 +27,7 @@ env:
   # Optional engines bundled into the released apps. Kept in one place so both
   # the GUI bundle and the CLI build stay in sync. (encryption is intentionally
   # omitted — its vendored OpenSSL would need Perl + NASM on the Windows runner.)
-  FEATURES: "diarization,llm-local,llm-remote,parakeet,discord"
+  FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord"
   CHANNEL: ${{ inputs.channel || 'github' }}
 
 jobs:

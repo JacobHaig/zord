@@ -1650,20 +1650,29 @@ Spec: `docs/superpowers/specs/2026-06-10-audio-compression-design.md`.
   Lives in `crates/zord-gui/src/wizard.rs`; styled from the 36a tokens.
   Spec: `docs/superpowers/specs/2026-06-10-setup-wizard-design.md`.
 
-### Phase 38 — Voiceprints: cross-session speaker identity (planned)
-Zord remembers voices: per-cluster speaker embeddings (the sherpa-onnx
-extractor we already ship — a few-KB vector, never audio) are persisted per
-session and matched against a local **voiceprint library** by plain cosine
-similarity (presets strict 0.78 / standard 0.72 / relaxed 0.66, 0.05
-runner-up margin, ≥3 s speech floor, rolling 8 samples/person). Enrollment
-is implicit: renaming a speaker enrolls them; Discord sessions auto-enroll
-from ground-truth per-participant tracks. New **Speakers** rail view (under
-Overview/Search) lists known people with per-person **Forget this voice**;
-runtime opt-in via a one-time consent dialog, and the whole capability sits
-behind the **`voiceprints` Cargo feature** (requires `diarization`) as a
-build-time kill-switch. Legal posture: `docs/voiceprints-legal.md`.
-Sub-phases: 38a store schema + matcher → 38b `SpeakerEmbedder` → 38c engine
-matching/enrollment → 38d Speakers view + consent → 38e docs/CI.
+### Phase 38 — Voiceprints: cross-session speaker identity ✅ DONE (June 2026)
+Zord now remembers voices across sessions. Per-cluster speaker embeddings
+(the sherpa-onnx extractor we already ship — a few-KB vector, never audio)
+are persisted in a local **voiceprint library** and matched by cosine
+similarity: standard threshold 0.72, 0.05 runner-up margin, ≥3 s speech
+floor to avoid enrolling on fragments, rolling 8 samples per person to stay
+current. Presets: strict 0.78 / standard 0.72 / relaxed 0.66.
+Enrollment is **implicit**: renaming a speaker in any session enrolls them;
+Discord sessions auto-enroll from their ground-truth per-participant tracks
+post-stop. After every diarization pass the engine matches clusters against
+the library and renames any match automatically ("Recognized Alex." notice).
+New **Speakers** rail view (under Overview/Search, `voiceprints` builds
+only) shows all known people as person cards with inline rename, per-session
+appearance chips, and **Forget this voice** (per-person removal). Settings →
+Speakers adds a "Voice identification" block: opt-in toggle (fires the
+one-time consent dialog; `voiceprints_consented_at` timestamp), match
+strictness picker, and **Forget all voices**. The runtime toggle
+(`voiceprints_enabled`, default off) guards matching and enrollment; cluster
+embeddings are persisted per-session regardless so the store is ready once
+the user opts in. The entire capability sits behind the **`voiceprints`**
+Cargo feature (requires `diarization`) as a build-time kill-switch.
+Implemented and gate-verified; live end-to-end testing pending.
+Legal posture: `docs/voiceprints-legal.md`.
 Spec: `docs/superpowers/specs/2026-06-10-voiceprints-design.md` ·
 Plan: `docs/superpowers/plans/2026-06-10-voiceprints.md`.
 

@@ -74,6 +74,10 @@ conversations stay yours.
   when something wasn't discussed rather than inventing an answer.
 - **Per-speaker labels** *(optional)* — split the Others channel into
   individual speakers, rename them, and see them color-coded throughout.
+- **Remembers voices** *(opt-in)* — name someone once and Zord labels them
+  automatically in future meetings. Voiceprints are local-only, per-person
+  deletable, behind a consent flow and a build flag, and never leave your
+  machine.
 - **Searchable history** — every session is stored locally with full-text
   search across everything you've ever recorded, plus per-session notes.
 - **Per-line replay** — hover any transcript line to play back exactly that
@@ -107,7 +111,7 @@ transcripts in a browser. Both are local-only.
 Grab the latest build from the
 [releases page](https://github.com/JacobHaig/zord/releases): a `.dmg`
 (macOS, Apple Silicon) or a `-setup.exe` / portable `-gui.exe` / `.zip`
-(Windows x64). Releases ship every optional engine (Parakeet, diarization,
+(Windows x64). Releases ship every optional engine (Parakeet, diarization, voiceprints,
 local + remote AI, Discord).
 
 **The builds are currently unsigned**, so the OS warns on first launch:
@@ -135,7 +139,7 @@ cargo run -p zord-gui --release
 
 Prerequisites are just **Rust + CMake + a C/C++ toolchain**. The full guide —
 per-platform setup, every optional feature (`parakeet`, `llm-local`,
-`llm-remote`, `diarization`, `discord`, `encryption`), the CLI, first-run
+`llm-remote`, `diarization`, `voiceprints`, `discord`, `encryption`), the CLI, first-run
 permissions, data locations, and troubleshooting — lives in
 **[`KICKSTART.md`](KICKSTART.md)**.
 
