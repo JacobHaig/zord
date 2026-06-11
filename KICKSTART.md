@@ -161,8 +161,9 @@ zord diarize <session-id>
 zord summarize <session-id>
 zord compress  <session-id>
 
-# Cross-meeting overview across recent sessions
-zord overview --max 50
+# Print the living overview document / fold new sessions into it
+zord overview
+zord overview --update
 ```
 
 **Models** (`--model`): `large-v3-turbo-q5_0` (default — best size/speed),

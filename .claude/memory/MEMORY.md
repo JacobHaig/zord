@@ -6,8 +6,8 @@
 - [Meter event throttle](meter-event-throttle.md) — macOS-only meter lag was per-buffer Level events flooding an unbounded channel; emit ~30Hz
 - [Diarization design](diarization-design.md) — Phase 16 per-speaker diarization: offline-first, optional live, sherpa-onnx
 - [Teams audio options](teams-audio-options.md) — getting Teams audio/speaker names without a bot (Graph callTranscript); per-participant needs a bot
-- [Project ledger](project-ledger.md) — Phase 26 stateful Overview: extract→reconcile→apply fold; id-validation, manual flag, deterministic ids (supersedes Phase 23 rollup)
-- [Cross-meeting synthesis](cross-meeting-synthesis.md) — Phase 23 compression infra (still used as extract input + chat fallback); the markdown Overview is legacy → see project-ledger
+- [Project ledger → living overview](project-ledger.md) — Phase 39 living markdown Overview (app_meta overview_doc, per-session fold stamps, XSS-escaped rendering); Phase 26 ledger DELETED, tables inert
+- [Cross-meeting synthesis](cross-meeting-synthesis.md) — Phase 23 compression infra (Phase 39: line-by-line condensation prompt; feeds the living-overview fold + chat fallback)
 - [Summary model catalog](summary-model-catalog.md) — adding summary LLM downloads: single-file GGUFs only (official Qwen shards Q4_K_M at 7B+); verify URL returns 206 first; mirror = hf-mirror.com swap
 - [macOS build](macos-build.md) — deployment target 13, Swift lib path, build.rs links libclang_rt.osx
 - [CI macOS Xcode 26](ci-macos-xcode26.md) — release macOS job needs macos-15 (Xcode 26 / macOS 26 SDK) for the screencapturekit Swift bridge

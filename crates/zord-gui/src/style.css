@@ -55,7 +55,7 @@ body {
    Shared interactive behavior for every button family. Composition happens
    here at the CSS level — markup keeps its existing class names. */
 :is(.record, .mbtn, .tbtn, .row-btn, .rail-btn, .stab, .toggle, .chip,
-    .gen-item, .export-menu-item, .notes-tab, .close-btn, .ledger-add-btn,
+    .gen-item, .export-menu-item, .notes-tab, .close-btn,
     .job-cancel, .panel-toggle, .play-btn, .notice-x, .swatch, .session) {
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
               color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease),
@@ -63,7 +63,7 @@ body {
               opacity var(--t-fast) var(--ease);
 }
 :is(.record, .mbtn, .tbtn, .row-btn, .rail-btn, .stab, .toggle, .chip,
-    .gen-item, .export-menu-item, .close-btn, .ledger-add-btn,
+    .gen-item, .export-menu-item, .close-btn,
     .job-cancel, .swatch):active:not(:disabled) {
   transform: scale(0.97);
 }
@@ -436,67 +436,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .md-doc hr { border: none; border-top: 1px solid var(--line); margin: 16px 0; }
 .md-doc a { color: var(--accent); text-decoration: none; }
 .md-doc a:hover { text-decoration: underline; }
-
-/* Legacy overview section styles (kept inert — tables still exist in DB) */
-.overview { display: flex; flex-direction: column; gap: 12px; }
-.overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.overview-head h2 { margin: 0; font-size: 18px; }
-.overview-actions { display: flex; align-items: center; gap: 10px; }
-.overview-meta { font-size: 12px; color: var(--muted); }
-.overview-body { display: flex; flex-direction: column; gap: 8px; }
-.overview-pre { white-space: pre-wrap; font-size: 13px; line-height: 1.5; color: var(--muted); }
-.overview-sec { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 14px; }
-.overview-sec[open] { border-left: 3px solid var(--accent); }
-.overview-sec-head { cursor: pointer; font-weight: 600; font-size: 14px; padding: 4px 0; outline: none; }
-.overview-sec-body { white-space: pre-wrap; font-size: 13px; line-height: 1.55; margin-top: 6px; }
-
-/* Rolling project ledger (Phase 26) */
-.ledger-pending { font-size: 12px; color: var(--others); }
-.ledger-confirm { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-.ledger-body { display: flex; flex-direction: column; gap: 10px; }
-.ledger-legacy-note { font-size: 12px; color: var(--muted); font-style: italic; padding: 4px 0; }
-
-.ledger-project { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 14px 12px; }
-.ledger-project[open] { border-left: 3px solid var(--accent); }
-.ledger-project.archived { opacity: 0.6; }
-.ledger-project.archived[open] { border-left-color: var(--muted); }
-.ledger-project-head { cursor: pointer; display: flex; align-items: baseline; gap: 10px; padding: 4px 0; outline: none; }
-.ledger-project-name { font-weight: 700; font-size: 15px; }
-.ledger-project-meta { font-size: 11px; color: var(--muted); }
-.ledger-project-desc { font-size: 13px; color: var(--muted); margin: 2px 0 8px; }
-.ledger-project-edit { display: flex; gap: 6px; align-items: center; margin: 6px 0 8px; }
-
-.ledger-items { display: flex; flex-direction: column; gap: 4px; }
-.ledger-item { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 7px; font-size: 13px; }
-.ledger-item:hover { background: var(--panel-2); }
-.ledger-item.done { opacity: 0.55; }
-.ledger-item.done .ledger-item-text { text-decoration: line-through; }
-.ledger-item-text { flex: 1; line-height: 1.4; }
-.ledger-kind { flex: none; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 6px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); }
-.ledger-kind.k-action { color: var(--accent); border-color: var(--accent); }
-.ledger-kind.k-question { color: var(--others); border-color: var(--others); }
-.ledger-kind.k-decision { color: #9d8cff; border-color: #9d8cff; }
-.ledger-owner { flex: none; font-size: 11px; color: var(--muted); background: var(--panel-2); padding: 1px 7px; border-radius: var(--r-md); }
-.ledger-manual { flex: none; color: var(--muted); opacity: 0.7; }
-.ledger-manual .ic { width: 12px; height: 12px; }
-
-.ledger-item-tools { flex: none; display: inline-flex; align-items: center; gap: 2px; opacity: 0; transition: opacity 0.12s; }
-.ledger-item:hover .ledger-item-tools { opacity: 1; }
-.ledger-move { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 11px; padding: 2px 4px; outline: none; max-width: 90px; }
-
-.ledger-add { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
-.ledger-add-btn { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; background: none; border: 1px dashed var(--line); color: var(--muted); border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
-.ledger-add-btn:hover { border-color: var(--accent); color: var(--text); }
-.ledger-add-btn .ic { width: 13px; height: 13px; }
-.ledger-kind-select { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 12px; padding: 4px 6px; outline: none; }
-
-.ledger-edit-text { flex: 1; background: var(--panel-2); color: var(--text); border: 1px solid var(--accent); border-radius: var(--r-sm); padding: 4px 8px; font-size: 13px; outline: none; }
-.ledger-edit-owner { flex: none; width: 110px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px 8px; font-size: 12px; outline: none; }
-
-.ledger-done { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
-.ledger-done > summary { cursor: pointer; font-size: 12px; color: var(--muted); outline: none; padding: 2px 0; }
-.ledger-project-tools { display: flex; gap: 2px; justify-content: flex-end; margin-top: 8px; }
-.tbtn.ghost.danger:hover { color: var(--danger); border-color: var(--danger); }
 
 /* Chat (per-meeting + cross-meeting Q&A) */
 .chat { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }

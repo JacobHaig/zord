@@ -373,12 +373,14 @@ fn update_overview_doc_cli(db_path: &std::path::Path) -> Result<()> {
     let settings = zord_config::Settings::load();
     let llm = build_llm_backend(&settings)?;
     let store = Store::open(db_path)?;
-    // Get all ended sessions with transcripts and filter to unfolded ones.
+    // Ended, not-yet-folded sessions, oldest-first (list_sessions is
+    // newest-first; the engine folds oldest-first — keep parity).
     let all_sessions = store.list_sessions()?;
-    let sessions: Vec<_> = all_sessions
+    let mut sessions: Vec<_> = all_sessions
         .iter()
         .filter(|s| s.ended_at.is_some() && s.overview_folded_ms.is_none())
         .collect();
+    sessions.sort_by_key(|s| s.ended_at.unwrap_or(s.started_at));
     if sessions.is_empty() {
         eprintln!("Overview is up to date — no un-folded sessions.");
         return Ok(());
@@ -396,14 +398,38 @@ fn update_overview_doc_cli(db_path: &std::path::Path) -> Result<()> {
             &s.id[..8.min(s.id.len())],
             s.title.as_deref().unwrap_or(&s.id)
         );
-        let input = store.get_compressed(&s.id)?.unwrap_or_default();
-        if input.trim().is_empty() {
-            progress(&format!("Skipping {} (no transcript)", &s.id));
-            continue;
-        }
+        // Input parity with the engine: the stored compression, else the
+        // labeled transcript.
+        let input = match store
+            .get_compressed(&s.id)?
+            .filter(|c| !c.trim().is_empty())
+        {
+            Some(c) => c,
+            None => {
+                let segs = store.segments(&s.id)?;
+                if segs.is_empty() {
+                    progress(&format!("Skipping {} (no transcript)", &s.id));
+                    continue;
+                }
+                let names = store.speaker_names(&s.id).unwrap_or_default();
+                transcript_text(&segs, &names)
+            }
+        };
         progress(&format!("Folding {}…", &s.id));
         match zord_overview::update_document(&doc, &input, &label, &llm, &settings, &mut progress) {
             Ok(updated) => {
+                // Sanity floor (engine parity): folding into a non-empty doc
+                // must not shrink it below 20% — a shorter result means the
+                // model dropped the document. Keep the old doc, don't stamp.
+                if !doc.trim().is_empty() && updated.len() < doc.len() / 5 {
+                    eprintln!(
+                        "  warning: update for {} came back suspiciously short ({} of {} chars) — keeping the previous document and skipping this session",
+                        &s.id,
+                        updated.len(),
+                        doc.len()
+                    );
+                    continue;
+                }
                 let _ = store.set_meta("overview_doc_prev", &doc);
                 doc = updated;
                 let _ = store.set_meta("overview_doc", &doc);

@@ -13,10 +13,19 @@ use crate::{
 };
 
 /// Render the markdown string `md` to HTML using pulldown-cmark.
+///
+/// Raw HTML is neutralized: pulldown-cmark would otherwise pass
+/// `Event::Html`/`Event::InlineHtml` through verbatim, and the result lands in
+/// `dangerous_inner_html` — the document is LLM/user-authored, so a literal
+/// `<script>`/`<img onerror>` would execute in the webview. Mapping those
+/// events to `Event::Text` makes push_html escape them instead.
 fn md_to_html(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser};
     let opts = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
-    let parser = Parser::new_ext(md, opts);
+    let parser = Parser::new_ext(md, opts).map(|e| match e {
+        Event::Html(h) | Event::InlineHtml(h) => Event::Text(h),
+        other => other,
+    });
     let mut html_out = String::new();
     html::push_html(&mut html_out, parser);
     html_out
@@ -168,5 +177,42 @@ pub fn OverviewDocView(
                 div { class: "md-doc", dangerous_inner_html: "{html}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::md_to_html;
+
+    #[test]
+    fn md_to_html_escapes_raw_html() {
+        let out =
+            md_to_html("hello <script>alert(1)</script> world\n\n<img src=x onerror=alert(2)>");
+        assert!(
+            !out.contains("<script>"),
+            "raw <script> must be escaped, got: {out}"
+        );
+        assert!(
+            !out.contains("<img"),
+            "raw <img> must be escaped, got: {out}"
+        );
+        // The text content survives, escaped.
+        assert!(
+            out.contains("&lt;script&gt;"),
+            "escaped form expected, got: {out}"
+        );
+    }
+
+    #[test]
+    fn md_to_html_renders_tasklists_and_tables() {
+        let out = md_to_html("- [x] done\n- [ ] open\n\n|a|b|\n|-|-|\n|1|2|");
+        assert!(
+            out.contains("checkbox"),
+            "tasklist checkboxes expected, got: {out}"
+        );
+        assert!(
+            out.contains("<table>"),
+            "table rendering expected, got: {out}"
+        );
     }
 }

@@ -410,8 +410,6 @@ fn MainApp() -> Element {
     let mut overview_doc_updated = use_signal(|| 0u64);
     let overview_editing = use_signal(|| false);
     let overview_draft = use_signal(String::new);
-    // overview_busy is kept so the job-cancel handler can clear it.
-    let mut overview_busy = use_signal(|| false);
     // Chat (Phase 23d): the active conversation (per-meeting or cross-meeting),
     // its input buffer, busy flag, and which scope the history belongs to.
     let mut chat = use_signal(Vec::<(bool, String)>::new);
@@ -572,7 +570,6 @@ fn MainApp() -> Element {
                     // doc and stamp; the rendered view re-derives from doc.
                     overview_doc.set(markdown);
                     overview_doc_updated.set(updated_at);
-                    overview_busy.set(false);
                 }
                 Event::ChatReply { scope, reply } => {
                     // Only land the reply if it belongs to the open conversation.
@@ -830,7 +827,6 @@ fn MainApp() -> Element {
                         diarize_est_secs.set(None);
                     }
                     "retranscribe" => retranscribing.set(false),
-                    "overview" => overview_busy.set(false),
                     _ => {}
                 }
             }

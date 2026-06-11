@@ -1679,6 +1679,34 @@ Legal posture: `docs/voiceprints-legal.md`.
 Spec: `docs/superpowers/specs/2026-06-10-voiceprints-design.md` ·
 Plan: `docs/superpowers/plans/2026-06-10-voiceprints.md`.
 
+### Phase 39 — Faithful compression + the living Overview document ✅ DONE (June 2026)
+Replaces the Phase 26 extract→reconcile ledger (which minted random projects
+and dumped item piles) with two honest layers. **Compression** is now pure
+line-by-line condensation: the rewritten `compress_prompt()` keeps speaker
+labels and utterance order, rewrites each line to its shortest faithful form,
+may drop pure-filler lines, and is forbidden from adding structure, action
+items, or summaries — the condensed text *is* the conversation, just dense.
+A **"Re-compress all sessions"** action (Settings → AI) redoes history with
+the new prompt. **The Overview** is now ONE living markdown document
+(`app_meta.overview_doc`, organized by `##` project sections) that the AI
+edits via `zord_overview::update_document` — folding each meeting's condensed
+transcript in, tracking `- [ ]`/`- [x]` items with owners, moving stale
+content to a dated `## Archive`, pruning archive entries older than 30 days,
+and preserving the user's own edits (the doc is fully user-editable). Folds
+are tracked per session (`sessions.overview_folded_ms` stamp — a newer fold
+can never hide an older unfolded session); a 20 % sanity floor rejects
+destructive LLM rewrites; `overview_doc_prev` gives one-step "Revert last AI
+update"; an optimistic re-read retries once if the user edited mid-fold. The
+auto chain (toggle `overview_auto`, default on) runs compress→fold after each
+session's transcript is final; "Update now" folds anything unstamped. UI:
+rendered markdown (pulldown-cmark, raw HTML escaped — never executed) ⟷ raw
+editor toggle. Chat's cross-meeting scope grounds on the document (fallback:
+compressed digests). The old ledger pipeline (extract/reconcile/synthesize,
+ledger UI, its prompts) is deleted; `projects`/`project_items` tables remain
+inert. Implemented and gate-verified; live LLM pass pending.
+Spec: `docs/superpowers/specs/2026-06-11-living-overview-design.md` ·
+Plan: `docs/superpowers/plans/2026-06-11-living-overview.md`.
+
 ---
 
 ## 10. Open questions to revisit during build

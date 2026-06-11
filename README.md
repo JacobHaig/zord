@@ -66,9 +66,10 @@ conversations stay yours.
 - **AI summaries** *(optional)* — turn a session into clean Markdown notes:
   TL;DR, key points, action items. Choose a style preset or write your own
   prompt.
-- **Cross-meeting overview** *(optional)* — a standing, project-grouped rollup
-  across recent meetings: what's in progress, what's done, who owns what, and
-  your open action items.
+- **A living project overview** *(optional)* — one editable markdown document,
+  organized by project, that the AI keeps current after every meeting: action
+  items checked off as they're done, stale threads archived, your own edits
+  preserved. Your projects' one-stop status page.
 - **Chat with your meetings** *(optional)* — ask questions about one meeting
   or across all of them. Answers come only from your transcripts, and it says
   when something wasn't discussed rather than inventing an answer.
