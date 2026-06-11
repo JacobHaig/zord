@@ -18,7 +18,9 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// "Jun 4, 2026" from an epoch-seconds timestamp.
+/// "Jun 4, 2026" from an epoch-SECONDS timestamp. Distinct from main.rs's
+/// `fmt_date`, which takes MILLISECONDS — `VoiceprintInfo::updated_at` is in
+/// seconds, so don't deduplicate this into the ms helper.
 fn fmt_date_secs(secs: u64) -> String {
     use chrono::TimeZone;
     chrono::Local
@@ -26,6 +28,22 @@ fn fmt_date_secs(secs: u64) -> String {
         .single()
         .map(|d| d.format("%b %-d, %Y").to_string())
         .unwrap_or_default()
+}
+
+/// Canonical embedding-model name as the engine stores it on voiceprints: the
+/// raw setting string round-trips through the same
+/// `EmbeddingModel::parse_or_default(..).name()` the engine uses, so the
+/// stale-model comparison is apples-to-apples (the raw setting can differ from
+/// the canonical name on a default config).
+#[cfg(feature = "voiceprints")]
+fn canonical_model_name(setting: &str) -> String {
+    zord_diarize::EmbeddingModel::parse_or_default(setting)
+        .name()
+        .to_string()
+}
+#[cfg(not(feature = "voiceprints"))]
+fn canonical_model_name(setting: &str) -> String {
+    setting.to_string()
 }
 
 // ── Consent dialog ────────────────────────────────────────────────────────────
@@ -149,7 +167,8 @@ pub fn SpeakersView(
                         }
                     } else {
                         // ── State 3: library ──────────────────────────────
-                        let current_model = settings.read().diarize_embedding_model.clone();
+                        let current_model =
+                            canonical_model_name(&settings.read().diarize_embedding_model);
 
                         rsx! {
                             div { class: "speakers-list",
