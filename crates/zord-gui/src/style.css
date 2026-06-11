@@ -582,7 +582,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .legend-label { color: var(--muted); font-size: 12px; font-weight: 700; }
 .speaker-name { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px 8px; font: inherit; font-size: 12px; outline: none; max-width: 140px; }
 .speaker-name:focus { border-color: var(--accent); }
-.speaker-name.spk-me { border-left: 3px solid var(--me); } /* the followed user (ME_SPEAKER) */
+.speaker-name.spk-me { border-left: 3px solid var(--me); } /* the app user (me_speaker tag) */
 .speaker-name.spk-0 { border-left: 3px solid #ffb454; }
 .speaker-name.spk-1 { border-left: 3px solid #6fd3ff; }
 .speaker-name.spk-2 { border-left: 3px solid #a6e22e; }

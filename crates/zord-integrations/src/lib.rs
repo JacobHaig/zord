@@ -30,4 +30,4 @@ mod session;
 pub use discord::DiscordProvider;
 pub use fake::FakeProvider;
 pub use integration::{AudioStream, Integration, IntegrationEvent, Participant};
-pub use session::{drive_session, EndReason, TrackRole};
+pub use session::{drive_session, EndReason};

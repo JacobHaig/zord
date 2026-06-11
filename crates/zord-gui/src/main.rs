@@ -440,6 +440,9 @@ fn MainApp() -> Element {
     // gets a replay button when its channel's file is present. `speakers` holds
     // per-participant tracks for integration sessions (spk-N).
     let mut audio_files = use_signal(AudioFiles::default);
+    // Which speaker index is the app user themself (integration sessions tag
+    // it from the configured platform user ID; None for mic/desktop sessions).
+    let mut me_speaker = use_signal(|| Option::<i32>::None);
     // The transcript line (db id) currently playing back.
     let mut playing_seg = use_signal(|| Option::<i64>::None);
     // Cross-meeting Overview rollup (Phase 23c) + whether a synthesis is running.
@@ -625,6 +628,7 @@ fn MainApp() -> Element {
                     diar_speakers.set(if n > 0 { n.to_string() } else { String::new() });
                 }
                 Event::AudioFiles(af) => audio_files.set(af),
+                Event::MeSpeaker(idx) => me_speaker.set(idx),
                 Event::Retranscribing => retranscribing.set(true),
                 Event::Retranscribed => retranscribing.set(false),
                 Event::JobStarted { id, kind, label } => {
@@ -861,6 +865,7 @@ fn MainApp() -> Element {
                 diarizing.set(false);
                 retranscribing.set(false);
                 audio_files.set(AudioFiles::default());
+                me_speaker.set(None);
                 let _ = engine.play_tx.send(PlayCmd::Stop);
                 reset_chat(chat, chat_input, chat_busy, chat_scope);
                 speaker_names.write().clear();
@@ -1100,6 +1105,7 @@ fn MainApp() -> Element {
             retranscribing.set(false);
             diar_speakers.set(String::new());
             audio_files.set(AudioFiles::default());
+            me_speaker.set(None);
             let _ = engine.play_tx.send(PlayCmd::Stop);
             reset_chat(chat, chat_input, chat_busy, chat_scope);
             let _ = engine.db_tx.send(DbCmd::Load(id));
@@ -1265,7 +1271,7 @@ fn MainApp() -> Element {
                 // Speaker legend (rename diarized speakers) — only for a saved
                 // session that has speaker labels.
                 if let View::Session(id) = &*view.read() {
-                    SpeakerLegend { id: id.clone(), segments, speaker_names, engine: engine.clone() }
+                    SpeakerLegend { id: id.clone(), segments, speaker_names, me_speaker, engine: engine.clone() }
                 }
 
                 // Transcript / results. Pass signals so the list subscribes and
@@ -1314,10 +1320,10 @@ fn MainApp() -> Element {
                                     }
                                 }
                             } else {
-                                TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
+                                TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment }
                             }
                         } else {
-                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, playing: playing_seg, on_play: on_play_segment }
+                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment }
                         }
                     }
                 }
@@ -2024,6 +2030,7 @@ fn SpeakerLegend(
     id: String,
     segments: Signal<Vec<Segment>>,
     speaker_names: Signal<std::collections::HashMap<i32, String>>,
+    me_speaker: Signal<Option<i32>>,
     engine: Engine,
 ) -> Element {
     rsx! {
@@ -2032,45 +2039,31 @@ fn SpeakerLegend(
                             segments.read().iter().filter_map(|s| s.speaker).collect();
                         spk.sort_unstable();
                         spk.dedup();
-                        // Integration sessions store the followed user's platform
-                        // name under the ME_SPEAKER sentinel — list it first.
-                        let me_name = speaker_names.read().get(&zord_core::ME_SPEAKER).cloned();
-                        if spk.is_empty() && me_name.is_none() {
+                        if spk.is_empty() {
                             rsx! {}
                         } else {
                             rsx! {
                                 div { class: "speaker-legend",
                                     span { class: "legend-label", "Speakers:" }
-                                    if let Some(me_name) = me_name {
-                                        {
-                                            let engine = engine.clone();
-                                            let id = id.clone();
-                                            rsx! {
-                                                input {
-                                                    class: "speaker-name spk-me",
-                                                    value: "{me_name}",
-                                                    placeholder: "Me",
-                                                    title: "You — the followed user's platform name",
-                                                    onchange: move |e: FormEvent| {
-                                                        let _ = engine.db_tx.send(DbCmd::RenameSpeaker {
-                                                            id: id.clone(),
-                                                            speaker: zord_core::ME_SPEAKER,
-                                                            name: e.value(),
-                                                        });
-                                                    },
-                                                }
-                                            }
-                                        }
-                                    }
                                     for idx in spk {
                                         {
                                             let val = speaker_names.read().get(&idx).cloned().unwrap_or_default();
                                             let engine = engine.clone();
                                             let id = id.clone();
+                                            // The app user's own chip carries the Me
+                                            // accent stripe (integration sessions tag
+                                            // which index is them).
+                                            let me = me_speaker.read().is_some_and(|m| m == idx);
+                                            let cls = if me {
+                                                "speaker-name spk-me".to_string()
+                                            } else {
+                                                format!("speaker-name spk-{idx}")
+                                            };
                                             rsx! {
                                                 input {
                                                     key: "{idx}",
-                                                    class: "speaker-name spk-{idx}",
+                                                    class: "{cls}",
+                                                    title: if me { "You" } else { "" },
                                                     value: "{val}",
                                                     placeholder: "Speaker {idx + 1}",
                                                     onchange: move |e: FormEvent| {
@@ -3416,6 +3409,9 @@ fn TranscriptView(
     on_edit: EventHandler<(i64, String)>,
     /// Retained WAV paths that exist on disk for this session.
     audio: Signal<AudioFiles>,
+    /// The app user's own speaker index (integration sessions) — their lines
+    /// style as "me" even though they're a regular speaker track.
+    me_speaker: Signal<Option<i32>>,
     /// The line (db id) currently playing back.
     playing: Signal<Option<i64>>,
     /// Replay a line: `Some((wav, segment_id, start_ms, end_ms))`, or `None` to stop.
@@ -3464,7 +3460,7 @@ fn TranscriptView(
                     div {
                         key: "{seg.source.as_str()}-{seg.t_start_ms}",
                         id: "{dom_id}",
-                        class: "line {line_class(seg)}{hit}",
+                        class: "line {line_class_for(seg, *me_speaker.read())}{hit}",
                         span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
                         span { class: "who", "{who}" }
                         if is_editing {
@@ -4660,6 +4656,16 @@ fn line_class(seg: &Segment) -> String {
     match (seg.source, seg.speaker) {
         (Source::Others, Some(idx)) => format!("others spk-{}", idx.rem_euclid(8)),
         (s, _) => source_class(s).to_string(),
+    }
+}
+
+/// [`line_class`], but the app user's own speaker track styles as "me":
+/// integration sessions record everyone as a uniform spk-N track and tag which
+/// index is the user, so identity drives the color, not the channel.
+fn line_class_for(seg: &Segment, me_speaker: Option<i32>) -> String {
+    match (seg.source, seg.speaker, me_speaker) {
+        (Source::Others, Some(idx), Some(me)) if idx == me => "me".to_string(),
+        _ => line_class(seg),
     }
 }
 

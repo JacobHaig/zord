@@ -715,6 +715,32 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
 
+    /// Tag which speaker index is the app user themself. Integration sessions
+    /// record every participant as a uniform `spk-N` track; this marks the one
+    /// matching the configured platform user ID (styling/perspective only).
+    pub fn set_me_speaker(&self, session_id: &str, speaker: i32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET me_speaker = ?2 WHERE id = ?1",
+            params![session_id, speaker],
+        )?;
+        Ok(())
+    }
+
+    /// The session's "me" speaker index, if one was tagged (integration
+    /// sessions only — `None` for mic/desktop recordings).
+    pub fn me_speaker(&self, session_id: &str) -> Result<Option<i32>> {
+        let v = self
+            .conn
+            .query_row(
+                "SELECT me_speaker FROM sessions WHERE id = ?1",
+                params![session_id],
+                |r| r.get::<_, Option<i32>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(v)
+    }
+
     // -----------------------------------------------------------------------
     // Phase 38: voiceprint library — enroll, match, manage
     // -----------------------------------------------------------------------
@@ -1079,6 +1105,10 @@ fn add_late_columns(conn: &Connection) {
         "ALTER TABLE speaker_names ADD COLUMN voiceprint_id INTEGER",
         [],
     );
+    // Unified integration tracks — which spk-N index is the app user themself
+    // (every Discord participant records as a uniform speaker track; "me" is a
+    // tag from the configured user ID, not a separate audio channel).
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN me_speaker INTEGER", []);
 }
 
 /// Create the base tables, indexes, FTS virtual table, and sync triggers
@@ -1841,6 +1871,21 @@ mod voiceprint_tests {
             s.session_speaker_embedding("s1", 0).unwrap().is_none(),
             "embedding should have been deleted with the session"
         );
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn me_speaker_tag_roundtrip() {
+        let (s, db) = mk_store("me-speaker");
+        mk_session(&s, "s1");
+
+        // Untagged (mic/desktop sessions, or before the user's stream maps).
+        assert_eq!(s.me_speaker("s1").unwrap(), None);
+        s.set_me_speaker("s1", 2).unwrap();
+        assert_eq!(s.me_speaker("s1").unwrap(), Some(2));
+        // Unknown session → None, not an error.
+        assert_eq!(s.me_speaker("nope").unwrap(), None);
 
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }

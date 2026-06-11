@@ -106,24 +106,15 @@ pub struct Segment {
     pub speaker: Option<i32>,
 }
 
-/// Reserved `speaker_names` index for the session's "Me" identity. Real
-/// diarized/integration speakers are 0-based, so -1 never collides. Discord
-/// sessions store the followed user's platform name here so transcripts say
-/// "Wisward" instead of "Me".
-pub const ME_SPEAKER: i32 = -1;
-
 impl Segment {
-    /// Human label for this segment's speaker: the [`ME_SPEAKER`] name (or
-    /// "Me") for the mic channel, or "Speaker N" (1-based) for a diarized
-    /// "Others" segment, falling back to "Others" when no speaker has been
-    /// assigned. `names` optionally maps a speaker index to a custom name
-    /// (e.g. "Alex").
+    /// Human label for this segment's speaker: "Me" for the mic channel, or
+    /// "Speaker N" (1-based) for a diarized "Others" segment, falling back to
+    /// "Others" when no speaker has been assigned. `names` optionally maps a
+    /// 0-based speaker index to a custom name (e.g. "Alex" — integration
+    /// sessions fill these with platform usernames, the app user included).
     pub fn speaker_label(&self, names: &std::collections::HashMap<i32, String>) -> String {
         match self.source {
-            Source::Me => names
-                .get(&ME_SPEAKER)
-                .cloned()
-                .unwrap_or_else(|| "Me".to_string()),
+            Source::Me => "Me".to_string(),
             Source::Others => match self.speaker {
                 Some(idx) => names
                     .get(&idx)
@@ -319,12 +310,6 @@ mod tests {
             seg(Source::Others, Some(1)).speaker_label(&names),
             "Speaker 2"
         );
-        // The reserved ME_SPEAKER entry names the Me channel (Discord sessions
-        // store the followed user's platform name there).
-        names.insert(ME_SPEAKER, "Wisward".into());
-        assert_eq!(seg(Source::Me, None).speaker_label(&names), "Wisward");
-        // ...without leaking onto Others lines.
-        assert_eq!(seg(Source::Others, None).speaker_label(&names), "Others");
     }
 
     #[test]

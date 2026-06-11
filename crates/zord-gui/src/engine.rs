@@ -142,6 +142,10 @@ pub enum Event {
     /// Which retained per-channel WAVs exist on disk for the viewed session.
     /// Lines from a channel without a file get no replay button.
     AudioFiles(AudioFiles),
+    /// Which speaker index is the app user themself in the viewed/live session
+    /// (integration sessions tag it from the configured platform user ID;
+    /// `None` for mic/desktop recordings). Styling/perspective only.
+    MeSpeaker(Option<i32>),
     /// The transcript line (db id) currently playing back. `None` = stopped or
     /// finished.
     Playing(Option<i64>),
@@ -1533,6 +1537,7 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     store.get_diarize_speakers(&id).ok().flatten().unwrap_or(0),
                 ));
                 let _ = ev.send(Event::AudioFiles(session_audio_files(&store, &id)));
+                let _ = ev.send(Event::MeSpeaker(store.me_speaker(&id).unwrap_or(None)));
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
                 Ok(path) => {
@@ -2650,6 +2655,8 @@ fn run_session(
     });
     // Tell the GUI which session is live so it can attach notes during capture.
     let _ = ev.send(Event::SessionStarted(session_id.clone()));
+    // Fresh session: no "me" speaker tagged yet (integration on_join sets it).
+    let _ = ev.send(Event::MeSpeaker(None));
     let wav_path = |src: &str| -> Option<PathBuf> {
         // Capture-only always writes — the WAV is the transcription input.
         if keep_audio || !live {
@@ -2999,6 +3006,8 @@ fn run_integration_session(
         model: model.name().to_string(),
     });
     let _ = ev.send(Event::SessionStarted(session_id.clone()));
+    // Fresh session: no "me" speaker tagged yet (integration on_join sets it).
+    let _ = ev.send(Event::MeSpeaker(None));
 
     let session_start = Instant::now();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
@@ -3074,36 +3083,31 @@ fn run_integration_session(
                     ));
                 }
             };
-            let on_join = |role: zord_integrations::TrackRole,
+            let on_join = |idx: i32,
                            name: String,
+                           is_me: bool,
                            sample_rate: u32,
                            audio: zord_integrations::AudioStream| {
-                // The followed user → "Me"; everyone else → an Others speaker.
-                let (source, speaker, track) = match role {
-                    zord_integrations::TrackRole::Me => {
-                        // Keep the platform identity: transcripts label the Me
-                        // channel with the followed user's name (ME_SPEAKER
-                        // sentinel row) instead of a bare "Me".
-                        if !name.trim().is_empty() {
-                            announce(zord_core::ME_SPEAKER, &name);
-                        }
-                        (Source::Me, None, "me".to_string())
+                // Unified tracks: every participant — the app user included —
+                // records as spk-N with their platform name. "Me" is a tag
+                // (from the configured user ID), not a separate channel.
+                announce(idx, &name);
+                if is_me {
+                    if let Some(s) = store.as_ref() {
+                        let _ = s.set_me_speaker(&session_id, idx);
                     }
-                    zord_integrations::TrackRole::Speaker(idx) => {
-                        announce(idx, &name);
-                        (Source::Others, Some(idx), format!("spk-{idx}"))
-                    }
-                };
+                    let _ = ev.send(Event::MeSpeaker(Some(idx)));
+                }
                 let level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
                     &others_mode,
                     others_gain,
                 ));
-                let wav = Some(zord_config::track_path(&session_dir, &track));
+                let wav = Some(zord_config::track_path(&session_dir, &format!("spk-{idx}")));
                 let h = spawn_proc(
                     audio,
                     sample_rate,
-                    source,
-                    speaker,
+                    Source::Others,
+                    Some(idx),
                     session_start,
                     it_job_tx.clone(),
                     ev.clone(),
@@ -3116,18 +3120,7 @@ fn run_integration_session(
                     p.push(h);
                 }
             };
-            let on_rename = |role: zord_integrations::TrackRole, name: String| {
-                match role {
-                    zord_integrations::TrackRole::Speaker(idx) => announce(idx, &name),
-                    // A late-resolved name for the followed user upgrades the
-                    // Me label too (same mapping gap as speaker tracks).
-                    zord_integrations::TrackRole::Me => {
-                        if !name.trim().is_empty() {
-                            announce(zord_core::ME_SPEAKER, &name);
-                        }
-                    }
-                }
-            };
+            let on_rename = |idx: i32, name: String| announce(idx, &name);
             match zord_integrations::drive_session(provider.as_mut(), &stopping, on_join, on_rename)
             {
                 Ok(reason) => {
