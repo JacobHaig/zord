@@ -525,12 +525,31 @@ fn MainApp() -> Element {
             .db_path()
             .unwrap_or_else(|_| PathBuf::from("zord.db"));
         let (engine, mut ev_rx) = Engine::spawn(db);
+        // Clone for the event loop below (it issues the follow-up Load when a
+        // finished recording auto-selects its session).
+        let engine_ev = engine.clone();
         spawn(async move {
             // Per-event application. `Level` is handled separately (coalesced
             // below) so a burst of meter updates can never starve control events
             // like `Status::Idle` (which is what flips the Stop button back).
             let mut apply = move |ev: Event| match ev {
-                Event::Status(s) => status.set(s),
+                Event::Status(s) => {
+                    // Recording finished while watching Live → follow into the
+                    // just-saved session and watch its (post-)transcription
+                    // stream in. Never yank the view off another session.
+                    let finished = matches!(*status.peek(), Status::Recording)
+                        && matches!(s, Status::Idle);
+                    status.set(s);
+                    if finished {
+                        if matches!(&*view.peek(), View::Live) {
+                            if let Some(id) = live_session_id.peek().clone() {
+                                view.set(View::Session(id.clone()));
+                                let _ = engine_ev.db_tx.send(DbCmd::Load(id));
+                            }
+                        }
+                        live_session_id.set(None); // recording's over
+                    }
+                }
                 Event::Notice(n) => notice.set(Some(n)),
                 Event::Segment(seg) => {
                     // Always buffer the live stream so it's intact when you return
@@ -541,7 +560,14 @@ fn MainApp() -> Element {
                 Event::Sessions(v) => sessions.set(v),
                 Event::SessionBadges(b) => session_badges.set(b),
                 Event::SearchResults(v) => search_results.set(v),
-                Event::Transcript(v) => segments.set(v),
+                Event::Transcript { id, segments: v } => {
+                    // Apply only to the session on screen — background workers
+                    // (re-transcribe, diarize) refresh detached, so the user
+                    // may be reading a different session by now.
+                    if matches!(&*view.peek(), View::Session(cur) if *cur == id) {
+                        segments.set(v);
+                    }
+                }
                 Event::Exported(p) => {
                     notice.set(Some(format!("Exported to {p}")));
                     last_export.set(Some(p));
@@ -852,7 +878,8 @@ fn MainApp() -> Element {
                 tracing::info!("record button: Stop clicked");
                 let _ = engine.rec_tx.send(RecorderCmd::Stop);
                 let _ = engine.db_tx.send(DbCmd::ListSessions);
-                live_session_id.set(None); // recording's over; notes stay saved on the session
+                // live_session_id stays set until Status::Idle arrives — the
+                // event loop uses it to follow into the finished session.
             } else {
                 tracing::info!("record button: Record clicked");
                 segments.write().clear();

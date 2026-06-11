@@ -78,8 +78,10 @@ pub enum Event {
     SessionBadges(std::collections::HashMap<String, (bool, bool, bool)>),
     /// Result of [`DbCmd::Search`].
     SearchResults(Vec<(String, Segment)>),
-    /// Result of [`DbCmd::Load`] — a session's full transcript.
-    Transcript(Vec<Segment>),
+    /// A session's full transcript: the result of [`DbCmd::Load`], plus live
+    /// refreshes while that session is re-/post-transcribed or diarized. The
+    /// id lets the GUI drop refreshes for sessions it isn't showing.
+    Transcript { id: String, segments: Vec<Segment> },
     /// A transcript was exported to this path.
     Exported(String),
     /// The model catalog with current download status.
@@ -1525,7 +1527,10 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             }
             DbCmd::Load(id) => {
                 if let Ok(v) = store.segments(&id) {
-                    let _ = ev.send(Event::Transcript(v));
+                    let _ = ev.send(Event::Transcript {
+                        id: id.clone(),
+                        segments: v,
+                    });
                 }
                 let _ = ev.send(Event::Speakers(
                     store.speaker_names(&id).unwrap_or_default(),
@@ -2164,7 +2169,10 @@ fn apply_diarization(
     apply_voiceprints(store, session_id, &samples, &spans, model, ev);
 
     if let Ok(v) = store.segments(session_id) {
-        let _ = ev.send(Event::Transcript(v));
+        let _ = ev.send(Event::Transcript {
+            id: session_id.to_string(),
+            segments: v,
+        });
     }
     let _ = ev.send(Event::Speakers(
         store.speaker_names(session_id).unwrap_or_default(),
@@ -3482,6 +3490,13 @@ fn post_transcribe_inner(
     };
 
     let _ = store.clear_segments(session_id);
+    // Restart the on-screen transcript from empty, then stream it back in as
+    // lines land (the viewer guard in the GUI drops these when this session
+    // isn't the one on screen).
+    let _ = ev.send(Event::Transcript {
+        id: session_id.to_string(),
+        segments: Vec::new(),
+    });
     let _ = store.set_session_model(session_id, model.name());
     let mut total = 0usize;
     let audio_path = audio_prefix.to_string_lossy();
@@ -3509,6 +3524,10 @@ fn post_transcribe_inner(
             tracks.push((format!("spk-{idx}"), Source::Others, Some(idx)));
         }
     }
+    // Live-refresh throttle: while transcribing, push the growing transcript
+    // to the GUI at most ~every 700 ms so a watcher sees lines stream in
+    // instead of a blank screen until the final refresh.
+    let mut last_push = std::time::Instant::now();
     for (suffix, source, speaker) in tracks {
         // Resolve the track in the new folder layout or the legacy flat layout.
         let Some(wav) = zord_config::resolve_track(&audio_path, &suffix) else {
@@ -3522,6 +3541,15 @@ fn post_transcribe_inner(
                     seg.speaker = speaker;
                 }
                 let _ = store.insert_segment(session_id, &seg);
+                if last_push.elapsed() >= std::time::Duration::from_millis(700) {
+                    last_push = std::time::Instant::now();
+                    if let Ok(v) = store.segments(session_id) {
+                        let _ = ev.send(Event::Transcript {
+                            id: session_id.to_string(),
+                            segments: v,
+                        });
+                    }
+                }
             }
         };
         // `cancel` also stops the decode loop within ~1s (Phase C) — not just
@@ -3551,7 +3579,10 @@ fn post_transcribe_inner(
     // Refresh whatever the GUI is showing: the transcript (if this session is
     // open), the sidebar (model name changed), and the badges.
     if let Ok(v) = store.segments(session_id) {
-        let _ = ev.send(Event::Transcript(v));
+        let _ = ev.send(Event::Transcript {
+            id: session_id.to_string(),
+            segments: v,
+        });
     }
     emit_sessions(store, ev);
     let _ = ev.send(Event::Notice(format!(
