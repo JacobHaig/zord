@@ -955,13 +955,17 @@ fn MainApp() -> Element {
         let engine = engine.clone();
         move |_| {
             view.set(View::Overview);
+            find_open.set(false); // leaving the transcript closes the find bar
             reset_chat(chat, chat_input, chat_busy, chat_scope);
             let _ = engine.db_tx.send(DbCmd::LoadOverviewDoc);
         }
     };
 
     // Open the dedicated search view (does not clear the prior query/results).
-    let on_open_search = move |_| view.set(View::Search);
+    let on_open_search = move |_| {
+        view.set(View::Search);
+        find_open.set(false); // leaving the transcript closes the find bar
+    };
 
     // Open the Speakers view and refresh the voiceprint list.
     let on_open_speakers = {
@@ -969,6 +973,7 @@ fn MainApp() -> Element {
         move |_| {
             if cfg!(feature = "voiceprints") {
                 view.set(View::Speakers);
+                find_open.set(false); // leaving the transcript closes the find bar
                 let _ = engine.db_tx.send(DbCmd::Voiceprints);
             }
         }
@@ -1893,10 +1898,9 @@ fn SessionToolbar(
     }
 }
 
-/// Collapsible AI-summary panel for the viewed (or live) session.
 /// Phase 40: find-in-session bar. Shown when `find_open` is true, dismissed by
-/// Esc, Enter, or the × button. Enter cycles forward, Shift-Enter cycles back.
-/// The active hit is scrolled into view by setting `highlight`, which reuses the
+/// Esc or the × button. Enter cycles forward, Shift-Enter cycles back. The
+/// active hit is scrolled into view by setting `highlight`, which reuses the
 /// existing scroll-to-segment mechanism.
 #[component]
 fn FindBar(
@@ -2000,6 +2004,7 @@ fn FindBar(
     }
 }
 
+/// Collapsible AI-summary panel for the viewed (or live) session.
 #[component]
 fn SummaryPanel(
     view: Signal<View>,
