@@ -121,6 +121,7 @@ impl Integration for FakeProvider {
             chans.clear(); // drop the senders → close the per-participant streams
             let _ = ev_tx.send(IntegrationEvent::Ended {
                 reason: "fake session complete".into(),
+                error: false,
             });
         }));
 

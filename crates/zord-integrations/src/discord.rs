@@ -86,6 +86,7 @@ impl Integration for DiscordProvider {
                         Err(e) => {
                             let _ = ev_tx.send(IntegrationEvent::Ended {
                                 reason: format!("tokio runtime: {e}"),
+                                error: true,
                             });
                             return;
                         }
@@ -154,6 +155,7 @@ async fn run_client(
         Err(e) => {
             let _ = ev_tx.send(IntegrationEvent::Ended {
                 reason: format!("connect failed: {e} (check the bot token)"),
+                error: true,
             });
             return;
         }
@@ -184,6 +186,7 @@ async fn run_client(
     if let Err(e) = client.start().await {
         let _ = ev_tx.send(IntegrationEvent::Ended {
             reason: format!("gateway error: {e}"),
+            error: true,
         });
         return;
     }
@@ -191,6 +194,7 @@ async fn run_client(
     // is harmless (the engine treats the first Ended as terminal).
     let _ = ev_tx.send(IntegrationEvent::Ended {
         reason: "disconnected".into(),
+        error: false,
     });
 }
 
@@ -215,6 +219,7 @@ impl Bot {
         let Some(manager) = songbird::get(ctx).await else {
             let _ = self.ev_tx.send(IntegrationEvent::Ended {
                 reason: "songbird not initialised".into(),
+                error: true,
             });
             return;
         };
@@ -249,6 +254,7 @@ impl Bot {
             Err(_) => {
                 let _ = self.ev_tx.send(IntegrationEvent::Ended {
                     reason: "joining the voice channel timed out — try recording again".into(),
+                    error: true,
                 });
             }
             Ok(Ok(())) => {
@@ -271,6 +277,7 @@ impl Bot {
             Ok(Err(e)) => {
                 let _ = self.ev_tx.send(IntegrationEvent::Ended {
                     reason: format!("join failed: {e} (bot needs Connect permission)"),
+                    error: true,
                 });
             }
         }
@@ -310,6 +317,7 @@ impl EventHandler for Bot {
             (_, None) => {
                 let _ = self.ev_tx.send(IntegrationEvent::Ended {
                     reason: "you left the voice channel".into(),
+                    error: false,
                 });
             }
             // A non-guild voice channel (DM/group call) — not followed.

@@ -52,8 +52,11 @@ pub enum IntegrationEvent {
     /// identity-by-stream has already started (the Phase 27 mapping gap).
     ParticipantRenamed { key: String, name: String },
     /// The session ended on the provider's side — the followed user left, the bot
-    /// was disconnected, etc. The engine finalizes the recording.
-    Ended { reason: String },
+    /// was disconnected, etc. The engine finalizes the recording. `error` marks
+    /// ends the user must act on (join refused, bad token, gateway failure) so
+    /// the GUI can surface them in the notice banner, vs. benign ends (the
+    /// followed user simply left) that only need the log.
+    Ended { reason: String, error: bool },
 }
 
 /// A platform integration that follows a user into a live session and yields one

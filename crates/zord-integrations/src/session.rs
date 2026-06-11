@@ -27,7 +27,9 @@ pub enum TrackRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndReason {
     /// The provider signalled `Ended` (followed user left, disconnected, …).
-    Provider(String),
+    /// `error` carries the provider's verdict: true = the user must act on it
+    /// (join refused, bad token), false = a benign end of the call.
+    Provider { reason: String, error: bool },
     /// The caller set the stop flag (user pressed Stop).
     Stopped,
     /// The event channel closed without an `Ended` (provider thread gone).
@@ -84,9 +86,9 @@ pub fn drive_session(
                     on_rename(role, name);
                 }
             }
-            Ok(IntegrationEvent::Ended { reason }) => {
+            Ok(IntegrationEvent::Ended { reason, error }) => {
                 integration.stop();
-                return Ok(EndReason::Provider(reason));
+                return Ok(EndReason::Provider { reason, error });
             }
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return Ok(EndReason::Disconnected),
@@ -130,7 +132,7 @@ mod tests {
             .collect();
         speakers.sort();
         assert_eq!(speakers, vec![0, 1]);
-        assert!(matches!(reason, EndReason::Provider(_)));
+        assert!(matches!(reason, EndReason::Provider { error: false, .. }));
     }
 
     #[test]

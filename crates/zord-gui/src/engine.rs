@@ -3070,7 +3070,28 @@ fn run_integration_session(
             };
             match zord_integrations::drive_session(provider.as_mut(), &stopping, on_join, on_rename)
             {
-                Ok(reason) => tracing::info!("integration session ended: {reason:?}"),
+                Ok(reason) => {
+                    tracing::info!("integration session ended: {reason:?}");
+                    // Provider-flagged errors (join refused, bad token, gateway
+                    // failure) reach the notice banner — a session that never
+                    // captured audio must say why, not end silently (the
+                    // "bot never joined" confusion). Benign ends (the user
+                    // left voice, normal disconnect) stay log-only.
+                    match reason {
+                        zord_integrations::EndReason::Provider {
+                            reason,
+                            error: true,
+                        } => {
+                            let _ = ev.send(Event::Notice(format!("Discord: {reason}")));
+                        }
+                        zord_integrations::EndReason::Disconnected => {
+                            let _ = ev.send(Event::Notice(
+                                "Discord: the session ended unexpectedly — check Settings → Integrations and try again.".to_string(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 Err(e) => {
                     let _ = ev.send(Event::Notice(format!("integration error: {e}")));
                 }
