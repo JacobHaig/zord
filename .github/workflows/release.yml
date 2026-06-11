@@ -24,10 +24,13 @@ permissions:
   contents: write
 
 env:
-  # Optional engines bundled into the released apps. Kept in one place so both
-  # the GUI bundle and the CLI build stay in sync. (encryption is intentionally
-  # omitted — its vendored OpenSSL would need Perl + NASM on the Windows runner.)
+  # Optional engines bundled into the released GUI app. (encryption is
+  # intentionally omitted — its vendored OpenSSL would need Perl + NASM on the
+  # Windows runner.) The channel step appends self-update for github builds.
   FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord"
+  # The CLI (zord-app) only declares a subset — voiceprints/discord/self-update
+  # are GUI/integration features it doesn't have; passing them fails the build.
+  CLI_FEATURES: "diarization,llm-local,llm-remote,parakeet"
   CHANNEL: ${{ inputs.channel || 'github' }}
 
 jobs:
@@ -77,7 +80,7 @@ jobs:
         run: dx bundle --release --package zord-gui --platform desktop --features "${{ env.FEATURES }}"
 
       - name: Build CLI
-        run: cargo build --release --package zord-app --features "${{ env.FEATURES }}"
+        run: cargo build --release --package zord-app --features "${{ env.CLI_FEATURES }}"
 
       # ---- Optional: code-sign + notarize (only if secrets are set) ----
       - name: Import signing certificate
@@ -199,7 +202,7 @@ jobs:
         run: dx bundle --release --package zord-gui --platform desktop --features "${{ env.FEATURES }}"
 
       - name: Build CLI
-        run: cargo build --release --package zord-app --features "${{ env.FEATURES }}"
+        run: cargo build --release --package zord-app --features "${{ env.CLI_FEATURES }}"
 
       - name: Collect artifacts
         shell: bash
