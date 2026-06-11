@@ -8,8 +8,7 @@ license.workspace = true
 default = []
 # Document updates need an LLM backend from zord-summarize — the local
 # llama.cpp engine and/or the remote OpenAI-compatible client. Without either,
-# the crate still compiles but only the pure helpers and `load` (reading the
-# legacy stored rollup) are available.
+# the crate still compiles but only the pure helpers are available.
 llama = ["dep:zord-summarize", "zord-summarize/llama"]
 remote = ["dep:zord-summarize", "zord-summarize/remote"]
 

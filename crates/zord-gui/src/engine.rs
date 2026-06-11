@@ -2935,8 +2935,23 @@ fn run_session(
 
     // Auto overview chain (Phase 39): when the transcript is final, enqueue
     // compression (if not already done) then a document fold for this session.
-    // Only when overview_auto is on and a backend is configured — the summ
-    // worker is a single thread so the ordering compress→fold is guaranteed.
+    // Offline speaker diarization (accurate, source of truth) over the "Others"
+    // track, then drop the temp WAV unless we're retaining it (kept audio, or
+    // kept-for-re-diarization).
+    // Diarization needs segments to label — with a fully deferred transcript
+    // (live off, no post pass) it runs after the eventual 🔁 Re-transcribe.
+    #[cfg(feature = "diarization")]
+    if diarize_auto && (live || post_pass) {
+        if let Some(wav) = others_wav.as_ref() {
+            apply_diarization(&store, &session_id, wav, None, ev);
+        }
+    }
+
+    // Auto compress→fold into the living Overview AFTER diarization, so the
+    // condensed transcript carries named speakers, not bare "Others" (the
+    // diarize pass above runs synchronously on this thread). Only when
+    // overview_auto is on and a backend is configured — the summ worker is a
+    // single thread so the ordering compress→fold is guaranteed.
     if (post_pass || live) && settings.overview_auto && llm_backend_configured(&settings) {
         let already_compressed = store
             .get_compressed(&session_id)
@@ -2950,18 +2965,6 @@ fn run_session(
         let _ = summ_tx.send(SummCmd::UpdateOverviewDoc {
             session: Some(session_id.clone()),
         });
-    }
-
-    // Offline speaker diarization (accurate, source of truth) over the "Others"
-    // track, then drop the temp WAV unless we're retaining it (kept audio, or
-    // kept-for-re-diarization).
-    // Diarization needs segments to label — with a fully deferred transcript
-    // (live off, no post pass) it runs after the eventual 🔁 Re-transcribe.
-    #[cfg(feature = "diarization")]
-    if diarize_auto && (live || post_pass) {
-        if let Some(wav) = others_wav.as_ref() {
-            apply_diarization(&store, &session_id, wav, None, ev);
-        }
     }
     if !persist_audio {
         if let Some(wav) = others_wav.as_ref() {

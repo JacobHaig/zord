@@ -160,7 +160,7 @@ A Cargo workspace of focused crates:
 | `zord-config` | persisted settings, paths, retention, session-folder layout |
 | `zord-export` | Markdown / SRT / JSON renderers |
 | `zord-summarize` | LLM backend (local llama.cpp under `llama`, OpenAI-compatible client under `remote`) for summaries, compression, and chat |
-| `zord-overview` | cross-meeting overview synthesis (compress → group → roll up) |
+| `zord-overview` | the living Overview document (per-meeting AI folds) + cross-meeting chat grounding |
 | `zord-diarize` | per-speaker diarization (sherpa-onnx) under `diarization`; speaker-model catalog |
 | `zord-net` | shared, proxy/cert-store-aware HTTP: model downloads, remote LLM, Discord REST, release checks |
 | `zord-integrations` | platform integrations (per-participant capture); Discord via `songbird`/`serenity` under `discord` |

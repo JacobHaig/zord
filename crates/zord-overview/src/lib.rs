@@ -2,9 +2,8 @@
 //!
 //! One markdown status document, organized by project, maintained by the AI
 //! from compressed transcripts ([`update_document`]) and editable by the user
-//! at any time. The expensive work (LLM) is behind the `llama`/`remote`
-//! backend features; [`load`] (reading the legacy Phase 23 rollup) works
-//! without either.
+//! at any time. All of the crate's LLM work is behind the `llama`/`remote`
+//! backend features; only the pure helpers compile without either.
 //!
 //! [`cross_meeting_context`] (compression-based grounding) remains as the
 //! cross-meeting chat fallback for when the document is still empty.
