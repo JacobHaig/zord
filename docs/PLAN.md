@@ -1752,6 +1752,22 @@ whether the audio or the transcription dropped the words.
   under the playhead (reuse the scroll-to-segment mechanism), and a
   per-line "jump to timeline" affordance seeks the playhead to that line —
   the round-trip that makes clip-vs-transcription triage one click.
+- **Merged/overlay mode** (toggle, beside stacked lanes): one combined
+  lane with all speakers' waveforms alpha-blended in their colors —
+  conversation shape at a glance, and **talk-over regions** (2+ speakers
+  simultaneously) become visually obvious, which is exactly where
+  transcription tends to drop words.
+- **Diagnostics (core — the reason this phase exists):**
+  - *Untranscribed-speech markers*: regions with speech energy (VAD) but
+    no transcript segment covering them get flagged on the lane — every
+    dropped word becomes visible without listening.
+  - *Clipping indicators*: buckets pinned near full-scale marked red.
+  - *Re-transcribe selection*: drag-select a range → re-run transcription
+    for just that window (slice readers + segment offsets already exist).
+- **Likely included:** silence-skip playback (jump gaps > ~2 s) + 1.5×/2×
+  speed (rodio `set_speed`); drag-select → export the slice as a clip.
+- **Stretch (DAW flavor):** per-lane solo, per-lane gain in the mix,
+  loop-a-selection.
 - Works on aged sessions (`.opus`) and legacy flat layouts via
   `resolve_track`; lanes with no surviving audio render disabled.
 
