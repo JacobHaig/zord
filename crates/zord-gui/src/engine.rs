@@ -195,6 +195,14 @@ pub enum Event {
         id: String,
         lanes: Vec<TimelineLane>,
     },
+    /// Phase 42b: timeline playback position tick, emitted ~every 250 ms while
+    /// playing. `Some(ms)` = current playhead position (wall-clock based, not
+    /// sample-exact). `None` = playback stopped or finished. The GUI scrubber
+    /// is wired in Phase 42c.
+    #[allow(dead_code)]
+    TimelinePos {
+        ms: Option<u64>,
+    },
 }
 
 /// One audio track's amplitude profile for the session timeline (Phase 42a).
@@ -442,6 +450,19 @@ pub enum PlayCmd {
     },
     /// Stop any current playback.
     Stop,
+    /// Phase 42b: play a mixed selection of session tracks from `start_ms`.
+    /// Starting timeline playback stops any per-line replay in progress and
+    /// vice versa. Seek = send a new `TimelinePlay` at the desired offset.
+    /// Call sites wired in Phase 42c (timeline panel).
+    #[allow(dead_code)]
+    TimelinePlay { paths: Vec<PathBuf>, start_ms: u64 },
+    /// Pause timeline playback; position is held. Resumes with
+    /// [`TimelineResume`]. Call sites wired in Phase 42c.
+    #[allow(dead_code)]
+    TimelinePause,
+    /// Resume a paused timeline playback. Call sites wired in Phase 42c.
+    #[allow(dead_code)]
+    TimelineResume,
 }
 
 /// Model-management commands (download/delete can take minutes, so they run on
@@ -2091,17 +2112,50 @@ fn build_timeline(
     });
 }
 
+/// State for an active timeline playback session (Phase 42b).
+struct TimelineState {
+    reader: zord_audio::MixReader,
+    /// ms offset when playback started / was last resumed.
+    start_ms: u64,
+    /// Wall-clock instant when playback started / was last resumed.
+    resumed_at: std::time::Instant,
+    /// Accumulated played-time before the current resume (for pause support).
+    elapsed_before_resume: u64,
+    paused: bool,
+    /// Wall-clock instant of the last position-tick event.
+    last_tick: std::time::Instant,
+}
+
+impl TimelineState {
+    /// Current playhead position in ms.
+    fn position_ms(&self) -> u64 {
+        if self.paused {
+            self.start_ms + self.elapsed_before_resume
+        } else {
+            self.start_ms
+                + self.elapsed_before_resume
+                + self.resumed_at.elapsed().as_millis() as u64
+        }
+    }
+}
+
 /// Owns the audio output stream (created lazily on first play) and plays one
 /// clip at a time: a new `Play` replaces the current clip, `Stop` silences.
 /// Emits [`Event::Playing`] transitions so the UI can mark the active line.
+/// Phase 42b: also handles `TimelinePlay` / `TimelinePause` / `TimelineResume`
+/// for streaming multi-track mixed playback. One sink services both modes;
+/// starting one mode stops the other.
 fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
     let mut output: Option<rodio::MixerDeviceSink> = None;
     let mut sink: Option<rodio::Player> = None;
     let mut current: Option<i64> = None;
+    // Phase 42b: active timeline playback state.
+    let mut tl: Option<TimelineState> = None;
     loop {
-        // Block when idle; poll while playing so we can report "finished".
-        let cmd = if current.is_some() {
-            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+        // Block when idle; poll while something is playing.
+        let busy = current.is_some() || tl.is_some();
+        let cmd = if busy {
+            match rx.recv_timeout(std::time::Duration::from_millis(30)) {
                 Ok(c) => Some(c),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -2119,6 +2173,13 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 start_ms,
                 end_ms,
             }) => {
+                // Stop any timeline playback.
+                if tl.take().is_some() {
+                    if let Some(s) = sink.take() {
+                        s.stop();
+                    }
+                    let _ = ev.send(Event::TimelinePos { ms: None });
+                }
                 if let Some(s) = sink.take() {
                     s.stop();
                 }
@@ -2160,19 +2221,157 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 let _ = ev.send(Event::Playing(Some(segment_id)));
             }
             Some(PlayCmd::Stop) => {
+                // Stop per-line replay.
                 if let Some(s) = sink.take() {
                     s.stop();
                 }
                 if current.take().is_some() {
                     let _ = ev.send(Event::Playing(None));
                 }
+                // Also stop timeline playback if active.
+                if tl.take().is_some() {
+                    let _ = ev.send(Event::TimelinePos { ms: None });
+                }
             }
-            // Poll tick: did the current clip finish on its own?
+
+            // ----------------------------------------------------------------
+            // Phase 42b: timeline multi-track playback
+            // ----------------------------------------------------------------
+            Some(PlayCmd::TimelinePlay { paths, start_ms }) => {
+                // Stop any per-line replay.
+                if let Some(s) = sink.take() {
+                    s.stop();
+                }
+                if current.take().is_some() {
+                    let _ = ev.send(Event::Playing(None));
+                }
+                // Stop old timeline session if any.
+                tl = None;
+
+                if output.is_none() {
+                    output = rodio::DeviceSinkBuilder::open_default_sink().ok();
+                }
+                let Some(device) = output.as_ref() else {
+                    let _ = ev.send(Event::Notice(
+                        "No audio output device available.".to_string(),
+                    ));
+                    let _ = ev.send(Event::TimelinePos { ms: None });
+                    continue;
+                };
+                match zord_audio::MixReader::open(&paths, start_ms) {
+                    Err(e) => {
+                        let _ = ev.send(Event::Notice(format!("Timeline playback: {e}")));
+                        let _ = ev.send(Event::TimelinePos { ms: None });
+                    }
+                    Ok(reader) => {
+                        let now = std::time::Instant::now();
+                        let player = rodio::Player::connect_new(device.mixer());
+                        sink = Some(player);
+                        tl = Some(TimelineState {
+                            reader,
+                            start_ms,
+                            resumed_at: now,
+                            elapsed_before_resume: 0,
+                            paused: false,
+                            last_tick: now,
+                        });
+                        let _ = ev.send(Event::TimelinePos { ms: Some(start_ms) });
+                    }
+                }
+            }
+
+            Some(PlayCmd::TimelinePause) => {
+                if let Some(ref mut state) = tl {
+                    if !state.paused {
+                        state.elapsed_before_resume +=
+                            state.resumed_at.elapsed().as_millis() as u64;
+                        state.paused = true;
+                        if let Some(ref s) = sink {
+                            s.pause();
+                        }
+                    }
+                }
+            }
+
+            Some(PlayCmd::TimelineResume) => {
+                if let Some(ref mut state) = tl {
+                    if state.paused {
+                        state.resumed_at = std::time::Instant::now();
+                        state.paused = false;
+                        if let Some(ref s) = sink {
+                            s.play();
+                        }
+                    }
+                }
+            }
+
+            // Poll tick — feed the sink and check for completion.
             None => {
-                if sink.as_ref().is_some_and(|s| s.empty()) {
+                // Per-line replay: did the clip finish on its own?
+                if current.is_some() && sink.as_ref().is_some_and(|s| s.empty()) {
                     sink = None;
                     current = None;
                     let _ = ev.send(Event::Playing(None));
+                }
+
+                // Timeline streaming: feed blocks into the sink while active.
+                if let Some(ref mut state) = tl {
+                    if !state.paused {
+                        // Keep ~2–3 blocks buffered in the sink.
+                        let target_queued = 3;
+                        let queued = sink.as_ref().map(|s| s.len()).unwrap_or(0);
+                        if queued < target_queued {
+                            let blocks_to_add = target_queued - queued;
+                            let mut exhausted = false;
+                            for _ in 0..blocks_to_add {
+                                match state.reader.next_block() {
+                                    Ok(Some(block)) => {
+                                        if let Some(ref player) = sink {
+                                            player.append(rodio::buffer::SamplesBuffer::new(
+                                                std::num::NonZeroU16::new(1).unwrap(),
+                                                std::num::NonZeroU32::new(
+                                                    zord_audio::MixReader::OUT_RATE,
+                                                )
+                                                .unwrap(),
+                                                block,
+                                            ));
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        exhausted = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("timeline read error: {e}");
+                                        exhausted = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            // If exhausted and sink drained, signal completion.
+                            if exhausted && sink.as_ref().is_some_and(|s| s.empty()) {
+                                tl = None;
+                                if let Some(s) = sink.take() {
+                                    s.stop();
+                                }
+                                let _ = ev.send(Event::TimelinePos { ms: None });
+                            }
+                        }
+
+                        // Position tick every ~250 ms.
+                        if let Some(state) = tl.as_mut() {
+                            if state.last_tick.elapsed().as_millis() >= 250 {
+                                state.last_tick = std::time::Instant::now();
+                                let pos = state.position_ms();
+                                let _ = ev.send(Event::TimelinePos { ms: Some(pos) });
+                            }
+                        }
+                    }
+                } else if sink.is_some() && current.is_none() {
+                    // Sink exists but no active session — clean up stale sink.
+                    if sink.as_ref().is_some_and(|s| s.empty()) {
+                        sink = None;
+                    }
                 }
             }
         }

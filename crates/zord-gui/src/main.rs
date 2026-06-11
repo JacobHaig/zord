@@ -647,6 +647,10 @@ fn MainApp() -> Element {
                 // worker.  The panel UI that consumes them lands in Phase 42c.
                 Event::Timeline { .. } => {}
 
+                // Phase 42b: timeline playback position — wired to the scrubber
+                // in Phase 42c.
+                Event::TimelinePos { .. } => {}
+
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
                         notice.set(Some(format!("External LLM: {e}")));

@@ -204,6 +204,9 @@ pub struct OpusBlocks {
     emitted: u64,
     total: Option<u64>,
     headers_done: bool,
+    /// Samples buffered by [`seek_ms`] that should be returned before
+    /// decoding new packets.
+    carry_after_seek: Vec<f32>,
 }
 
 impl OpusBlocks {
@@ -217,10 +220,12 @@ impl OpusBlocks {
             emitted: 0,
             total: None,
             headers_done: false,
+            carry_after_seek: Vec::new(),
         };
         let pre_skip = me.read_headers()?;
         me.pre_skip_left = pre_skip as u64;
         me.total = total.map(|g| g.saturating_sub(pre_skip as u64));
+        me.carry_after_seek = Vec::new();
         Ok(me)
     }
 
@@ -254,9 +259,112 @@ impl OpusBlocks {
         Ok(pre_skip)
     }
 
+    /// Seek to `start_ms` so that subsequent [`next_block`] calls deliver
+    /// audio from that offset onward.
+    ///
+    /// Uses the page-granule coarse-seek + pre-roll decode-discard strategy:
+    /// seeks `SEEK_BACK` samples before the target, decodes forward, discards
+    /// until the first page boundary (where the absolute granule is known),
+    /// then discards further packets until the exact sample offset is reached.
+    /// Falls back to sequential linear decode for offsets near the start.
+    /// After this call `next_block()` delivers samples starting at `start_ms`.
+    pub fn seek_ms(&mut self, start_ms: u64) -> Result<()> {
+        let start = start_ms * OPUS_RATE as u64 / 1000;
+        let pre_skip_total = self.pre_skip_left; // non-zero only when called right after open()
+        if start > SEEK_BACK + FRAME as u64 {
+            // Granule includes pre-skip, so add it to find the right page.
+            let target = start + pre_skip_total - SEEK_BACK;
+            if self.reader.seek_absgp(None, target).is_ok() {
+                self.pre_skip_left = 0; // we're past the pre-skip region
+                                        // Resync: decode & discard until we find a page boundary whose
+                                        // granule tells us the exact absolute position; then continue
+                                        // forward until we're at `start`, stashing the overlap in carry.
+                let mut cur_pos: Option<u64> = None;
+                loop {
+                    let Some(pkt) = self.reader.read_packet().context("seek_ms read packet")?
+                    else {
+                        break;
+                    };
+                    let mut pcm = vec![0.0f32; FRAME * 2];
+                    let n = self
+                        .decoder
+                        .decode_float(&pkt.data, &mut pcm, false)
+                        .context("seek_ms decode")?;
+                    pcm.truncate(n);
+                    if cur_pos.is_none() {
+                        if pkt.last_in_page() {
+                            // Granule = total samples through this packet incl. pre-skip.
+                            // Subtract pre-skip to get our "emitted" coordinate.
+                            cur_pos = Some(pkt.absgp_page().saturating_sub(pre_skip_total));
+                        }
+                        // Discard pre-roll until page position is known.
+                        continue;
+                    }
+                    // cur_pos is the stream position at the END of the last packet.
+                    let pkt_end = cur_pos.unwrap();
+                    let pkt_start = pkt_end.saturating_sub(pcm.len() as u64);
+                    // Advance for next iteration.
+                    *cur_pos.as_mut().unwrap() = pkt_end + pcm.len() as u64;
+                    if pkt_end <= start {
+                        // Entirely before the target — discard.
+                        continue;
+                    }
+                    // This packet overlaps the target: trim the pre-target prefix.
+                    let from = start.saturating_sub(pkt_start) as usize;
+                    self.carry_after_seek = pcm[from.min(pcm.len())..].to_vec();
+                    self.emitted = start;
+                    return Ok(());
+                }
+                self.emitted = start;
+                return Ok(());
+            }
+            // seek_absgp failed (e.g. unseekable stream) — fall through to
+            // linear scan. This path shouldn't happen with real files.
+        }
+        // Linear scan: decode forward, discarding until we reach `start`.
+        // Note: next_block() tracks self.emitted and handles total-trim.
+        let mut pos: u64 = 0;
+        loop {
+            match self.next_block()? {
+                None => break,
+                Some(block) => {
+                    let end = pos + block.len() as u64;
+                    if end > start {
+                        // Overlaps: stash everything from `start` onward.
+                        let from = start.saturating_sub(pos) as usize;
+                        self.carry_after_seek = block[from..].to_vec();
+                        self.emitted = start;
+                        return Ok(());
+                    }
+                    pos = end;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Next decoded block (one packet's worth, ≤ 960 samples after trims).
     /// `Ok(None)` = end of stream.
     pub fn next_block(&mut self) -> Result<Option<Vec<f32>>> {
+        // Drain any samples buffered by seek_ms before returning new packets.
+        if !self.carry_after_seek.is_empty() {
+            let block = std::mem::take(&mut self.carry_after_seek);
+            // Apply end-trim if needed.
+            let block = if let Some(total) = self.total {
+                let left = total.saturating_sub(self.emitted) as usize;
+                if block.len() > left {
+                    block[..left].to_vec()
+                } else {
+                    block
+                }
+            } else {
+                block
+            };
+            if !block.is_empty() {
+                self.emitted += block.len() as u64;
+                return Ok(Some(block));
+            }
+        }
         loop {
             if let Some(total) = self.total {
                 if self.emitted >= total {
@@ -356,74 +464,23 @@ pub fn read_audio_slice_ms(path: &Path, start_ms: u64, end_ms: u64) -> Result<(V
     if !is_opus(path) {
         return crate::wav::read_wav_slice_ms(path, start_ms, end_ms);
     }
-    let start = start_ms * OPUS_RATE as u64 / 1000;
     let end = end_ms.max(start_ms) * OPUS_RATE as u64 / 1000;
 
-    // Re-open with a raw seekable reader for `seek_absgp`.
+    // Delegate the seek logic to OpusBlocks::seek_ms (Phase 42b refactor).
     let mut blocks = OpusBlocks::open(path)?;
-    let pre_skip_total = blocks.pre_skip_left; // captured before any decode
-    if start > SEEK_BACK + FRAME as u64 {
-        // Page granules count from the stream start (pre-skip included).
-        let target = start + pre_skip_total - SEEK_BACK;
-        if blocks.reader.seek_absgp(None, target).is_ok() {
-            // After a coarse seek we don't know the exact position until a
-            // page boundary; resync on the first packet that ends a page.
-            blocks.pre_skip_left = 0; // pre-skip is long gone at this depth
-            let mut pos: Option<u64> = None; // absolute decoded position
-            let mut out = Vec::new();
-            loop {
-                let Some(pkt) = blocks.reader.read_packet().context("read packet")? else {
-                    break;
-                };
-                let mut pcm = vec![0.0f32; FRAME * 2];
-                let n = blocks
-                    .decoder
-                    .decode_float(&pkt.data, &mut pcm, false)
-                    .context("decode")?;
-                pcm.truncate(n);
-                if pos.is_none() {
-                    if pkt.last_in_page() {
-                        // Granule = samples (incl. pre-skip) through this
-                        // packet → our absolute position after it.
-                        pos = Some(pkt.absgp_page().saturating_sub(pre_skip_total));
-                    }
-                    continue; // pre-roll / position unknown — discard
-                }
-                let p = pos.unwrap();
-                let pkt_start = p;
-                let pkt_end = p + pcm.len() as u64;
-                pos = Some(pkt_end);
-                if pkt_end <= start {
-                    continue;
-                }
-                let from = start.saturating_sub(pkt_start) as usize;
-                let to = (end.saturating_sub(pkt_start) as usize).min(pcm.len());
-                if from < to {
-                    out.extend_from_slice(&pcm[from..to]);
-                }
-                if pkt_end >= end {
-                    break;
-                }
-            }
-            return Ok((out, OPUS_RATE));
-        }
-        // Seek unsupported/failed → fall through to the sequential path.
-        blocks = OpusBlocks::open(path)?;
-    }
-    // Near the start (or no seek): decode forward, windowing as we go.
+    blocks.seek_ms(start_ms)?;
+    let start = start_ms * OPUS_RATE as u64 / 1000;
+
+    // Collect samples in [start, end).
     let mut out = Vec::new();
-    let mut pos: u64 = 0;
+    let mut pos: u64 = start; // emitted by seek_ms already discards [0,start)
     while let Some(pcm) = blocks.next_block()? {
         let pkt_start = pos;
         let pkt_end = pos + pcm.len() as u64;
         pos = pkt_end;
-        if pkt_end <= start {
-            continue;
-        }
-        let from = start.saturating_sub(pkt_start) as usize;
         let to = (end.saturating_sub(pkt_start) as usize).min(pcm.len());
-        if from < to {
-            out.extend_from_slice(&pcm[from..to]);
+        if to > 0 {
+            out.extend_from_slice(&pcm[..to]);
         }
         if pkt_end >= end {
             break;

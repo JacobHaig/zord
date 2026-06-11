@@ -404,6 +404,190 @@ pub fn mix_tracks(paths: &[std::path::PathBuf], out: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// MixReader — streaming mono mix of several session tracks at a seek offset
+// (Phase 42b).
+// ---------------------------------------------------------------------------
+
+/// One source track in a [`MixReader`].
+enum MixSrc {
+    Wav {
+        reader: hound::WavReader<std::io::BufReader<std::fs::File>>,
+        channels: usize,
+        float: bool,
+        scale: f32,
+    },
+    Opus(crate::compress::OpusBlocks),
+}
+
+impl MixSrc {
+    fn native_rate(&self) -> u32 {
+        match self {
+            MixSrc::Wav { reader, .. } => reader.spec().sample_rate,
+            MixSrc::Opus(b) => b.sample_rate(),
+        }
+    }
+
+    /// Read up to `frames` native mono frames; returns fewer (or empty) at EOF.
+    fn read_native(&mut self, frames: usize) -> anyhow::Result<Vec<f32>> {
+        match self {
+            MixSrc::Wav {
+                reader,
+                channels,
+                float,
+                scale,
+            } => {
+                let want = frames * *channels;
+                let mut inter = Vec::with_capacity(want);
+                if *float {
+                    for s in reader.samples::<f32>().take(want) {
+                        inter.push(s?);
+                    }
+                } else {
+                    for s in reader.samples::<i32>().take(want) {
+                        inter.push(s? as f32 * *scale);
+                    }
+                }
+                if *channels <= 1 {
+                    return Ok(inter);
+                }
+                Ok(inter
+                    .chunks(*channels)
+                    .map(|f| f.iter().sum::<f32>() / f.len() as f32)
+                    .collect())
+            }
+            MixSrc::Opus(blocks) => {
+                let mut mono = Vec::with_capacity(frames);
+                while mono.len() < frames {
+                    match blocks.next_block()? {
+                        Some(b) => mono.extend_from_slice(&b),
+                        None => break,
+                    }
+                }
+                Ok(mono)
+            }
+        }
+    }
+}
+
+struct MixTrack {
+    src: MixSrc,
+    native_rate: u32,
+    resampler: Option<crate::MonoResampler>,
+    carry: Vec<f32>, // resampled target-rate samples not yet mixed
+    done: bool,
+}
+
+impl MixTrack {
+    /// Fill `carry` to at least `want` target-rate samples (or until EOF).
+    fn fill(&mut self, want: usize) -> anyhow::Result<()> {
+        while !self.done && self.carry.len() < want {
+            let block = self.src.read_native(self.native_rate as usize)?; // ~1 s
+            if block.is_empty() {
+                self.done = true;
+                break;
+            }
+            match self.resampler.as_mut() {
+                Some(r) => self.carry.extend(r.process(&block)?),
+                None => self.carry.extend(block),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Streaming mono mix of several session tracks starting at `start_ms`,
+/// resampled to [`MixReader::OUT_RATE`] (48 kHz). Pulls source blocks
+/// lazily — an hour-long session never loads whole. Phase 42b: feeds
+/// timeline playback.
+///
+/// Seek = open a new `MixReader` at the desired offset (cheap).
+pub struct MixReader {
+    tracks: Vec<MixTrack>,
+}
+
+impl MixReader {
+    /// Output sample rate for all blocks returned by [`next_block`].
+    pub const OUT_RATE: u32 = 48_000;
+
+    /// Open `paths` seeking each source to `start_ms`. Returns an error if any
+    /// path cannot be opened. Empty `paths` is an error.
+    pub fn open(paths: &[std::path::PathBuf], start_ms: u64) -> anyhow::Result<Self> {
+        anyhow::ensure!(!paths.is_empty(), "MixReader: no audio tracks");
+        let mut tracks = Vec::with_capacity(paths.len());
+        for p in paths {
+            let src = if p
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("opus"))
+            {
+                let mut blocks = crate::compress::OpusBlocks::open(p)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+                blocks.seek_ms(start_ms)?;
+                MixSrc::Opus(blocks)
+            } else {
+                let _ = repair_wav_header(p);
+                let mut reader = hound::WavReader::open(p)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+                let spec = reader.spec();
+                validate_wav_spec(spec)?;
+                let rate = spec.sample_rate;
+                let start_sample = (start_ms * rate as u64 / 1000) as u32;
+                reader.seek(start_sample)?;
+                MixSrc::Wav {
+                    channels: spec.channels.max(1) as usize,
+                    float: spec.sample_format == hound::SampleFormat::Float,
+                    scale: 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32,
+                    reader,
+                }
+            };
+            let native_rate = src.native_rate();
+            let resampler = (native_rate != Self::OUT_RATE)
+                .then(|| crate::MonoResampler::to_rate(native_rate, 1, Self::OUT_RATE))
+                .transpose()?;
+            tracks.push(MixTrack {
+                src,
+                native_rate,
+                resampler,
+                carry: Vec::new(),
+                done: false,
+            });
+        }
+        Ok(Self { tracks })
+    }
+
+    /// Return the next mixed block (~100 ms = 4 800 samples at 48 kHz) or
+    /// `None` when all tracks are exhausted.
+    ///
+    /// Samples are soft-clamped to `[-1, 1]` after summing.
+    pub fn next_block(&mut self) -> anyhow::Result<Option<Vec<f32>>> {
+        const BLOCK: usize = 4_800; // ~100 ms at 48 kHz
+        for t in &mut self.tracks {
+            t.fill(BLOCK)?;
+        }
+        let max_len = self
+            .tracks
+            .iter()
+            .map(|t| t.carry.len().min(BLOCK))
+            .max()
+            .unwrap_or(0);
+        if max_len == 0 {
+            return Ok(None);
+        }
+        let mut mix = vec![0.0f32; max_len];
+        for t in &mut self.tracks {
+            let take = t.carry.len().min(max_len);
+            for (m, s) in mix.iter_mut().zip(t.carry.drain(..take)) {
+                *m += s;
+            }
+        }
+        // Soft-clamp: keep single-speaker level, guard against rare overlapping peaks.
+        for s in &mut mix {
+            *s = s.clamp(-1.0, 1.0);
+        }
+        Ok(Some(mix))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +675,119 @@ mod tests {
         std::fs::write(&path, &body).unwrap();
         assert!(!repair_wav_header(&path).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rms(s: &[f32]) -> f32 {
+        (s.iter().map(|x| x * x).sum::<f32>() / s.len().max(1) as f32).sqrt()
+    }
+
+    /// MixReader: two WAVs at different rates mix and both have energy in the
+    /// first block.
+    #[test]
+    fn mix_reader_two_rates_both_have_energy() {
+        let dir = std::env::temp_dir().join(format!("zord-mr1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 44.1 kHz tone: 2 s
+        let a = dir.join("a.wav");
+        {
+            let rate = 44_100u32;
+            let mut w = WavWriter::create(&a, rate).unwrap();
+            let samples: Vec<f32> = (0..rate * 2)
+                .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.4)
+                .collect();
+            w.write(&samples).unwrap();
+            w.finalize().unwrap();
+        }
+        // 48 kHz tone: 2 s
+        let b = dir.join("b.wav");
+        {
+            let rate = 48_000u32;
+            let mut w = WavWriter::create(&b, rate).unwrap();
+            let samples: Vec<f32> = (0..rate * 2)
+                .map(|i| (i as f32 * 880.0 * std::f32::consts::TAU / rate as f32).sin() * 0.4)
+                .collect();
+            w.write(&samples).unwrap();
+            w.finalize().unwrap();
+        }
+
+        let mut mr = MixReader::open(&[a, b], 0).unwrap();
+        let block = mr.next_block().unwrap().expect("should have a first block");
+        assert!(
+            rms(&block) > 0.1,
+            "mixed block should have energy, got rms {}",
+            rms(&block)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MixReader: opening at an offset past the signal yields near-silence.
+    #[test]
+    fn mix_reader_seek_past_signal_is_silence() {
+        let dir = std::env::temp_dir().join(format!("zord-mr2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1 s of tone in [0, 500ms], then silence in [500ms, 1500ms]
+        let path = dir.join("tone.wav");
+        {
+            let rate = 48_000u32;
+            let mut w = WavWriter::create(&path, rate).unwrap();
+            let mut samples: Vec<f32> = (0..rate / 2)
+                .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5)
+                .collect();
+            samples.extend(std::iter::repeat_n(0.0f32, rate as usize));
+            w.write(&samples).unwrap();
+            w.finalize().unwrap();
+        }
+
+        // Seek to 1000ms — well into the silence region.
+        let mut mr = MixReader::open(&[path], 1000).unwrap();
+        let block = mr.next_block().unwrap().expect("should have a block");
+        assert!(
+            rms(&block) < 0.02,
+            "block after seek into silence should be quiet, got rms {}",
+            rms(&block)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MixReader: Opus path — encode a synthetic WAV, then open with MixReader
+    /// at an offset; first block should have the expected energy.
+    #[test]
+    fn mix_reader_opus_path() {
+        let dir = std::env::temp_dir().join(format!("zord-mr3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let wav = dir.join("t.wav");
+        let opus = dir.join("t.opus");
+
+        // 3 s: 1 s silence, 1 s loud tone, 1 s silence
+        {
+            let rate = 44_100u32;
+            let mut w = WavWriter::create(&wav, rate).unwrap();
+            let mut samples = vec![0.0f32; rate as usize];
+            samples.extend(
+                (0..rate)
+                    .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5),
+            );
+            samples.extend(std::iter::repeat_n(0.0f32, rate as usize));
+            w.write(&samples).unwrap();
+            w.finalize().unwrap();
+        }
+        crate::compress::compress_wav_to_opus(&wav, &opus, 32_000).unwrap();
+
+        // Open at 1100 ms — inside the tone second.
+        let mut mr = MixReader::open(&[opus], 1_100).unwrap();
+        let block = mr.next_block().unwrap().expect("should have a block");
+        assert!(
+            rms(&block) > 0.1,
+            "block inside tone should be loud, got rms {}",
+            rms(&block)
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
