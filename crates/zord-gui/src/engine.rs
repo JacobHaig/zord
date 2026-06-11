@@ -3571,10 +3571,10 @@ fn post_transcribe_inner(
     let mut total = 0usize;
     let audio_path = audio_prefix.to_string_lossy();
     // Track list: the fixed me/others pair, plus any per-speaker tracks an
-    // integration session wrote (spk-0.wav, spk-1.wav, … — folder layout
+    // integration session wrote (spk-0.wav / spk-0.opus, … — folder layout
     // only). Their ground-truth speaker index is re-applied to each segment,
     // so the existing speaker_names labels survive a re-transcription.
-    let mut tracks: Vec<(String, Source, Option<i32>)> = vec![
+    let mut track_specs: Vec<(String, Source, Option<i32>)> = vec![
         ("me".to_string(), Source::Me, None),
         ("others".to_string(), Source::Others, None),
     ];
@@ -3583,63 +3583,175 @@ fn post_transcribe_inner(
             .flatten()
             .filter_map(|e| {
                 let name = e.file_name().into_string().ok()?;
-                name.strip_prefix("spk-")?
-                    .strip_suffix(".wav")?
-                    .parse()
-                    .ok()
+                let stem = name
+                    .strip_prefix("spk-")?
+                    .strip_suffix(".wav")
+                    .or_else(|| name.strip_prefix("spk-")?.strip_suffix(".opus"))?;
+                stem.parse().ok()
             })
+            .collect::<std::collections::HashSet<i32>>()
+            .into_iter()
             .collect();
         spk.sort_unstable();
         for idx in spk {
-            tracks.push((format!("spk-{idx}"), Source::Others, Some(idx)));
+            track_specs.push((format!("spk-{idx}"), Source::Others, Some(idx)));
         }
     }
-    // Live-refresh throttle: while transcribing, push the growing transcript
-    // to the GUI at most ~every 700 ms so a watcher sees lines stream in
-    // instead of a blank screen until the final refresh.
-    let mut last_push = std::time::Instant::now();
-    for (suffix, source, speaker) in tracks {
-        // Resolve the track in the new folder layout or the legacy flat layout.
-        let Some(wav) = zord_config::resolve_track(&audio_path, &suffix) else {
-            continue;
-        };
-        let cancel = || token.map(cancelled).unwrap_or(false);
-        let mut on_segment = |mut seg: Segment| {
-            // Keep-partial: segments transcribed before the cancel are kept.
-            if !cancel() {
-                if speaker.is_some() {
-                    seg.speaker = speaker;
+    // Resolve all tracks up-front; skip unresolvable (no file on disk).
+    // WorkItem: (suffix, source, speaker, resolved path).
+    let resolved: Vec<(String, Source, Option<i32>, PathBuf)> = track_specs
+        .into_iter()
+        .filter_map(|(suffix, source, speaker)| {
+            let wav = zord_config::resolve_track(&audio_path, &suffix)?;
+            Some((suffix, source, speaker, wav))
+        })
+        .collect();
+
+    let workers =
+        effective_transcribe_workers(settings.transcribe_workers.clamp(1, 4), resolved.len());
+
+    if workers <= 1 {
+        // ── Sequential path (default) ── byte-for-byte identical to Phase 25.
+        // Live-refresh throttle: push the growing transcript to the GUI at most
+        // ~every 700 ms so a watcher sees lines stream in.
+        let mut last_push = std::time::Instant::now();
+        for (suffix, source, speaker, wav) in resolved {
+            let cancel = || token.map(cancelled).unwrap_or(false);
+            let mut on_segment = |mut seg: Segment| {
+                // Keep-partial: segments transcribed before the cancel are kept.
+                if !cancel() {
+                    if speaker.is_some() {
+                        seg.speaker = speaker;
+                    }
+                    let _ = store.insert_segment(session_id, &seg);
+                    if last_push.elapsed() >= std::time::Duration::from_millis(700) {
+                        last_push = std::time::Instant::now();
+                        if let Ok(v) = store.segments(session_id) {
+                            let _ = ev.send(Event::Transcript {
+                                id: session_id.to_string(),
+                                segments: v,
+                            });
+                        }
+                    }
                 }
-                let _ = store.insert_segment(session_id, &seg);
-                if last_push.elapsed() >= std::time::Duration::from_millis(700) {
-                    last_push = std::time::Instant::now();
-                    if let Ok(v) = store.segments(session_id) {
-                        let _ = ev.send(Event::Transcript {
-                            id: session_id.to_string(),
-                            segments: v,
-                        });
+            };
+            // `cancel` also stops the decode loop within ~1s — not just
+            // persistence — so a cancelled re-transcribe frees the CPU promptly.
+            match zord_transcribe::transcribe_wav_file(
+                &transcriber,
+                source,
+                &wav,
+                &mut on_segment,
+                &cancel,
+            ) {
+                Ok(n) => total += n,
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!("transcribing {suffix}: {e}")));
+                }
+            }
+            if cancel() {
+                break; // don't start the next channel
+            }
+        }
+    } else {
+        // ── Parallel path (transcribe_workers > 1) ──
+        // Workers pop items from a shared queue and send (speaker, Segment)
+        // over an mpsc channel; the main thread (inside the scope) drains the
+        // channel, stamps speakers, inserts into the store, and throttles GUI
+        // pushes — keeping all store writes on one thread.
+        //
+        // Cancel semantics: the token is cloned into each worker; when it fires
+        // the worker stops popping new items (keep-partial — segments already
+        // received by the drain loop are committed).
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        // A notice-or-segment message from a worker.
+        enum WorkerMsg {
+            Segment(Option<i32>, Segment),
+            Notice(String),
+        }
+
+        let queue = Arc::new(Mutex::new(resolved.into_iter().collect::<VecDeque<(
+            String,
+            Source,
+            Option<i32>,
+            PathBuf,
+        )>>()));
+        let (tx, rx) = std::sync::mpsc::channel::<WorkerMsg>();
+
+        thread::scope(|s| {
+            // Spawn N worker threads; each pops items until the queue is empty
+            // or the cancel token fires.
+            for _ in 0..workers {
+                let queue = Arc::clone(&queue);
+                let tx = tx.clone();
+                let transcriber = &transcriber;
+                s.spawn(move || loop {
+                    if token.map(cancelled).unwrap_or(false) {
+                        break;
+                    }
+                    let item = {
+                        let mut q = queue.lock().unwrap();
+                        q.pop_front()
+                    };
+                    let Some((suffix, source, speaker, wav)) = item else {
+                        break; // queue exhausted
+                    };
+                    if token.map(cancelled).unwrap_or(false) {
+                        break;
+                    }
+                    let tx2 = tx.clone();
+                    let cancel_fn = || token.map(cancelled).unwrap_or(false);
+                    let mut on_segment = |mut seg: Segment| {
+                        seg.speaker = speaker; // always stamp (None is fine)
+                        let _ = tx2.send(WorkerMsg::Segment(speaker, seg));
+                    };
+                    if let Err(e) = zord_transcribe::transcribe_wav_file(
+                        transcriber,
+                        source,
+                        &wav,
+                        &mut on_segment,
+                        &cancel_fn,
+                    ) {
+                        let _ = tx.send(WorkerMsg::Notice(format!("transcribing {suffix}: {e}")));
+                    }
+                });
+            }
+            // Drop our tx clone so the channel closes when all workers finish.
+            drop(tx);
+
+            // Drain loop: stamp speaker, insert, throttle GUI pushes.
+            // Keep-partial: we insert every segment that arrives — workers only
+            // stop sending on cancel, so anything already in-flight is committed.
+            let mut last_push = std::time::Instant::now();
+            for msg in rx {
+                match msg {
+                    WorkerMsg::Segment(speaker, mut seg) => {
+                        if speaker.is_some() {
+                            seg.speaker = speaker;
+                        }
+                        let _ = store.insert_segment(session_id, &seg);
+                        total += 1;
+                        if last_push.elapsed() >= std::time::Duration::from_millis(700) {
+                            last_push = std::time::Instant::now();
+                            if let Ok(v) = store.segments(session_id) {
+                                let _ = ev.send(Event::Transcript {
+                                    id: session_id.to_string(),
+                                    segments: v,
+                                });
+                            }
+                        }
+                    }
+                    WorkerMsg::Notice(msg) => {
+                        let _ = ev.send(Event::Notice(msg));
                     }
                 }
             }
-        };
-        // `cancel` also stops the decode loop within ~1s (Phase C) — not just
-        // persistence — so a cancelled re-transcribe frees the CPU promptly.
-        match zord_transcribe::transcribe_wav_file(
-            &transcriber,
-            source,
-            &wav,
-            &mut on_segment,
-            &cancel,
-        ) {
-            Ok(n) => total += n,
-            Err(e) => {
-                let _ = ev.send(Event::Notice(format!("transcribing {suffix}: {e}")));
-            }
-        }
-        if cancel() {
-            break; // don't start the next channel
-        }
+            // scope end: all worker threads are joined before we continue.
+        });
     }
+
     if total == 0 {
         let _ = ev.send(Event::Notice(
             "No speech found in the kept audio — nothing transcribed.".to_string(),
@@ -3660,6 +3772,15 @@ fn post_transcribe_inner(
         model.name()
     )));
     true
+}
+
+/// Effective parallel transcription workers: the user cap (clamped 1..=4)
+/// bounded by the number of tracks actually present.
+///
+/// "If you set 4 workers on a standard desktop+mic (2 tracks) only 2 workers
+/// spin up — one per track."
+fn effective_transcribe_workers(cap: u32, tracks: usize) -> usize {
+    (cap as usize).min(tracks).max(1)
 }
 
 /// Prepend silence to `mono` so the channel's produced-sample count catches up
@@ -4118,5 +4239,21 @@ mod tests {
         s.title = Some("   ".into());
         let label = overview_session_label(&s);
         assert!(label.ends_with(" — sess-99"), "blank title: {label}");
+    }
+
+    #[test]
+    fn effective_transcribe_workers_caps_and_bounds() {
+        // cap bounds by tracks: 4 workers / 2 tracks → 2 effective.
+        assert_eq!(effective_transcribe_workers(4, 2), 2);
+        // cap is the binding limit: 2 workers / 5 tracks → 2 effective.
+        assert_eq!(effective_transcribe_workers(2, 5), 2);
+        // exact match: 3 workers / 3 tracks → 3 effective.
+        assert_eq!(effective_transcribe_workers(3, 3), 3);
+        // sequential default: 1 worker / any tracks → 1.
+        assert_eq!(effective_transcribe_workers(1, 10), 1);
+        // zero tracks → floor to 1 (no divide-by-zero, no panic).
+        assert_eq!(effective_transcribe_workers(4, 0), 1);
+        // cap already clamped to 1 by caller; floor holds.
+        assert_eq!(effective_transcribe_workers(1, 0), 1);
     }
 }

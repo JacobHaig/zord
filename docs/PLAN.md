@@ -1493,17 +1493,6 @@ feeds.
 - ~~Multilingual UX~~ / ~~CUDA release builds~~ — **declined** (not wanted).
 - Windows code-signing (Authenticode) so SmartScreen/managed machines don't
   block the binaries (CI step ready to wire once a cert/signing service exists).
-- **Parallel post-stop transcription** (analysis June 2026, backlogged).
-  Today the post pass / Re-transcribe walks tracks sequentially with one
-  model instance (live mode is also one transcribe thread fed by all
-  channels). Total work already scales with *speech*, not track count —
-  session-aligned tracks are sparse and VAD skips silence — so sequential is
-  cheaper than it sounds. A bounded 2-worker pool (shared whisper weights,
-  separate decoder states) for the post pass, engaged only when >1 track has
-  speech, would cut wall-clock ~1.5–1.8× on multi-speaker (Discord) sessions
-  for a few hundred MB of extra state RAM; ~no gain for ordinary mic+desktop
-  sessions on Metal (a single inference already saturates the GPU). Parakeet
-  (CPU-bound) would benefit most.
 
 ---
 
@@ -1706,6 +1695,35 @@ ledger UI, its prompts) is deleted; `projects`/`project_items` tables remain
 inert. Implemented and gate-verified; live LLM pass pending.
 Spec: `docs/superpowers/specs/2026-06-11-living-overview-design.md` ·
 Plan: `docs/superpowers/plans/2026-06-11-living-overview.md`.
+
+### Phase 40 — Find in session (planned)
+Search *within* the open session, not just across all sessions. A small
+find bar — NOT a permanently visible panel (the compression panel's
+always-there presence is the anti-pattern to avoid): a search icon in the
+session toolbar (plus Cmd/Ctrl-F while a session is open) toggles it; Esc or
+× closes it and clears highlights. Client-side over the loaded transcript
+(the segments are already in memory — no DbCmd/FTS needed):
+case-insensitive substring match, hit count ("3 of 17"), prev/next buttons
++ Enter/Shift-Enter cycling, the active hit scrolled into view (reuse the
+existing scroll-to-segment mechanism from search-result opens) and all hits
+highlighted via the existing search-hit styling. Works on the Live view's
+transcript too. Small phase: one toolbar button, one component, one pure
+match helper (unit-tested), CSS from tokens.
+
+### Phase 41 — Parallel post-stop transcription ✅ DONE (June 2026)
+New `Settings::transcribe_workers: u32` (default 1, clamped 1..=4). Effective
+parallelism = `min(transcribe_workers, tracks_present)` — a 2-track session
+never spins more than 2 workers. `workers == 1` keeps the existing sequential
+path byte-for-byte unchanged (zero-risk default). `workers > 1` uses
+`std::thread::scope` + a shared `Mutex<VecDeque>` work queue; workers send
+`(speaker, Segment)` over an mpsc channel to the calling thread, which
+performs all store inserts and throttled GUI pushes (store stays
+single-threaded). Cancel/keep-partial semantics preserved: segments already
+received by the drain loop are committed even if the token fires mid-run. Both
+backends (`WhisperBackend` via `WhisperInnerContext`; `ParakeetBackend` via
+`OfflineRecognizer`) already carry `unsafe impl Send + Sync` in their upstream
+crates, so no additional unsafe code was needed. Settings UI in
+Transcription → "Parallel transcription workers" select (1–4).
 
 ---
 

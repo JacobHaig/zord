@@ -2353,6 +2353,23 @@ fn TranscriptionSettings(
                                         }
                                     }
                                     p { class: "field-note", "Runs the Re model when you stop. With live transcription on, this upgrades the live transcript; with live off, this is when the transcript is generated (otherwise it waits for Re-transcribe on the session)." }
+                                    div { class: "field-row",
+                                        label { class: "field-label", "Parallel transcription workers" }
+                                        select {
+                                            value: "{settings.read().transcribe_workers}",
+                                            onchange: move |e| {
+                                                let mut s = settings.peek().clone();
+                                                s.transcribe_workers = e.value().parse().unwrap_or(1).clamp(1, 4);
+                                                let _ = s.save();
+                                                settings.set(s);
+                                            },
+                                            option { value: "1", selected: settings.read().transcribe_workers == 1, "1 (default — sequential)" }
+                                            option { value: "2", selected: settings.read().transcribe_workers == 2, "2" }
+                                            option { value: "3", selected: settings.read().transcribe_workers == 3, "3" }
+                                            option { value: "4", selected: settings.read().transcribe_workers == 4, "4" }
+                                        }
+                                    }
+                                    p { class: "field-note", "How many tracks transcribe at once after a recording — helps multi-speaker Discord sessions; 1 per available track, more memory per worker." }
                                     for m in models.read().iter().filter(|m| m.kind == "transcription") {
                                         {
                                             let name = m.name.clone();

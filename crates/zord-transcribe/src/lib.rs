@@ -26,7 +26,15 @@ pub fn install_logging_hooks() {
 }
 
 /// A transcription engine that turns 16 kHz mono audio into tagged segments.
-pub trait TranscribeBackend: Send {
+///
+/// `Send + Sync` is required so that a shared `Transcriber` can be used from
+/// multiple scoped threads (Phase 41 parallel post-stop transcription).
+/// Both concrete backends satisfy this: `WhisperBackend` wraps a
+/// `WhisperContext` (the inner `Arc<WhisperInnerContext>` is `Send+Sync` per
+/// whisper-rs 0.16) and creates a fresh `WhisperState` per call; `ParakeetBackend`
+/// wraps `OfflineRecognizer` which carries `unsafe impl Send/Sync` in
+/// sherpa-onnx 1.13 and creates a fresh `OfflineStream` per call.
+pub trait TranscribeBackend: Send + Sync {
     /// Transcribe one VAD segment. `base_offset_ms` is the segment's start time
     /// relative to the session, so returned timings are session-relative;
     /// `source` tags every output segment.

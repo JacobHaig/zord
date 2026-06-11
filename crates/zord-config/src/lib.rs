@@ -221,6 +221,17 @@ pub struct Settings {
     /// the user presses 🔁 Re-transcribe.
     #[serde(default)]
     pub auto_transcribe: bool,
+    /// Post-stop transcription worker cap (Phase 41): how many tracks may be
+    /// transcribed in parallel after a recording (or on Re-transcribe). The
+    /// effective count is min(this, tracks present) — a 2-track session never
+    /// uses more than 2. 1 = sequential (default). Workers share one loaded
+    /// model; gains apply to multi-speaker (Discord) sessions.
+    #[serde(default = "default_transcribe_workers")]
+    pub transcribe_workers: u32,
+}
+
+fn default_transcribe_workers() -> u32 {
+    1
 }
 
 fn default_level_mode() -> String {
@@ -489,6 +500,7 @@ impl Default for Settings {
             voiceprints_enabled: false,
             voiceprints_match: default_voiceprints_match(),
             voiceprints_consented_at: 0,
+            transcribe_workers: default_transcribe_workers(),
         }
     }
 }
@@ -904,6 +916,30 @@ mod tests {
         assert_eq!(voiceprint_threshold(&s.voiceprints_match), 0.72);
         assert_eq!(voiceprint_threshold("strict"), 0.78);
         assert_eq!(voiceprint_threshold("bogus"), 0.72);
+    }
+
+    #[test]
+    fn transcribe_workers_default_and_placement() {
+        // Default is 1 (sequential, zero-risk).
+        let s = Settings::default();
+        assert_eq!(s.transcribe_workers, 1);
+        // Deserialising an empty object also gives the default.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.transcribe_workers, 1);
+        // A saved value round-trips correctly.
+        let s: Settings = serde_json::from_str(r#"{"transcribe_workers": 3}"#).unwrap();
+        assert_eq!(s.transcribe_workers, 3);
+        // The field lives near the other transcription settings (retranscribe_model
+        // and auto_transcribe) — check it is present in the serialised form.
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(
+            json.contains("\"transcribe_workers\""),
+            "field must appear in serialised Settings"
+        );
+        assert!(
+            json.contains("\"retranscribe_model\""),
+            "retranscribe_model must also be present (placement sanity)"
+        );
     }
 
     #[test]
