@@ -9,42 +9,12 @@
 //! [`cross_meeting_context`] (compression-based grounding) remains as the
 //! cross-meeting chat fallback for when the document is still empty.
 
+#[cfg(any(feature = "llama", feature = "remote"))]
 use anyhow::Result;
 #[cfg(any(feature = "llama", feature = "remote"))]
 use zord_config::Settings;
+#[cfg(any(feature = "llama", feature = "remote"))]
 use zord_store::Store;
-
-/// `app_meta` key holding the synthesized Overview Markdown.
-pub const META_OVERVIEW: &str = "overview";
-/// `app_meta` key holding how many meetings the stored Overview covered.
-pub const META_OVERVIEW_MEETINGS: &str = "overview_meetings";
-
-/// A synthesized (or loaded) cross-meeting Overview.
-#[derive(Debug, Clone)]
-pub struct Overview {
-    /// Markdown rollup.
-    pub text: String,
-    /// How many meetings it covered.
-    pub meetings: usize,
-    /// When it was generated (epoch ms).
-    pub generated_at_ms: u64,
-}
-
-/// Load the most recently stored Overview, if any (no LLM needed).
-pub fn load(store: &Store) -> Result<Option<Overview>> {
-    let Some((text, generated_at_ms)) = store.get_meta(META_OVERVIEW)? else {
-        return Ok(None);
-    };
-    let meetings = store
-        .get_meta(META_OVERVIEW_MEETINGS)?
-        .and_then(|(v, _)| v.parse().ok())
-        .unwrap_or(0);
-    Ok(Some(Overview {
-        text,
-        meetings,
-        generated_at_ms,
-    }))
-}
 
 // ---------------------------------------------------------------------------
 // Cross-meeting chat grounding (compression-based fallback)

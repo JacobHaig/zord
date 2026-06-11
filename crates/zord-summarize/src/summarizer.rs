@@ -457,9 +457,11 @@ impl Summarizer {
 
         let mut sampler = LlamaSampler::greedy();
         let mut out = String::new();
-        let mut n_cur = tokens.len() as i32;
+        // Each sampled token is appended right after the prompt: positions
+        // run from the prompt length upward, one per generated token.
+        let first = tokens.len() as i32;
 
-        for _ in 0..opts.max_new_tokens {
+        for n_cur in first..first + opts.max_new_tokens as i32 {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(token);
             if self.model.is_eog_token(token) {
@@ -478,7 +480,6 @@ impl Summarizer {
             out.push_str(&piece);
             batch.clear();
             batch.add(token, n_cur, &[0], true)?;
-            n_cur += 1;
             ctx.decode(&mut batch)?;
         }
         breadcrumb("infer:done");
