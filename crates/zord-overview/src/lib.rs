@@ -188,6 +188,120 @@ pub fn cross_meeting_context(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 39 — living-document update
+// ---------------------------------------------------------------------------
+
+/// Build the user-turn text that the LLM receives for a document update: the
+/// current document (or a placeholder when it is empty), a separator, and the
+/// new meeting's input.
+///
+/// This is a **pure** function so it can be unit-tested without an LLM.
+pub fn build_update_input(doc: &str, session_input: &str, session_label: &str) -> String {
+    let doc_part = if doc.trim().is_empty() {
+        "(empty document)".to_string()
+    } else {
+        doc.to_string()
+    };
+    format!("{doc_part}\n\n--- New meeting ({session_label}) ---\n\n{session_input}")
+}
+
+/// Strip a wrapping ```` ```markdown … ``` ```` or ```` ``` … ``` ```` code
+/// fence that a model may add around its output despite instructions.
+///
+/// Only the outermost fence is stripped; interior fences (e.g. inside a code
+/// block in the document) are left intact. This is a **pure** function.
+pub fn strip_code_fence(s: &str) -> &str {
+    let s = s.trim();
+
+    // Accept ``` optionally followed by "markdown" (case-insensitive).
+    let after_open = if let Some(rest) = s.strip_prefix("```markdown") {
+        rest
+    } else if let Some(rest) = s.strip_prefix("```") {
+        rest
+    } else {
+        return s;
+    };
+
+    // The opening fence must be followed by a newline (possibly with trailing
+    // spaces) before the content starts.
+    let body = if let Some(body) = after_open.strip_prefix('\n') {
+        body
+    } else if let Some(body) = after_open.strip_prefix("\r\n") {
+        body
+    } else {
+        // No newline after the fence — not a real fence block; return original.
+        return s;
+    };
+
+    // Strip the closing ``` (trimming any trailing whitespace/newlines first).
+    if let Some(stripped) = body.trim_end().strip_suffix("```") {
+        stripped.trim_end()
+    } else {
+        s
+    }
+}
+
+/// One fold of the living overview (Phase 39): rewrite the whole document with
+/// `session_input` (the session's compressed transcript, else its labeled
+/// transcript) merged in. Returns the full replacement markdown.
+///
+/// Pure LLM wrapper — fold bookkeeping (which sessions, snapshots, the
+/// high-water mark) lives in the engine.
+///
+/// `session_label` is a human-readable label for the meeting, e.g.
+/// `"2026-06-11 — Standup"`, used by the model to date Archive entries.
+///
+/// Context budget: the document is preserved whole; if `session_input` would
+/// push the combined input over the window, `session_input` is truncated (not
+/// the document — the document is the state being maintained).
+#[cfg(any(feature = "llama", feature = "remote"))]
+pub fn update_document(
+    doc: &str,
+    session_input: &str,
+    session_label: &str,
+    llm: &zord_summarize::LlmBackend,
+    settings: &Settings,
+    progress: &mut dyn FnMut(&str),
+) -> Result<String> {
+    use zord_summarize::GenOpts;
+
+    let n_ctx = settings.overview_ctx.clamp(8192, 131_072);
+    let opts = GenOpts::overview(n_ctx);
+
+    // Reserve space for: the system prompt + chat template overhead (600 t),
+    // the document itself, and the separator / label text (~50 chars).
+    // Whatever remains is the budget for session_input.
+    let total_budget = input_budget(n_ctx, opts.max_new_tokens);
+    let sep_overhead = session_label.len() + 60; // "--- New meeting (…) ---\n\n" etc.
+    let doc_tokens = llm.count_tokens(doc)?;
+    let session_budget_tokens = total_budget.saturating_sub(doc_tokens + sep_overhead);
+
+    // Coarse character cap derived from the token budget (≈3.5 chars/token).
+    let session_budget_chars = session_budget_tokens.saturating_mul(7) / 2;
+    let session_input =
+        if session_input.chars().count() > session_budget_chars && session_budget_chars > 0 {
+            progress(&format!(
+            "Session input too long for context — truncating to ~{session_budget_chars} characters."
+        ));
+            let truncated: String = session_input.chars().take(session_budget_chars).collect();
+            truncated
+        } else {
+            session_input.to_string()
+        };
+
+    progress(&format!(
+        "Updating the living overview with \"{session_label}\"…"
+    ));
+
+    let user_content = build_update_input(doc, &session_input, session_label);
+    let raw = llm.generate(&user_content, zord_config::overview_doc_prompt(), opts)?;
+
+    // Trim and strip any markdown code fence the model added despite instructions.
+    let result = strip_code_fence(raw.trim()).to_string();
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // Phase 26 — the rolling ledger fold (extract → reconcile → apply)
 // ---------------------------------------------------------------------------
 
@@ -608,5 +722,131 @@ mod ledger_context_tests {
         assert!(ctx.contains("[decision, done] Drop legacy endpoint"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod update_document_tests {
+    use super::*;
+
+    // ---- build_update_input ------------------------------------------------
+
+    #[test]
+    fn empty_doc_uses_placeholder() {
+        let out = build_update_input("", "Me: hey", "2026-06-11 — Standup");
+        assert!(
+            out.starts_with("(empty document)"),
+            "empty doc must produce placeholder, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_doc_uses_placeholder() {
+        let out = build_update_input("   \n\t  ", "Me: hey", "2026-06-11 — Standup");
+        assert!(out.starts_with("(empty document)"));
+    }
+
+    #[test]
+    fn non_empty_doc_is_preserved_verbatim() {
+        let doc = "## CI/CD\n- [ ] finish pipeline";
+        let out = build_update_input(doc, "Me: done", "2026-06-11");
+        assert!(out.starts_with(doc), "doc must appear first; got: {out:?}");
+    }
+
+    #[test]
+    fn separator_contains_session_label() {
+        let label = "2026-06-11 — Engineering sync";
+        let out = build_update_input("some doc", "input text", label);
+        assert!(
+            out.contains(label),
+            "separator must contain the session label; got: {out:?}"
+        );
+        assert!(
+            out.contains("--- New meeting ("),
+            "separator must be present; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn doc_appears_before_session_input() {
+        let doc = "## Project A\nsome content";
+        let session = "Me: project A is done";
+        let out = build_update_input(doc, session, "2026-06-11");
+        let doc_pos = out.find(doc).expect("doc must be in output");
+        let session_pos = out.find(session).expect("session input must be in output");
+        assert!(
+            doc_pos < session_pos,
+            "doc must appear before session input; doc_pos={doc_pos} session_pos={session_pos}"
+        );
+    }
+
+    #[test]
+    fn separator_between_doc_and_input() {
+        let doc = "## A\nstuff";
+        let session = "Me: update";
+        let label = "2026-06-11 — Standup";
+        let out = build_update_input(doc, session, label);
+        // Between them there must be the separator line.
+        let sep = format!("--- New meeting ({label}) ---");
+        let doc_end = out.find(doc).unwrap() + doc.len();
+        let sep_pos = out.find(&sep).unwrap();
+        let session_pos = out.find(session).unwrap();
+        assert!(doc_end < sep_pos, "separator must come after doc");
+        assert!(
+            sep_pos < session_pos,
+            "session input must come after separator"
+        );
+    }
+
+    // ---- strip_code_fence --------------------------------------------------
+
+    #[test]
+    fn strips_markdown_fence() {
+        let input = "```markdown\n## Status\ncontent\n```";
+        assert_eq!(strip_code_fence(input), "## Status\ncontent");
+    }
+
+    #[test]
+    fn strips_plain_fence() {
+        let input = "```\n## Status\ncontent\n```";
+        assert_eq!(strip_code_fence(input), "## Status\ncontent");
+    }
+
+    #[test]
+    fn no_fence_unchanged() {
+        let input = "## Status\ncontent";
+        assert_eq!(strip_code_fence(input), input);
+    }
+
+    #[test]
+    fn fence_without_closing_unchanged() {
+        // Opening fence but no closing — don't mangle it.
+        let input = "```markdown\n## Status\ncontent";
+        assert_eq!(strip_code_fence(input), input);
+    }
+
+    #[test]
+    fn fence_without_newline_after_open_unchanged() {
+        // ``` followed immediately by content (no newline) — not a real fence block.
+        let input = "```## Status\ncontent\n```";
+        assert_eq!(strip_code_fence(input), input);
+    }
+
+    #[test]
+    fn strips_with_trailing_whitespace_on_content() {
+        let input = "```markdown\n## H\ntext\n```\n\n";
+        assert_eq!(strip_code_fence(input), "## H\ntext");
+    }
+
+    #[test]
+    fn interior_fences_preserved() {
+        // A document that legitimately contains a code block inside — only the
+        // outer fence (if any) should be stripped.
+        let inner = "## Doc\n```rust\nlet x = 1;\n```\nend";
+        // Without an outer fence: unchanged.
+        assert_eq!(strip_code_fence(inner), inner);
+        // With an outer markdown fence: outer stripped, inner preserved.
+        let wrapped = format!("```markdown\n{inner}\n```");
+        assert_eq!(strip_code_fence(&wrapped), inner);
     }
 }
