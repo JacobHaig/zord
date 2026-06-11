@@ -1082,8 +1082,10 @@ fn MainApp() -> Element {
         }
     };
 
-    // Open a saved session from the sidebar: reset the per-session panels and
-    // load it (same body the session row's onclick had inline).
+    // Open a saved session: reset the per-session panels and load it (same
+    // body the session row's onclick had inline). Captures only Clone values
+    // (Engine + Copy signals), so the closure is cloned for each consumer —
+    // an EventHandler consumes its closure on construction.
     let on_open_session = {
         let engine = engine.clone();
         move |id: String| {
@@ -1102,27 +1104,8 @@ fn MainApp() -> Element {
             let _ = engine.db_tx.send(DbCmd::Load(id));
         }
     };
-
-    // Same as on_open_session but a second independent closure for the
-    // Speakers view (EventHandler consumes the closure on construction).
-    let on_open_from_speakers = {
-        let engine = engine.clone();
-        move |id: String| {
-            view.set(View::Session(id.clone()));
-            last_export.set(None);
-            summary.set(None);
-            compressed.set(None);
-            summarizing.set(false);
-            compressing.set(false);
-            diarizing.set(false);
-            retranscribing.set(false);
-            diar_speakers.set(String::new());
-            audio_files.set((None, None));
-            let _ = engine.play_tx.send(PlayCmd::Stop);
-            reset_chat(chat, chat_input, chat_busy, chat_scope);
-            let _ = engine.db_tx.send(DbCmd::Load(id));
-        }
-    };
+    // Second binding of the same closure for the Speakers view.
+    let on_open_from_speakers = on_open_session.clone();
 
     // Back to the live view; drop any panels left from a saved session viewed
     // mid-recording (the sidebar's pinned "Current recording" row).

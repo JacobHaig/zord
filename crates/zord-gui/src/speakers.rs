@@ -97,7 +97,7 @@ pub fn ConsentDialog(mut show: Signal<bool>, settings: Signal<Settings>) -> Elem
                     button {
                         class: "mbtn",
                         onclick: move |_| {
-                            let mut s = zord_config::Settings::load();
+                            let mut s = settings.peek().clone();
                             s.voiceprints_enabled = true;
                             s.voiceprints_consented_at = now_secs();
                             let _ = s.save();
@@ -416,7 +416,7 @@ pub fn VoiceprintSettings(settings: Signal<Settings>, engine: Engine) -> Element
                                             let cur = settings.peek().voiceprints_enabled;
                                             if cur {
                                                 // Turning off: keep the library, just disable.
-                                                let mut s = zord_config::Settings::load();
+                                                let mut s = settings.peek().clone();
                                                 s.voiceprints_enabled = false;
                                                 let _ = s.save();
                                                 settings.set(s);
@@ -425,7 +425,7 @@ pub fn VoiceprintSettings(settings: Signal<Settings>, engine: Engine) -> Element
                                                 show_consent.set(true);
                                             } else {
                                                 // Re-enabling after prior consent.
-                                                let mut s = zord_config::Settings::load();
+                                                let mut s = settings.peek().clone();
                                                 s.voiceprints_enabled = true;
                                                 let _ = s.save();
                                                 settings.set(s);
