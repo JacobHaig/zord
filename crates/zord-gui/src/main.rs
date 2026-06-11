@@ -2032,12 +2032,36 @@ fn SpeakerLegend(
                             segments.read().iter().filter_map(|s| s.speaker).collect();
                         spk.sort_unstable();
                         spk.dedup();
-                        if spk.is_empty() {
+                        // Integration sessions store the followed user's platform
+                        // name under the ME_SPEAKER sentinel — list it first.
+                        let me_name = speaker_names.read().get(&zord_core::ME_SPEAKER).cloned();
+                        if spk.is_empty() && me_name.is_none() {
                             rsx! {}
                         } else {
                             rsx! {
                                 div { class: "speaker-legend",
                                     span { class: "legend-label", "Speakers:" }
+                                    if let Some(me_name) = me_name {
+                                        {
+                                            let engine = engine.clone();
+                                            let id = id.clone();
+                                            rsx! {
+                                                input {
+                                                    class: "speaker-name spk-me",
+                                                    value: "{me_name}",
+                                                    placeholder: "Me",
+                                                    title: "You — the followed user's platform name",
+                                                    onchange: move |e: FormEvent| {
+                                                        let _ = engine.db_tx.send(DbCmd::RenameSpeaker {
+                                                            id: id.clone(),
+                                                            speaker: zord_core::ME_SPEAKER,
+                                                            name: e.value(),
+                                                        });
+                                                    },
+                                                }
+                                            }
+                                        }
+                                    }
                                     for idx in spk {
                                         {
                                             let val = speaker_names.read().get(&idx).cloned().unwrap_or_default();

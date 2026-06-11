@@ -3080,7 +3080,15 @@ fn run_integration_session(
                            audio: zord_integrations::AudioStream| {
                 // The followed user → "Me"; everyone else → an Others speaker.
                 let (source, speaker, track) = match role {
-                    zord_integrations::TrackRole::Me => (Source::Me, None, "me".to_string()),
+                    zord_integrations::TrackRole::Me => {
+                        // Keep the platform identity: transcripts label the Me
+                        // channel with the followed user's name (ME_SPEAKER
+                        // sentinel row) instead of a bare "Me".
+                        if !name.trim().is_empty() {
+                            announce(zord_core::ME_SPEAKER, &name);
+                        }
+                        (Source::Me, None, "me".to_string())
+                    }
                     zord_integrations::TrackRole::Speaker(idx) => {
                         announce(idx, &name);
                         (Source::Others, Some(idx), format!("spk-{idx}"))
@@ -3109,8 +3117,15 @@ fn run_integration_session(
                 }
             };
             let on_rename = |role: zord_integrations::TrackRole, name: String| {
-                if let zord_integrations::TrackRole::Speaker(idx) = role {
-                    announce(idx, &name);
+                match role {
+                    zord_integrations::TrackRole::Speaker(idx) => announce(idx, &name),
+                    // A late-resolved name for the followed user upgrades the
+                    // Me label too (same mapping gap as speaker tracks).
+                    zord_integrations::TrackRole::Me => {
+                        if !name.trim().is_empty() {
+                            announce(zord_core::ME_SPEAKER, &name);
+                        }
+                    }
                 }
             };
             match zord_integrations::drive_session(provider.as_mut(), &stopping, on_join, on_rename)
