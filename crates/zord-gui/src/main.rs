@@ -674,6 +674,9 @@ fn MainApp() -> Element {
                 Event::Playing(v) => playing_seg.set(v),
                 // Phase 38d: voiceprint library — update the Speakers view signal.
                 Event::Voiceprints(v) => voiceprints.set(v),
+                // Phase 39d: living overview document — wired in Task 39d.
+                Event::OverviewDoc { .. } => {}
+
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
                         notice.set(Some(format!("External LLM: {e}")));

@@ -185,6 +185,14 @@ pub enum Event {
     /// operation on `DbCmd::Voiceprints*`. GUI signal wired in Task 38d.
     #[allow(dead_code)] // payload read by the GUI in Task 38d
     Voiceprints(Vec<zord_store::VoiceprintInfo>),
+    /// The living overview document (Phase 39): the current markdown and when
+    /// it was last written (epoch ms). Emitted on load, after an AI update,
+    /// after a user save, and after a revert. GUI wired in Task 39d.
+    #[allow(dead_code)] // payload read by the GUI in Task 39d
+    OverviewDoc {
+        markdown: String,
+        updated_at: u64,
+    },
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -449,6 +457,16 @@ pub enum DbCmd {
     LoadOverview,
     /// Load the rolling project ledger (Phase 26) — no LLM, just reads.
     LoadLedger,
+    /// Load the living overview document (Phase 39) — emits `Event::OverviewDoc`.
+    #[allow(dead_code)] // GUI call sites wired in Task 39d
+    LoadOverviewDoc,
+    /// Persist a user-edited overview document (Phase 39): plain write (no
+    /// prev snapshot — prev is reserved for AI edits) + emit.
+    #[allow(dead_code)] // GUI call sites wired in Task 39d
+    SaveOverviewDoc(String),
+    /// Revert the last AI update: swap doc and prev in the store + emit (Phase 39).
+    #[allow(dead_code)] // GUI call sites wired in Task 39d
+    RevertOverviewDoc,
     /// Phase 26e manual edits to the ledger. Each re-emits the updated ledger.
     /// All hand edits set the `manual` flag so later auto-folds don't clobber them.
     /// Rename a project.
@@ -544,6 +562,13 @@ pub enum SummCmd {
         scope: ChatScope,
         turns: Vec<(bool, String)>,
     },
+    /// Fold one session (`Some(id)`) or every un-folded session (`None`) into
+    /// the living overview document (Phase 39). Job key "overview"; cancellable
+    /// between sessions.
+    UpdateOverviewDoc { session: Option<String> },
+    /// Re-compress every ended session with segments, oldest first (Phase 39).
+    /// Job key "recompress"; cancellable between sessions.
+    RecompressAll,
 }
 
 /// Registry of cancellable background jobs: job id → cooperative cancel flag.
@@ -661,9 +686,10 @@ impl Engine {
         {
             let ev = ev_tx.clone();
             let dbp = db_path.clone();
+            let stx = summ_tx.clone();
             thread::spawn(move || {
                 let sup = ev.clone();
-                supervise("recorder", &sup, move || control_loop(rec_rx, ev, dbp));
+                supervise("recorder", &sup, move || control_loop(rec_rx, ev, dbp, stx));
             });
         }
         {
@@ -779,6 +805,18 @@ fn summarize_loop(
             }
             SummCmd::Chat { scope, turns } => {
                 chat_one(&mut chat_model, scope, turns, &ev, &db_path);
+            }
+            SummCmd::UpdateOverviewDoc { session } => {
+                chat_model = None;
+                let token = jobs.begin(&ev, "overview", "overview", "Updating overview");
+                update_overview_doc(session.as_deref(), &ev, &db_path, &token);
+                jobs.end(&ev, "overview");
+            }
+            SummCmd::RecompressAll => {
+                chat_model = None;
+                let token = jobs.begin(&ev, "recompress", "compress", "Re-compressing transcripts");
+                recompress_all(&ev, &db_path, &token);
+                jobs.end(&ev, "recompress");
             }
         }
         #[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
@@ -914,19 +952,21 @@ fn resolve_summary_model_path(
     }
 }
 
-/// Compress a session's transcript into dense prose and store it (Phase 23).
+/// Compress a session's transcript into a condensed line-by-line form and
+/// store it (Phase 23). Returns `true` when a compression was generated and
+/// stored (so the re-compress sweep can count its work).
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
 fn compress_one(
     session_id: &str,
     ev: &UnboundedSender<Event>,
     db_path: &PathBuf,
     token: &Arc<AtomicBool>,
-) {
+) -> bool {
     let store = match Store::open(db_path) {
         Ok(s) => s,
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("db: {e}")));
-            return;
+            return false;
         }
     };
     let segs = store.segments(session_id).unwrap_or_default();
@@ -934,7 +974,7 @@ fn compress_one(
         let _ = ev.send(Event::Notice(
             "Nothing to compress in this session.".to_string(),
         ));
-        return;
+        return false;
     }
     let names = store.speaker_names(session_id).unwrap_or_default();
     let transcript = with_notes(&store, session_id, render_labeled_transcript(&segs, &names));
@@ -944,7 +984,7 @@ fn compress_one(
         "Preparing the LLM for compression…".to_string(),
     ));
     let Some(llm) = build_llm_backend(&settings, ev) else {
-        return;
+        return false;
     };
     let _ = ev.send(Event::Notice(
         "Compressing… (runs in the background)".to_string(),
@@ -956,14 +996,16 @@ fn compress_one(
     ) {
         Ok(text) => {
             if cancelled(token) {
-                return; // cancelled mid-generation → discard (detach)
+                return false; // cancelled mid-generation → discard (detach)
             }
             let _ = store.set_compressed(session_id, &text);
             let _ = ev.send(Event::Compressed(Some(text)));
             let _ = ev.send(Event::Notice("Compressed.".to_string()));
+            true
         }
         Err(e) => {
             let _ = ev.send(Event::Notice(format!("compress failed: {e}")));
+            false
         }
     }
 }
@@ -1031,6 +1073,221 @@ fn fold_overview(
     }
     if let Ok(store) = Store::open(db_path) {
         let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
+    }
+}
+
+/// Fold one or more sessions into the living overview document (Phase 39).
+/// `target_id = Some(id)` folds that session; `None` folds every un-folded
+/// ended session, oldest-first.
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+fn update_overview_doc(
+    target_id: Option<&str>,
+    ev: &UnboundedSender<Event>,
+    db_path: &std::path::Path,
+    token: &Arc<AtomicBool>,
+) {
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
+            return;
+        }
+    };
+    let settings = zord_config::Settings::load();
+    let _ = ev.send(Event::Notice(
+        "Preparing the LLM for overview update…".to_string(),
+    ));
+    let Some(llm) = build_llm_backend(&settings, ev) else {
+        return;
+    };
+
+    // Determine which sessions to fold.
+    let sessions_to_fold: Vec<zord_core::Session> = if let Some(id) = target_id {
+        match store.get_session(id) {
+            Ok(Some(s)) if s.ended_at.is_some() => vec![s],
+            _ => {
+                let _ = ev.send(Event::Notice(format!(
+                    "Session {id} not found or not yet ended — skipping."
+                )));
+                return;
+            }
+        }
+    } else {
+        let all = store.list_sessions().unwrap_or_default();
+        let mark = overview_fold_mark(&store);
+        unfolded_sessions(&all, mark).into_iter().cloned().collect()
+    };
+
+    if sessions_to_fold.is_empty() {
+        let _ = ev.send(Event::Notice(
+            "Overview is up to date — no new sessions to fold.".to_string(),
+        ));
+        return;
+    }
+
+    for session in &sessions_to_fold {
+        if cancelled(token) {
+            break;
+        }
+
+        // Build the session input: stored compression first, else raw transcript.
+        let segs = store.segments(&session.id).unwrap_or_default();
+        if segs.is_empty() {
+            // No transcript — skip (no mark bump: a later re-transcription can
+            // still make this session foldable before anything newer folds).
+            continue;
+        }
+        let session_input = match store.get_compressed(&session.id).ok().flatten() {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => {
+                let names = store.speaker_names(&session.id).unwrap_or_default();
+                render_labeled_transcript(&segs, &names)
+            }
+        };
+
+        let label = overview_session_label(session);
+        let mut progress = |note: &str| {
+            let _ = ev.send(Event::Notice(note.to_string()));
+        };
+
+        // Read the document just before this fold so we work against the latest
+        // version (important when folding multiple sessions in one run).
+        let (doc_before, ts_before) = load_overview_doc(&store);
+        let result = zord_overview::update_document(
+            &doc_before,
+            &session_input,
+            &label,
+            &llm,
+            &settings,
+            &mut progress,
+        );
+        if cancelled(token) {
+            break; // cancelled mid-generation → discard (detach)
+        }
+        let folded = match result {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("overview update failed: {e}")));
+                continue;
+            }
+        };
+
+        // Optimistic write: re-read just before writing — if the document
+        // changed underneath us (user edited mid-run), redo the fold ONCE
+        // against the fresh text. `base` is whatever the result replaces.
+        let (doc_now, ts_now) = load_overview_doc(&store);
+        let (base, folded) = if ts_now != ts_before {
+            match zord_overview::update_document(
+                &doc_now,
+                &session_input,
+                &label,
+                &llm,
+                &settings,
+                &mut progress,
+            ) {
+                Ok(d) => (doc_now, d),
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!("overview update failed: {e}")));
+                    continue;
+                }
+            }
+        } else {
+            (doc_before, folded)
+        };
+
+        // Sanity floor: when folding into a non-empty document, reject output
+        // shorter than 20% of it — keep the old doc (and _prev) and stop.
+        if !base.trim().is_empty() && folded.len() < base.len() / 5 {
+            let _ = ev.send(Event::Notice(
+                "overview update looked destructive — kept the previous document".to_string(),
+            ));
+            break;
+        }
+
+        // Snapshot the current doc to _prev, then write the new one.
+        if let Err(e) = save_overview_doc_with_snapshot(&store, &folded) {
+            let _ = ev.send(Event::Notice(format!("overview write failed: {e}")));
+            break;
+        }
+        if let Some(ended) = session.ended_at {
+            let _ = bump_overview_fold_mark(&store, ended);
+        }
+
+        // Emit the updated document.
+        let (markdown, updated_at) = load_overview_doc(&store);
+        let _ = ev.send(Event::OverviewDoc {
+            markdown,
+            updated_at,
+        });
+        let _ = ev.send(Event::Notice(format!("Overview updated from {label}.")));
+    }
+}
+
+/// Re-compress every ended session that has segments, oldest-first (Phase 39):
+/// the new line-by-line compress prompt applied over the whole library. Reuses
+/// [`compress_one`] per session; cancellable between sessions.
+#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+fn recompress_all(ev: &UnboundedSender<Event>, db_path: &PathBuf, token: &Arc<AtomicBool>) {
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
+            return;
+        }
+    };
+    // Ended sessions, oldest-first (list_sessions is newest-first); sessions
+    // without segments are filtered here so compress_one's "nothing to
+    // compress" notice doesn't spam.
+    let mut sessions: Vec<zord_core::Session> = store
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.ended_at.is_some())
+        .filter(|s| !store.segments(&s.id).unwrap_or_default().is_empty())
+        .collect();
+    sessions.reverse();
+
+    let total = sessions.len();
+    let mut count = 0usize;
+    for (i, session) in sessions.iter().enumerate() {
+        if cancelled(token) {
+            break;
+        }
+        let _ = ev.send(Event::Notice(format!(
+            "Re-compressing session {}/{total}…",
+            i + 1
+        )));
+        if compress_one(&session.id, ev, db_path, token) {
+            count += 1;
+        }
+    }
+    let _ = ev.send(Event::Notice(format!("Re-compressed {count} session(s).")));
+}
+
+/// Cheap check that an LLM backend is *configured* (mirrors
+/// [`build_llm_backend`]'s requirements without constructing anything) — safe
+/// to call from the recorder thread. Always `false` in builds without an LLM
+/// feature, so the auto overview chain no-ops there.
+#[allow(clippy::needless_return)] // cfg'd tails (same shape as chat_llm_key)
+fn llm_backend_configured(settings: &zord_config::Settings) -> bool {
+    #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
+    if use_external(settings) {
+        // External server: a model must be picked (build_llm_backend refuses
+        // otherwise; the base URL has a default).
+        return !settings.llm_model.trim().is_empty();
+    }
+    #[cfg(feature = "llm-local")]
+    {
+        // Local GGUF: a summary model must be selected (it is downloaded /
+        // resolved lazily by the worker, so "selected" is the cheap check).
+        return !settings.summary_model.trim().is_empty();
+    }
+    #[cfg(not(feature = "llm-local"))]
+    {
+        // llm-remote-only build: use_external() is always true, so this point
+        // is unreachable at runtime. Featureless build: the chain no-ops.
+        let _ = settings;
+        false
     }
 }
 
@@ -1440,6 +1697,96 @@ fn emit_sessions(store: &Store, ev: &UnboundedSender<Event>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 39 — living-overview document storage helpers
+// ---------------------------------------------------------------------------
+
+const OVERVIEW_DOC_KEY: &str = "overview_doc";
+const OVERVIEW_DOC_PREV_KEY: &str = "overview_doc_prev";
+#[allow(dead_code)] // fold bookkeeping is used by the llm-gated worker + tests
+const OVERVIEW_FOLD_MS_KEY: &str = "overview_doc_fold_ms";
+
+/// Load the living overview document. Returns `("", 0)` when nothing is stored yet.
+fn load_overview_doc(store: &Store) -> (String, u64) {
+    store
+        .get_meta(OVERVIEW_DOC_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Snapshot the current document to `*_prev`, then write the new content.
+/// Used only for AI-generated updates so `prev` can be reverted.
+#[allow(dead_code)] // used by the llm-gated fold worker + tests
+fn save_overview_doc_with_snapshot(store: &Store, doc: &str) -> anyhow::Result<()> {
+    // Snapshot: read current → write to _prev (best-effort; ignore missing).
+    if let Ok(Some((current, _))) = store.get_meta(OVERVIEW_DOC_KEY) {
+        store.set_meta(OVERVIEW_DOC_PREV_KEY, &current)?;
+    }
+    store.set_meta(OVERVIEW_DOC_KEY, doc)?;
+    Ok(())
+}
+
+/// Return the high-water fold mark (epoch ms). Sessions with `ended_at > mark`
+/// have not yet been folded. `0` means no fold has ever run.
+#[allow(dead_code)] // used by the llm-gated fold worker + tests
+fn overview_fold_mark(store: &Store) -> u64 {
+    store
+        .get_meta(OVERVIEW_FOLD_MS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|(v, _)| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Advance the high-water fold mark to `to_ms` (never decreases).
+#[allow(dead_code)] // used by the llm-gated fold worker + tests
+fn bump_overview_fold_mark(store: &Store, to_ms: u64) -> anyhow::Result<()> {
+    let current = overview_fold_mark(store);
+    if to_ms > current {
+        store.set_meta(OVERVIEW_FOLD_MS_KEY, &to_ms.to_string())?;
+    }
+    Ok(())
+}
+
+/// Ended sessions with `ended_at > mark`, sorted oldest-first (sessions still
+/// recording — `ended_at == None` — never qualify). Transcript presence is
+/// checked by the fold worker, keeping this pure for unit tests.
+#[allow(dead_code)] // used by the llm-gated fold worker + tests
+fn unfolded_sessions(sessions: &[Session], mark: u64) -> Vec<&Session> {
+    let mut out: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| s.ended_at.is_some_and(|t| t > mark))
+        .collect();
+    out.sort_by_key(|s| s.ended_at.unwrap_or(0));
+    out
+}
+
+/// "YYYY-MM-DD" (local timezone) from an epoch-ms timestamp.
+#[allow(dead_code)] // used by the llm-gated fold worker + tests
+fn fmt_date_ms(ms: u64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms as i64)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+/// Build the human-readable session label used in the overview fold:
+/// `"YYYY-MM-DD — <title or id>"` (the model uses it to date Archive entries).
+#[allow(dead_code)] // used by the llm-gated fold worker + tests
+fn overview_session_label(session: &Session) -> String {
+    let date = fmt_date_ms(session.started_at);
+    let title = session
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(&session.id);
+    format!("{date} — {title}")
+}
+
 /// Read the stored cross-meeting Overview from `app_meta` (feature-independent —
 /// the keys mirror `zord_overview`). `None` if none has been generated.
 fn load_overview(store: &Store) -> Option<OverviewData> {
@@ -1681,6 +2028,44 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             }
             DbCmd::LoadLedger => {
                 let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
+            }
+            DbCmd::LoadOverviewDoc => {
+                let (markdown, updated_at) = load_overview_doc(&store);
+                let _ = ev.send(Event::OverviewDoc {
+                    markdown,
+                    updated_at,
+                });
+            }
+            DbCmd::SaveOverviewDoc(doc) => {
+                // Plain user-edit write: no _prev snapshot (that's for AI edits).
+                let _ = store.set_meta(OVERVIEW_DOC_KEY, &doc);
+                let (markdown, updated_at) = load_overview_doc(&store);
+                let _ = ev.send(Event::OverviewDoc {
+                    markdown,
+                    updated_at,
+                });
+            }
+            DbCmd::RevertOverviewDoc => {
+                // Swap doc ↔ prev: the previous AI version becomes current again.
+                let prev = store
+                    .get_meta(OVERVIEW_DOC_PREV_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|(v, _)| v)
+                    .unwrap_or_default();
+                let current = store
+                    .get_meta(OVERVIEW_DOC_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|(v, _)| v)
+                    .unwrap_or_default();
+                let _ = store.set_meta(OVERVIEW_DOC_KEY, &prev);
+                let _ = store.set_meta(OVERVIEW_DOC_PREV_KEY, &current);
+                let (markdown, updated_at) = load_overview_doc(&store);
+                let _ = ev.send(Event::OverviewDoc {
+                    markdown,
+                    updated_at,
+                });
             }
             DbCmd::RenameProject { id, name } => {
                 let _ = store.rename_project(&id, name.trim(), now_ms());
@@ -2420,7 +2805,12 @@ fn sanitize_fts(q: &str) -> String {
 // Recording control thread
 // ---------------------------------------------------------------------------
 
-fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_path: PathBuf) {
+fn control_loop(
+    rx: mpsc::Receiver<RecorderCmd>,
+    ev: UnboundedSender<Event>,
+    db_path: PathBuf,
+    summ_tx: mpsc::Sender<SummCmd>,
+) {
     // Active microphone *test* (setup wizard) between sessions: the capture
     // source plus the stop flag of its level-pump thread. Dropped (capture
     // stops) on MicTestStop, a new MicTestStart, or a real recording Start.
@@ -2516,9 +2906,9 @@ fn control_loop(rx: mpsc::Receiver<RecorderCmd>, ev: UnboundedSender<Event>, db_
                     || std::env::var("ZORD_DISCORD").is_ok()
                     || std::env::var("ZORD_FAKE_INTEGRATION").is_ok();
                 let ended = if integration {
-                    run_integration_session(opts, &rx, &ev, &db_path)
+                    run_integration_session(opts, &rx, &ev, &db_path, &summ_tx)
                 } else {
-                    run_session(opts, &rx, &ev, &db_path)
+                    run_session(opts, &rx, &ev, &db_path, &summ_tx)
                 };
                 if ended {
                     break; // session ended due to Shutdown
@@ -2587,6 +2977,7 @@ fn run_session(
     rx: &mpsc::Receiver<RecorderCmd>,
     ev: &UnboundedSender<Event>,
     db_path: &PathBuf,
+    summ_tx: &mpsc::Sender<SummCmd>,
 ) -> bool {
     let SessionOpts {
         model,
@@ -2908,6 +3299,25 @@ fn run_session(
         ));
     }
 
+    // Auto overview chain (Phase 39): when the transcript is final, enqueue
+    // compression (if not already done) then a document fold for this session.
+    // Only when overview_auto is on and a backend is configured — the summ
+    // worker is a single thread so the ordering compress→fold is guaranteed.
+    if (post_pass || live) && settings.overview_auto && llm_backend_configured(&settings) {
+        let already_compressed = store
+            .get_compressed(&session_id)
+            .ok()
+            .flatten()
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false);
+        if !already_compressed {
+            let _ = summ_tx.send(SummCmd::Compress(session_id.clone()));
+        }
+        let _ = summ_tx.send(SummCmd::UpdateOverviewDoc {
+            session: Some(session_id.clone()),
+        });
+    }
+
     // Offline speaker diarization (accurate, source of truth) over the "Others"
     // track, then drop the temp WAV unless we're retaining it (kept audio, or
     // kept-for-re-diarization).
@@ -2954,6 +3364,7 @@ fn run_integration_session(
     rx: &mpsc::Receiver<RecorderCmd>,
     ev: &UnboundedSender<Event>,
     db_path: &PathBuf,
+    summ_tx: &mpsc::Sender<SummCmd>,
 ) -> bool {
     // No mic/desktop capture in integration mode — all audio (Me included) comes
     // from the platform's per-participant streams.
@@ -3210,7 +3621,8 @@ fn run_integration_session(
     // upgrades the live transcript with the re-transcription model. The
     // per-speaker spk-N tracks keep their ground-truth indices, so the real
     // names recorded in speaker_names re-attach to the new segments.
-    if settings.auto_transcribe {
+    let post_pass = settings.auto_transcribe;
+    if post_pass {
         post_transcribe_session(&store, &session_id, &session_dir, ev, None);
     } else if !live {
         let _ = ev.send(Event::Notice(
@@ -3219,6 +3631,23 @@ fn run_integration_session(
              in Settings)."
                 .to_string(),
         ));
+    }
+
+    // Auto overview chain (Phase 39): same as run_session — enqueue compress
+    // then fold when the transcript is final.
+    if (post_pass || live) && settings.overview_auto && llm_backend_configured(&settings) {
+        let already_compressed = store
+            .get_compressed(&session_id)
+            .ok()
+            .flatten()
+            .map(|c| !c.trim().is_empty())
+            .unwrap_or(false);
+        if !already_compressed {
+            let _ = summ_tx.send(SummCmd::Compress(session_id.clone()));
+        }
+        let _ = summ_tx.send(SummCmd::UpdateOverviewDoc {
+            session: Some(session_id.clone()),
+        });
     }
 
     #[cfg(feature = "voiceprints")]
@@ -3880,5 +4309,149 @@ mod tests {
         assert!(level < peak * 0.7, "level after silent second: {level}");
         // Always normalized.
         assert!((0.0..=1.0).contains(&level));
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 39 — living-overview fold helpers
+    // -------------------------------------------------------------------------
+
+    fn make_session(id: &str, ended_at: Option<u64>) -> zord_core::Session {
+        zord_core::Session {
+            id: id.to_string(),
+            started_at: ended_at.unwrap_or(0).saturating_sub(3_600_000),
+            ended_at,
+            title: None,
+            audio_path: None,
+            model: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn unfolded_sessions_empty_when_all_below_mark() {
+        let sessions = vec![make_session("a", Some(1000)), make_session("b", Some(2000))];
+        let result = unfolded_sessions(&sessions, 2000);
+        assert!(result.is_empty(), "no sessions above mark 2000");
+    }
+
+    #[test]
+    fn unfolded_sessions_returns_above_mark_oldest_first() {
+        let sessions = vec![
+            make_session("newest", Some(5000)),
+            make_session("middle", Some(3000)),
+            make_session("old", Some(1000)),
+        ];
+        let result = unfolded_sessions(&sessions, 500);
+        assert_eq!(result.len(), 3);
+        // oldest-first order by ended_at
+        assert_eq!(result[0].id, "old");
+        assert_eq!(result[1].id, "middle");
+        assert_eq!(result[2].id, "newest");
+    }
+
+    #[test]
+    fn unfolded_sessions_skips_live_sessions() {
+        // Sessions with ended_at = None are still recording — must not appear.
+        let sessions = vec![make_session("live", None), make_session("done", Some(2000))];
+        let result = unfolded_sessions(&sessions, 1000);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "done");
+    }
+
+    #[test]
+    fn unfolded_sessions_mark_is_exclusive() {
+        // ended_at == mark is NOT considered un-folded.
+        let sessions = vec![
+            make_session("at-mark", Some(1000)),
+            make_session("after-mark", Some(1001)),
+        ];
+        let result = unfolded_sessions(&sessions, 1000);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "after-mark");
+    }
+
+    #[test]
+    fn load_overview_doc_returns_empty_when_unset() {
+        let dir = std::env::temp_dir().join(format!("zord-ovdoc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        let store = zord_store::Store::open(&db).unwrap();
+
+        let (text, ts) = load_overview_doc(&store);
+        assert!(text.is_empty());
+        assert_eq!(ts, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_overview_doc_with_snapshot_round_trips() {
+        let dir = std::env::temp_dir().join(format!("zord-snap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        let store = zord_store::Store::open(&db).unwrap();
+
+        // First write: no prev (nothing to snapshot yet).
+        save_overview_doc_with_snapshot(&store, "v1").unwrap();
+        let (text, _) = load_overview_doc(&store);
+        assert_eq!(text, "v1");
+
+        // Second write: prev should now hold "v1".
+        save_overview_doc_with_snapshot(&store, "v2").unwrap();
+        let (text, _) = load_overview_doc(&store);
+        assert_eq!(text, "v2");
+        let prev = store
+            .get_meta(OVERVIEW_DOC_PREV_KEY)
+            .unwrap()
+            .map(|(v, _)| v);
+        assert_eq!(prev.as_deref(), Some("v1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fold_mark_round_trips() {
+        let dir = std::env::temp_dir().join(format!("zord-fmark-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        let store = zord_store::Store::open(&db).unwrap();
+
+        assert_eq!(overview_fold_mark(&store), 0);
+
+        bump_overview_fold_mark(&store, 12345).unwrap();
+        assert_eq!(overview_fold_mark(&store), 12345);
+
+        // Bumping to a lower value must not decrease the mark.
+        bump_overview_fold_mark(&store, 100).unwrap();
+        assert_eq!(overview_fold_mark(&store), 12345);
+
+        bump_overview_fold_mark(&store, 99999).unwrap();
+        assert_eq!(overview_fold_mark(&store), 99999);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overview_session_label_uses_title_else_id() {
+        // 2026-06-11 12:00 UTC — mid-day so every timezone agrees on the year.
+        let mut s = make_session("sess-99", Some(1_781_179_200_000));
+        s.started_at = 1_781_179_200_000;
+        let label = overview_session_label(&s);
+        assert!(label.ends_with(" — sess-99"), "id fallback: {label}");
+        // Date prefix is YYYY-MM-DD (local timezone, so only check the shape).
+        let date = label.split(" — ").next().unwrap();
+        assert_eq!(date.len(), 10, "date shape: {date}");
+        assert!(date.starts_with("202"), "plausible year: {date}");
+
+        s.title = Some("  Standup  ".into());
+        let label = overview_session_label(&s);
+        assert!(label.ends_with(" — Standup"), "trimmed title: {label}");
+
+        // Whitespace-only title falls back to the id.
+        s.title = Some("   ".into());
+        let label = overview_session_label(&s);
+        assert!(label.ends_with(" — sess-99"), "blank title: {label}");
     }
 }
