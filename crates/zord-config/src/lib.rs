@@ -174,6 +174,10 @@ pub struct Settings {
     /// Unix time the user accepted the voiceprint consent dialog (0 = never).
     #[serde(default)]
     pub voiceprints_consented_at: u64,
+    /// Update the living Overview document automatically after each recording
+    /// is transcribed & compressed (Phase 39). Manual "Update now" always works.
+    #[serde(default = "default_true")]
+    pub overview_auto: bool,
     /// Transcribe while recording (Phase 25). Off = capture-only: meters + WAV
     /// writing only (~no CPU, no model RAM — for low-power machines where live
     /// whisper bursts stutter the webcam); transcription runs when you stop.
@@ -293,22 +297,36 @@ pub fn overview_prompt() -> &'static str {
      statuses; if something is unknown, say so."
 }
 
-/// System prompt for **compressing** a meeting transcript into token-minimal
-/// dense prose (Phase 23). The output is working memory for the cross-meeting
-/// Overview synthesis — written for a machine to re-read, not for a human — so it
-/// drops all formatting and pleasantries while keeping every concrete fact.
+/// System prompt for **compressing** a meeting transcript into a faithful
+/// line-by-line condensation (Phase 39). Each speaker's utterance is reworded
+/// to its shortest faithful form while preserving speaker labels and original
+/// order — the output is a condensed transcript, not a digest.
 pub fn compress_prompt() -> &'static str {
-    "You compress a meeting transcript into the most information-dense form \
-     possible, to be re-read later by another model — not by a human. Preserve \
-     every concrete fact while removing all redundancy, filler, hedging, and \
-     pleasantries. Write FREE-FORM DENSE PROSE: compact declarative sentences, \
-     no headings, no bullet lists, no markdown. Capture which projects/topics \
-     were discussed and their current state; action items as owner → task → \
-     status; what was completed and by whom; decisions made; and open questions \
-     or blockers. Attribute facts to the speaker labels in the transcript (\"Me\" \
-     is the local user; others appear by name or as \"Speaker N\"). Prefer names \
-     and specifics over vague references. Omit nothing factual; invent nothing. \
-     Be as short as the facts allow."
+    "You condense a meeting transcript line by line. Keep every speaker label \
+     (\"Name:\" format) and preserve the original order. Reword each utterance \
+     to its shortest faithful form — for example: \"What I've been working on \
+     this morning and will continue to work on is the CI/CD process, and I \
+     should be done by end of today, at which point Jerry will review\" becomes \
+     \"continuing CI/CD work, done by EOD; Jerry reviews after\". Pure-filler \
+     lines (greetings, acknowledgements, backchannel agreement) may be dropped \
+     entirely. NEVER add headings, bullets, synthesized summaries, tasks, \
+     decisions, interpretation, or reorder or merge distinct statements; invent nothing. \
+     Output ONLY the condensed transcript lines in the same \"Name: text\" format."
+}
+
+/// System prompt for the Phase 39 **living-document** Overview maintainer.
+/// Takes the current Overview markdown and a new meeting's condensed transcript,
+/// and returns the full updated document.
+pub fn overview_doc_prompt() -> &'static str {
+    "You maintain a running markdown status document organized by project \
+     (\"##\" sections). Fold the new meeting's condensed transcript in: update \
+     affected sections in place; create a new section only for a clearly \
+     distinct ongoing project. Track action items as \"- [ ]\" / \"- [x]\" with \
+     owners; check off items that were completed. Move resolved or stale content \
+     to a trailing \"## Archive\" section with the date; delete Archive entries \
+     older than 30 days. Preserve any user-written content and wording you are \
+     not updating — the user edits this document too. Output the FULL updated \
+     document and nothing else — no commentary, no code fences."
 }
 
 /// System prompt for the Phase 26 **structured extract**: read ONE meeting and
@@ -557,6 +575,7 @@ impl Default for Settings {
             mic_gain_db: 0.0,
             others_level_mode: default_level_mode(),
             others_gain_db: 0.0,
+            overview_auto: true,
             live_transcription: true,
             retranscribe_model: default_retranscribe_model(),
             auto_transcribe: false,
@@ -978,5 +997,22 @@ mod tests {
         assert_eq!(voiceprint_threshold(&s.voiceprints_match), 0.72);
         assert_eq!(voiceprint_threshold("strict"), 0.78);
         assert_eq!(voiceprint_threshold("bogus"), 0.72);
+    }
+
+    #[test]
+    fn phase39_prompts_and_defaults() {
+        let c = compress_prompt().to_lowercase();
+        assert!(
+            c.contains("line"),
+            "compress prompt must demand line-by-line output"
+        );
+        assert!(
+            !c.contains("action item"),
+            "compress prompt must not synthesize"
+        );
+        let o = overview_doc_prompt().to_lowercase();
+        assert!(o.contains("archive") && o.contains("30 days"));
+        assert!(o.contains("full updated document"));
+        assert!(Settings::default().overview_auto);
     }
 }
