@@ -1090,6 +1090,7 @@ fn MainApp() -> Element {
             SessionsSidebar {
                 sidebar_w,
                 sessions,
+                live_session_id,
                 session_filter,
                 session_badges,
                 view,
@@ -1396,6 +1397,11 @@ fn IconRail(
 fn SessionsSidebar(
     sidebar_w: Signal<u32>,
     sessions: Signal<Vec<Session>>,
+    /// The in-progress recording's session id. Its row is the pinned
+    /// "Current recording" entry — keep it OUT of the saved-session list
+    /// until the recording fully ends (mid-recording refreshes like
+    /// auto-titling or the compress sweep re-emit the list while it's live).
+    live_session_id: Signal<Option<String>>,
     mut session_filter: Signal<String>,
     session_badges: Signal<std::collections::HashMap<String, (bool, bool, bool)>>,
     view: Signal<View>,
@@ -1454,9 +1460,14 @@ fn SessionsSidebar(
                         let q = session_filter.read().to_lowercase();
                         let now = now_ms();
                         let mut last_group: Option<&'static str> = None;
+                        let live = live_session_id.read().clone();
                         let items: Vec<(Option<&'static str>, Session)> = sessions
                             .read()
                             .iter()
+                            // The live recording is the pinned row above, not a
+                            // saved session yet — it joins this list at Idle
+                            // (mid-recording list refreshes must not leak it in).
+                            .filter(|s| live.as_deref() != Some(s.id.as_str()))
                             .filter(|s| q.is_empty() || session_title(s).to_lowercase().contains(q.as_str()))
                             .cloned()
                             .map(|s| {
