@@ -1725,6 +1725,36 @@ backends (`WhisperBackend` via `WhisperInnerContext`; `ParakeetBackend` via
 crates, so no additional unsafe code was needed. Settings UI in
 Transcription → "Parallel transcription workers" select (1–4).
 
+### Phase 42 — Session timeline: multi-track audio reconstructor (planned)
+A collapsible **timeline panel at the bottom of the session view** (toggled
+from the toolbar — not a standing panel) that puts a session's audio back
+together and makes it scrubbable. Born as a debugging tool: "sometimes the
+transcriptions aren't pulling the audio through correctly — clipping or
+missing vocals" — replaying the real tracks against the transcript answers
+whether the audio or the transcription dropped the words.
+- **One lane per track** (`me`, `others`, Discord `spk-N`), each with a
+  checkbox to include/exclude it from playback and labeled with the
+  speaker's name (speaker_names / me_speaker tag) in their lane color
+  (theme `--me`/`--others` + the spk palette).
+- **Amplitude graph per lane** under the scrubber: peak/RMS buckets
+  (~1–2k per session) computed by a streaming engine worker through the
+  existing wav/opus readers (hour-long files never slurped whole), cached
+  per session. For Discord sessions each lane is naturally one person, so
+  activity reads smoothly per speaker; for mic/desktop sessions the
+  **Others lane is colored by diarized speaker spans** (segment
+  t_start/t_end + speaker index) — the graph shows *who* is talking, not
+  just that the channel had energy.
+- **Scrub + play from anywhere**: click/drag a playhead; playback mixes
+  the enabled lanes from that offset (extends the per-line rodio replay
+  into a small N-track mixer using `read_audio_slice_ms`-style streaming);
+  pause/resume; the playhead tracks during playback.
+- **Transcript sync**: the transcript auto-scrolls/highlights the line
+  under the playhead (reuse the scroll-to-segment mechanism), and a
+  per-line "jump to timeline" affordance seeks the playhead to that line —
+  the round-trip that makes clip-vs-transcription triage one click.
+- Works on aged sessions (`.opus`) and legacy flat layouts via
+  `resolve_track`; lanes with no surviving audio render disabled.
+
 ---
 
 ## 10. Open questions to revisit during build
