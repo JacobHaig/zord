@@ -537,8 +537,8 @@ fn MainApp() -> Element {
                     // Recording finished while watching Live → follow into the
                     // just-saved session and watch its (post-)transcription
                     // stream in. Never yank the view off another session.
-                    let finished = matches!(*status.peek(), Status::Recording)
-                        && matches!(s, Status::Idle);
+                    let finished =
+                        matches!(*status.peek(), Status::Recording) && matches!(s, Status::Idle);
                     status.set(s);
                     if finished {
                         if matches!(&*view.peek(), View::Live) {

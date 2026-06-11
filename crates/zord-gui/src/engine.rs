@@ -81,7 +81,10 @@ pub enum Event {
     /// A session's full transcript: the result of [`DbCmd::Load`], plus live
     /// refreshes while that session is re-/post-transcribed or diarized. The
     /// id lets the GUI drop refreshes for sessions it isn't showing.
-    Transcript { id: String, segments: Vec<Segment> },
+    Transcript {
+        id: String,
+        segments: Vec<Segment>,
+    },
     /// A transcript was exported to this path.
     Exported(String),
     /// The model catalog with current download status.
