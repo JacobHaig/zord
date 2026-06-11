@@ -407,7 +407,37 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .badge.tint-audio { color: var(--muted); }
 
 
-/* Overview view */
+/* Overview document view (Phase 39d) */
+.overview-doc-view { display: flex; flex-direction: column; gap: 12px; height: 100%; }
+.overview-doc-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; }
+.overview-doc-toolbar h2 { margin: 0; font-size: 18px; }
+.overview-doc-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.overview-doc-stamp { font-size: 12px; color: var(--muted); }
+.overview-doc-confirm { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.overview-doc-editor { flex: 1; min-height: 0; width: 100%; resize: none; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: var(--r-md); padding: 14px 16px; font: 13px/1.6 ui-monospace, monospace; outline: none; }
+
+/* Markdown document typography (.md-doc) */
+.md-doc { flex: 1; min-height: 0; overflow-y: auto; max-width: 72ch; line-height: 1.65; font-size: 14px; color: var(--text); }
+.md-doc h1 { font-size: 20px; font-weight: 700; margin: 20px 0 10px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.md-doc h2 { font-size: 17px; font-weight: 700; margin: 18px 0 8px; color: var(--text); }
+.md-doc h3 { font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+.md-doc p { margin: 0 0 10px; }
+.md-doc ul, .md-doc ol { padding-left: 22px; margin: 0 0 10px; }
+.md-doc li { margin-bottom: 4px; }
+.md-doc ul li.task-list-item { list-style: none; margin-left: -18px; padding-left: 0; }
+.md-doc li.task-list-item input[type="checkbox"] { pointer-events: none; accent-color: var(--accent); margin-right: 6px; }
+.md-doc code { font: 12px/1.5 ui-monospace, monospace; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 5px; }
+.md-doc pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; overflow-x: auto; margin: 0 0 12px; }
+.md-doc pre code { background: none; border: none; padding: 0; }
+.md-doc table { border-collapse: collapse; width: 100%; margin: 0 0 12px; font-size: 13px; }
+.md-doc th, .md-doc td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; }
+.md-doc th { background: var(--panel-2); font-weight: 600; }
+.md-doc blockquote { border-left: 3px solid var(--accent-soft); margin: 0 0 10px 0; padding: 4px 0 4px 14px; color: var(--muted); }
+.md-doc hr { border: none; border-top: 1px solid var(--line); margin: 16px 0; }
+.md-doc a { color: var(--accent); text-decoration: none; }
+.md-doc a:hover { text-decoration: underline; }
+
+/* Legacy overview section styles (kept inert — tables still exist in DB) */
 .overview { display: flex; flex-direction: column; gap: 12px; }
 .overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .overview-head h2 { margin: 0; font-size: 18px; }

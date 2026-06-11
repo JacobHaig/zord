@@ -62,3 +62,6 @@ self-replace = { version = "1", optional = true }
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # Local-timezone date display in the session list.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Markdown rendering for the living Overview document (Phase 39d).
+# default-features = false drops the html5ever/SIMD deps; we only need push_html.
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }

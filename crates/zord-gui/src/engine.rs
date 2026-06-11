@@ -111,11 +111,6 @@ pub enum Event {
     Notes(Option<String>),
     /// Sessions whose notes matched a search: `(session_id, notes)`.
     NoteResults(Vec<(String, String)>),
-    /// The cross-meeting Overview rollup (loaded or freshly synthesized)
-    /// (Phase 23). `None` = none generated yet.
-    Overview(Option<OverviewData>),
-    /// The rolling project ledger (Phase 26), loaded or after a fold/rebuild.
-    Ledger(LedgerView),
     /// An assistant reply to a chat question (Phase 23d). `scope` says which
     /// conversation it belongs to. (Only produced in `summaries` builds.)
     #[allow(dead_code)]
@@ -187,8 +182,7 @@ pub enum Event {
     Voiceprints(Vec<zord_store::VoiceprintInfo>),
     /// The living overview document (Phase 39): the current markdown and when
     /// it was last written (epoch ms). Emitted on load, after an AI update,
-    /// after a user save, and after a revert. GUI wired in Task 39d.
-    #[allow(dead_code)] // payload read by the GUI in Task 39d
+    /// after a user save, and after a revert.
     OverviewDoc {
         markdown: String,
         updated_at: u64,
@@ -201,65 +195,6 @@ pub enum Event {
 pub enum ChatScope {
     Meeting(String),
     CrossMeeting,
-}
-
-/// The cross-meeting Overview rollup for the GUI (feature-independent mirror of
-/// `zord_overview::Overview`, so the event type compiles without `summaries`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct OverviewData {
-    pub text: String,
-    /// When it was generated (epoch ms).
-    pub generated_at: u64,
-    /// How many meetings it covered.
-    pub meetings: usize,
-}
-
-/// The rolling project ledger for the GUI (Phase 26): a feature-independent
-/// mirror of the `zord-store` rows, so the event type compiles without an LLM
-/// backend. Active projects first; each carries its items.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct LedgerView {
-    pub projects: Vec<ProjectView>,
-    /// Meetings recorded but not yet folded into the ledger (drives the
-    /// "Refresh — N new" affordance). No LLM work happens until the user asks.
-    pub pending: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProjectView {
-    pub id: String,
-    pub name: String,
-    /// "active" | "archived".
-    pub status: String,
-    pub description: Option<String>,
-    pub last_activity: u64,
-    pub items: Vec<ItemView>,
-}
-
-impl ProjectView {
-    /// Items that are still open/blocked/waiting (not done).
-    pub fn active_items(&self) -> impl Iterator<Item = &ItemView> {
-        self.items.iter().filter(|i| i.status != "done")
-    }
-    /// Completed items (history).
-    pub fn done_items(&self) -> impl Iterator<Item = &ItemView> {
-        self.items.iter().filter(|i| i.status == "done")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ItemView {
-    pub id: String,
-    /// "action" | "question" | "decision".
-    pub kind: String,
-    pub text: String,
-    pub owner: Option<String>,
-    /// "open" | "blocked" | "waiting" | "done".
-    pub status: String,
-    /// Session that marked it done (provenance), if any.
-    pub completed_session: Option<String>,
-    /// Hand-edited (protected from automatic folds).
-    pub manual: bool,
 }
 
 /// A model in the catalog plus whether it's downloaded locally. `kind` is
@@ -453,64 +388,13 @@ pub enum DbCmd {
         id: String,
         notes: String,
     },
-    /// Load the most recently stored cross-meeting Overview (Phase 23).
-    LoadOverview,
-    /// Load the rolling project ledger (Phase 26) — no LLM, just reads.
-    LoadLedger,
     /// Load the living overview document (Phase 39) — emits `Event::OverviewDoc`.
-    #[allow(dead_code)] // GUI call sites wired in Task 39d
     LoadOverviewDoc,
     /// Persist a user-edited overview document (Phase 39): plain write (no
     /// prev snapshot — prev is reserved for AI edits) + emit.
-    #[allow(dead_code)] // GUI call sites wired in Task 39d
     SaveOverviewDoc(String),
     /// Revert the last AI update: swap doc and prev in the store + emit (Phase 39).
-    #[allow(dead_code)] // GUI call sites wired in Task 39d
     RevertOverviewDoc,
-    /// Phase 26e manual edits to the ledger. Each re-emits the updated ledger.
-    /// All hand edits set the `manual` flag so later auto-folds don't clobber them.
-    /// Rename a project.
-    RenameProject {
-        id: String,
-        name: String,
-    },
-    /// Set a project's one-line description/state.
-    SetProjectDescription {
-        id: String,
-        description: String,
-    },
-    /// Flip a project between active and archived.
-    SetProjectArchived {
-        id: String,
-        archived: bool,
-    },
-    /// Delete a project and all its items.
-    DeleteProject(String),
-    /// Edit an item's text and/or owner (owner empty = clear).
-    EditItem {
-        id: String,
-        text: String,
-        owner: String,
-    },
-    /// Set an item's lifecycle status (open/blocked/waiting/done).
-    SetItemStatus {
-        id: String,
-        status: String,
-    },
-    /// Move an item to another project.
-    MoveItem {
-        item_id: String,
-        project_id: String,
-    },
-    /// Delete a single item.
-    DeleteItem(String),
-    /// Add a hand-written item to a project.
-    AddItem {
-        project_id: String,
-        kind: String,
-        text: String,
-        owner: String,
-    },
 }
 
 /// Replay commands for the playback worker. The rodio output stream is `!Send`
@@ -549,12 +433,6 @@ pub enum SummCmd {
     Summarize(String),
     /// Generate the dense-prose compression (Phase 23).
     Compress(String),
-    /// Synthesize the legacy cross-meeting Overview (Phase 23).
-    Overview,
-    /// Fold meetings into the rolling project ledger (Phase 26). `rebuild=false`
-    /// folds only not-yet-applied sessions (lazy refresh); `rebuild=true` wipes
-    /// the ledger and replays every meeting (DESTRUCTIVE to manual edits).
-    FoldOverview { rebuild: bool },
     /// Answer a chat question grounded in a meeting / all meetings (Phase 23d).
     /// `turns` is the full conversation so far (incl. the new question last);
     /// each turn is `(is_user, text)`.
@@ -791,18 +669,6 @@ fn summarize_loop(
                 compress_one(&id, &ev, &db_path, &token);
                 jobs.end(&ev, &jid);
             }
-            SummCmd::Overview => {
-                chat_model = None;
-                let token = jobs.begin(&ev, "overview", "overview", "Synthesizing overview");
-                overview_one(&ev, &db_path, &token);
-                jobs.end(&ev, "overview");
-            }
-            SummCmd::FoldOverview { rebuild } => {
-                chat_model = None;
-                let token = jobs.begin(&ev, "overview", "overview", "Updating project ledger");
-                fold_overview(&ev, &db_path, rebuild, &token);
-                jobs.end(&ev, "overview");
-            }
             SummCmd::Chat { scope, turns } => {
                 chat_one(&mut chat_model, scope, turns, &ev, &db_path);
             }
@@ -1007,72 +873,6 @@ fn compress_one(
             let _ = ev.send(Event::Notice(format!("compress failed: {e}")));
             false
         }
-    }
-}
-
-/// Synthesize the cross-meeting Overview (Phase 23). Long-running; progress is
-/// relayed as notices, the result emitted as `Event::Overview`.
-#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn overview_one(ev: &UnboundedSender<Event>, db_path: &std::path::Path, token: &Arc<AtomicBool>) {
-    let settings = zord_config::Settings::load();
-    let _ = ev.send(Event::Notice("Preparing the LLM…".to_string()));
-    let Some(llm) = build_llm_backend(&settings, ev) else {
-        return;
-    };
-    let mut progress = |note: &str| {
-        let _ = ev.send(Event::Notice(note.to_string()));
-    };
-    match zord_overview::synthesize(db_path, &settings, &llm, &mut progress) {
-        Ok(o) => {
-            if cancelled(token) {
-                return; // cancelled mid-synthesis → discard (detach)
-            }
-            let _ = ev.send(Event::Overview(Some(OverviewData {
-                text: o.text,
-                generated_at: o.generated_at_ms,
-                meetings: o.meetings,
-            })));
-        }
-        Err(e) => {
-            let _ = ev.send(Event::Notice(format!("overview failed: {e}")));
-        }
-    }
-}
-
-/// Fold meetings into the rolling project ledger (Phase 26). `rebuild` wipes the
-/// ledger and replays every meeting (destructive); otherwise only not-yet-folded
-/// sessions are applied. Progress is relayed as notices; the refreshed ledger is
-/// emitted as `Event::Ledger` (also on failure, so the UI reflects partial work).
-#[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn fold_overview(
-    ev: &UnboundedSender<Event>,
-    db_path: &std::path::Path,
-    rebuild: bool,
-    token: &Arc<AtomicBool>,
-) {
-    let settings = zord_config::Settings::load();
-    let _ = ev.send(Event::Notice("Preparing the LLM…".to_string()));
-    let Some(llm) = build_llm_backend(&settings, ev) else {
-        // Still refresh the ledger so the panel shows current state.
-        if let Ok(store) = Store::open(db_path) {
-            let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-        }
-        return;
-    };
-    let _ = token; // fold persists per-meeting (resumable); cancel just drops the panel entry
-    let mut progress = |note: &str| {
-        let _ = ev.send(Event::Notice(note.to_string()));
-    };
-    let result = if rebuild {
-        zord_overview::rebuild_from_history(db_path, &settings, &llm, &mut progress)
-    } else {
-        zord_overview::fold_pending(db_path, &settings, &llm, &mut progress)
-    };
-    if let Err(e) = result {
-        let _ = ev.send(Event::Notice(format!("overview fold failed: {e}")));
-    }
-    if let Ok(store) = Store::open(db_path) {
-        let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
     }
 }
 
@@ -1764,56 +1564,6 @@ fn overview_session_label(session: &Session) -> String {
     format!("{date} — {title}")
 }
 
-/// Read the stored cross-meeting Overview from `app_meta` (feature-independent —
-/// the keys mirror `zord_overview`). `None` if none has been generated.
-fn load_overview(store: &Store) -> Option<OverviewData> {
-    let (text, generated_at) = store.get_meta("overview").ok().flatten()?;
-    let meetings = store
-        .get_meta("overview_meetings")
-        .ok()
-        .flatten()
-        .and_then(|(v, _)| v.parse().ok())
-        .unwrap_or(0);
-    Some(OverviewData {
-        text,
-        generated_at,
-        meetings,
-    })
-}
-
-/// Read the whole project ledger (Phase 26) into the GUI mirror types, plus the
-/// count of meetings not yet folded. Best-effort: read errors yield an empty
-/// ledger rather than failing the UI.
-fn build_ledger_view(store: &Store) -> LedgerView {
-    let mut projects = Vec::new();
-    for p in store.list_projects().unwrap_or_default() {
-        let items = store
-            .list_items(&p.id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|it| ItemView {
-                id: it.id,
-                kind: it.kind.as_str().to_string(),
-                text: it.text,
-                owner: it.owner,
-                status: it.status.as_str().to_string(),
-                completed_session: it.completed_session,
-                manual: it.manual,
-            })
-            .collect();
-        projects.push(ProjectView {
-            id: p.id,
-            name: p.name,
-            status: p.status.as_str().to_string(),
-            description: p.description,
-            last_activity: p.last_activity_at,
-            items,
-        });
-    }
-    let pending = store.unapplied_sessions().map(|v| v.len()).unwrap_or(0);
-    LedgerView { projects, pending }
-}
-
 // ---------------------------------------------------------------------------
 // DB query thread
 // ---------------------------------------------------------------------------
@@ -1999,13 +1749,6 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = store.forget_all_voiceprints();
                 let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
             }
-            DbCmd::LoadOverview => {
-                let data = load_overview(&store);
-                let _ = ev.send(Event::Overview(data));
-            }
-            DbCmd::LoadLedger => {
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
             DbCmd::LoadOverviewDoc => {
                 let (markdown, updated_at) = load_overview_doc(&store);
                 let _ = ev.send(Event::OverviewDoc {
@@ -2043,94 +1786,6 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     markdown,
                     updated_at,
                 });
-            }
-            DbCmd::RenameProject { id, name } => {
-                let _ = store.rename_project(&id, name.trim(), now_ms());
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::SetProjectDescription { id, description } => {
-                let desc = description.trim();
-                let _ = store.set_project_description(
-                    &id,
-                    (!desc.is_empty()).then_some(desc),
-                    now_ms(),
-                );
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::SetProjectArchived { id, archived } => {
-                let status = if archived {
-                    zord_core::ProjectStatus::Archived
-                } else {
-                    zord_core::ProjectStatus::Active
-                };
-                let _ = store.set_project_status(&id, status, now_ms());
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::DeleteProject(id) => {
-                let _ = store.delete_project(&id);
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::EditItem { id, text, owner } => {
-                let owner = owner.trim();
-                let now = now_ms();
-                let _ = store.update_item_text(
-                    &id,
-                    text.trim(),
-                    (!owner.is_empty()).then_some(owner),
-                    now,
-                );
-                let _ = store.set_item_manual(&id, true); // protect the hand edit
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::SetItemStatus { id, status } => {
-                let st = zord_core::ItemStatus::parse(&status);
-                let now = now_ms();
-                // A manual completion records no session; reopening clears it.
-                let completed = if st == zord_core::ItemStatus::Done {
-                    Some("manual")
-                } else {
-                    None
-                };
-                let _ = store.update_item_status(&id, st, Some("manual"), completed, now);
-                let _ = store.set_item_manual(&id, true);
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::MoveItem {
-                item_id,
-                project_id,
-            } => {
-                let _ = store.move_item(&item_id, &project_id, now_ms());
-                let _ = store.set_item_manual(&item_id, true);
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::DeleteItem(id) => {
-                let _ = store.delete_item(&id);
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
-            }
-            DbCmd::AddItem {
-                project_id,
-                kind,
-                text,
-                owner,
-            } => {
-                let now = now_ms();
-                let owner = owner.trim();
-                let item = zord_core::ProjectItem {
-                    id: format!("manual-{now}"),
-                    project_id,
-                    kind: zord_core::ItemKind::parse(&kind),
-                    text: text.trim().to_string(),
-                    owner: (!owner.is_empty()).then(|| owner.to_string()),
-                    status: zord_core::ItemStatus::Open,
-                    created_session: None,
-                    updated_session: None,
-                    completed_session: None,
-                    created_at: now,
-                    updated_at: now,
-                    manual: true,
-                };
-                let _ = store.add_item(&item);
-                let _ = ev.send(Event::Ledger(build_ledger_view(&store)));
             }
             DbCmd::Diarize { id, num_speakers } => {
                 // Remember the chosen count on the session for next time.

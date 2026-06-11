@@ -4,6 +4,7 @@
 
 mod engine;
 mod osutil;
+mod overview;
 mod speakers;
 #[cfg(feature = "self-update")]
 mod update;
@@ -12,8 +13,8 @@ mod wizard;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{
-    AudioFiles, ChatScope, DbCmd, Engine, Event, ItemView, LedgerView, ModelCmd, ModelInfo,
-    OverviewData, PlayCmd, ProjectView, RecorderCmd, Status, SummCmd,
+    AudioFiles, ChatScope, DbCmd, Engine, Event, ModelCmd, ModelInfo, PlayCmd, RecorderCmd, Status,
+    SummCmd,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -184,47 +185,6 @@ struct JobView {
     kind: String,
     label: String,
     started_at: u64,
-}
-
-/// A manual edit to the project ledger (Phase 26e). Carried by a single
-/// `EventHandler<LedgerAction>` so the ledger components stay decoupled from the
-/// `Engine` (which isn't `PartialEq` and so can't be a component prop); the App
-/// translates each into the matching [`DbCmd`].
-#[derive(Clone, PartialEq)]
-enum LedgerAction {
-    RenameProject {
-        id: String,
-        name: String,
-    },
-    SetDescription {
-        id: String,
-        description: String,
-    },
-    Archive {
-        id: String,
-        archived: bool,
-    },
-    DeleteProject(String),
-    EditItem {
-        id: String,
-        text: String,
-        owner: String,
-    },
-    SetItemStatus {
-        id: String,
-        status: String,
-    },
-    MoveItem {
-        item_id: String,
-        project_id: String,
-    },
-    DeleteItem(String),
-    AddItem {
-        project_id: String,
-        kind: String,
-        text: String,
-        owner: String,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -445,11 +405,13 @@ fn MainApp() -> Element {
     let mut me_speaker = use_signal(|| Option::<i32>::None);
     // The transcript line (db id) currently playing back.
     let mut playing_seg = use_signal(|| Option::<i64>::None);
-    // Cross-meeting Overview rollup (Phase 23c) + whether a synthesis is running.
-    let mut overview = use_signal(|| Option::<OverviewData>::None);
+    // Phase 39d: living overview document signals.
+    let mut overview_doc = use_signal(String::new);
+    let mut overview_doc_updated = use_signal(|| 0u64);
+    let overview_editing = use_signal(|| false);
+    let overview_draft = use_signal(String::new);
+    // overview_busy is kept so the job-cancel handler can clear it.
     let mut overview_busy = use_signal(|| false);
-    // Phase 26: the rolling project ledger (the Overview view is now this).
-    let mut ledger = use_signal(|| Option::<LedgerView>::None);
     // Chat (Phase 23d): the active conversation (per-meeting or cross-meeting),
     // its input buffer, busy flag, and which scope the history belongs to.
     let mut chat = use_signal(Vec::<(bool, String)>::new);
@@ -602,12 +564,14 @@ fn MainApp() -> Element {
                     notes.set(v); // the drawer tab shows a dot when present
                 }
                 Event::NoteResults(v) => note_results.set(v),
-                Event::Overview(v) => {
-                    overview.set(v);
-                    overview_busy.set(false);
-                }
-                Event::Ledger(v) => {
-                    ledger.set(Some(v));
+                Event::OverviewDoc {
+                    markdown,
+                    updated_at,
+                } => {
+                    // Don't clobber the user's open editor — update the backing
+                    // doc and stamp; the rendered view re-derives from doc.
+                    overview_doc.set(markdown);
+                    overview_doc_updated.set(updated_at);
                     overview_busy.set(false);
                 }
                 Event::ChatReply { scope, reply } => {
@@ -674,8 +638,6 @@ fn MainApp() -> Element {
                 Event::Playing(v) => playing_seg.set(v),
                 // Phase 38d: voiceprint library — update the Speakers view signal.
                 Event::Voiceprints(v) => voiceprints.set(v),
-                // Phase 39d: living overview document — wired in Task 39d.
-                Event::OverviewDoc { .. } => {}
 
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
@@ -735,6 +697,8 @@ fn MainApp() -> Element {
         // Phase 38d: pre-load the voiceprint library so the Speakers view is
         // ready when the user first navigates to it (harmless when empty).
         let _ = engine.db_tx.send(DbCmd::Voiceprints);
+        // Phase 39d: pre-load the living overview document.
+        let _ = engine.db_tx.send(DbCmd::LoadOverviewDoc);
         engine
     });
 
@@ -964,84 +928,13 @@ fn MainApp() -> Element {
         }
     };
 
-    // Open the Overview (Phase 26 ledger) view and load the stored ledger — no
-    // LLM work on open; folding new meetings happens only on explicit Refresh.
+    // Open the Overview view and load the stored document.
     let on_open_overview = {
         let engine = engine.clone();
         move |_| {
             view.set(View::Overview);
             reset_chat(chat, chat_input, chat_busy, chat_scope);
-            let _ = engine.db_tx.send(DbCmd::LoadLedger);
-            // Also load any legacy rollup, shown as a fallback until the ledger
-            // is first folded (graceful upgrade — Phase 26 migration).
-            let _ = engine.db_tx.send(DbCmd::LoadOverview);
-        }
-    };
-
-    // Fold not-yet-applied meetings into the ledger (heavy; background).
-    let on_refresh_ledger = {
-        let engine = engine.clone();
-        move |_| {
-            overview_busy.set(true);
-            notice.set(Some(
-                "Updating the project ledger — folding in new meetings. Runs in the background."
-                    .to_string(),
-            ));
-            let _ = engine
-                .summ_tx
-                .send(SummCmd::FoldOverview { rebuild: false });
-        }
-    };
-
-    // Destructive: wipe the ledger and replay every meeting (loses manual edits).
-    let on_rebuild_ledger = {
-        let engine = engine.clone();
-        move |_| {
-            overview_busy.set(true);
-            notice.set(Some(
-                "Rebuilding the ledger from scratch — replaying every meeting. Runs in the background.".to_string(),
-            ));
-            let _ = engine.summ_tx.send(SummCmd::FoldOverview { rebuild: true });
-        }
-    };
-
-    // Translate a ledger edit from any of the ledger components into a DbCmd
-    // (each handler re-emits the updated ledger).
-    let on_ledger_action = {
-        let engine = engine.clone();
-        move |a: LedgerAction| {
-            let cmd = match a {
-                LedgerAction::RenameProject { id, name } => DbCmd::RenameProject { id, name },
-                LedgerAction::SetDescription { id, description } => {
-                    DbCmd::SetProjectDescription { id, description }
-                }
-                LedgerAction::Archive { id, archived } => {
-                    DbCmd::SetProjectArchived { id, archived }
-                }
-                LedgerAction::DeleteProject(id) => DbCmd::DeleteProject(id),
-                LedgerAction::EditItem { id, text, owner } => DbCmd::EditItem { id, text, owner },
-                LedgerAction::SetItemStatus { id, status } => DbCmd::SetItemStatus { id, status },
-                LedgerAction::MoveItem {
-                    item_id,
-                    project_id,
-                } => DbCmd::MoveItem {
-                    item_id,
-                    project_id,
-                },
-                LedgerAction::DeleteItem(id) => DbCmd::DeleteItem(id),
-                LedgerAction::AddItem {
-                    project_id,
-                    kind,
-                    text,
-                    owner,
-                } => DbCmd::AddItem {
-                    project_id,
-                    kind,
-                    text,
-                    owner,
-                },
-            };
-            let _ = engine.db_tx.send(cmd);
+            let _ = engine.db_tx.send(DbCmd::LoadOverviewDoc);
         }
     };
 
@@ -1330,14 +1223,19 @@ fn MainApp() -> Element {
                 } else {
                     div { class: "transcript",
                         if *view.read() == View::Overview {
-                            LedgerPanel {
-                                ledger,
-                                legacy: overview,
-                                busy: overview_busy,
-                                notice,
-                                on_action: on_ledger_action,
-                                on_refresh: on_refresh_ledger,
-                                on_rebuild: on_rebuild_ledger,
+                            {
+                                let engine = engine.clone();
+                                rsx! {
+                                    overview::OverviewDocView {
+                                        doc: overview_doc,
+                                        doc_updated: overview_doc_updated,
+                                        editing: overview_editing,
+                                        draft: overview_draft,
+                                        notice,
+                                        engine,
+                                        settings,
+                                    }
+                                }
                             }
                         } else if *view.read() == View::Live {
                             // Capture-only mode (Phase 25): no live text by design.
@@ -2736,6 +2634,53 @@ fn AiSettings(
                                                     }
                                                 }
                                                 p { class: "field-note", "Used by Compress to ingest a whole meeting without truncation. 16K fits ~an hour; larger needs more RAM + CPU time. On a 16 GB laptop a 3B model handles 64K comfortably; 7B is tight beyond 32K." }
+                                                // Overview auto-update toggle + Re-compress all (Phase 39d).
+                                                div { class: "field-row",
+                                                    label { class: "field-label", "Update the Overview automatically after each recording is transcribed" }
+                                                    button {
+                                                        class: if settings.read().overview_auto { "toggle on" } else { "toggle" },
+                                                        onclick: move |_| {
+                                                            let mut s = settings.peek().clone();
+                                                            s.overview_auto = !s.overview_auto;
+                                                            let _ = s.save();
+                                                            settings.set(s);
+                                                        },
+                                                        if settings.read().overview_auto { "On" } else { "Off" }
+                                                    }
+                                                }
+                                                p { class: "field-note", "Folds each finished, transcribed meeting into the living Overview document automatically. Requires compression to run first (also automatic). Disable to update the Overview manually from the Overview view." }
+                                                {
+                                                    let engine_rc = engine.clone();
+                                                    let mut confirm_recompress = use_signal(|| false);
+                                                    rsx! {
+                                                        if confirm_recompress() {
+                                                            div { class: "field-row",
+                                                                span { class: "field-note", "Re-runs the local AI over every saved transcript to rebuild condensed versions — can take a long time on a large library." }
+                                                                button {
+                                                                    class: "mbtn danger",
+                                                                    onclick: move |_| {
+                                                                        confirm_recompress.set(false);
+                                                                        let _ = engine_rc.summ_tx.send(SummCmd::RecompressAll);
+                                                                    },
+                                                                    "Re-compress all sessions"
+                                                                }
+                                                                button {
+                                                                    class: "mbtn ghost",
+                                                                    onclick: move |_| confirm_recompress.set(false),
+                                                                    "Cancel"
+                                                                }
+                                                            }
+                                                        } else {
+                                                            div { class: "btn-row",
+                                                                button {
+                                                                    class: "mbtn ghost",
+                                                                    onclick: move |_| confirm_recompress.set(true),
+                                                                    "Re-compress all sessions…"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 SummaryPromptSettings { settings }
                                             }
                                         }
@@ -3663,432 +3608,6 @@ fn SearchView(
             }
         }
     }
-}
-
-/// The Overview view (Phase 26): the rolling project ledger. Lists projects
-/// (active first), each expandable to its open items, completed history, and
-/// edit controls. Folding new meetings is explicit (Refresh); a stored legacy
-/// rollup is shown as a fallback until the ledger is first built.
-#[component]
-fn LedgerPanel(
-    ledger: Signal<Option<LedgerView>>,
-    legacy: Signal<Option<OverviewData>>,
-    busy: Signal<bool>,
-    notice: Signal<Option<String>>,
-    on_action: EventHandler<LedgerAction>,
-    on_refresh: EventHandler<()>,
-    on_rebuild: EventHandler<()>,
-) -> Element {
-    let _ = notice; // reserved for future copy/export actions
-    let data = ledger.read().clone();
-    let is_busy = busy();
-    let pending = data.as_ref().map(|l| l.pending).unwrap_or(0);
-    let projects = data.map(|l| l.projects).unwrap_or_default();
-    let targets: Vec<(String, String)> = projects
-        .iter()
-        .map(|p| (p.id.clone(), p.name.clone()))
-        .collect();
-    let has_ledger = !projects.is_empty();
-    let mut confirm_rebuild = use_signal(|| false);
-
-    rsx! {
-        div { class: "overview ledger",
-            div { class: "overview-head",
-                h2 { "Overview" }
-                div { class: "overview-actions",
-                    if pending > 0 && !is_busy {
-                        span { class: "ledger-pending", "{pending} new meeting(s) to fold" }
-                    }
-                    button {
-                        class: "mbtn",
-                        disabled: is_busy,
-                        onclick: move |_| on_refresh.call(()),
-                        {icon("refresh")}
-                        if is_busy { "Updating…" } else if has_ledger { "Refresh" } else { "Build ledger" }
-                    }
-                    if confirm_rebuild() {
-                        span { class: "ledger-confirm",
-                            "Rebuild from scratch? Discards manual edits."
-                            button {
-                                class: "mbtn danger",
-                                disabled: is_busy,
-                                onclick: move |_| { confirm_rebuild.set(false); on_rebuild.call(()); },
-                                "Rebuild"
-                            }
-                            button { class: "mbtn ghost", onclick: move |_| confirm_rebuild.set(false), "Cancel" }
-                        }
-                    } else if has_ledger {
-                        button {
-                            class: "mbtn ghost",
-                            disabled: is_busy,
-                            onclick: move |_| confirm_rebuild.set(true),
-                            "Rebuild…"
-                        }
-                    }
-                }
-            }
-            if has_ledger {
-                div { class: "ledger-body",
-                    for p in projects {
-                        ProjectCard { key: "{p.id}", project: p, targets: targets.clone(), on_action }
-                    }
-                }
-            } else {
-                {
-                    let leg = legacy.read().clone().filter(|d| !d.text.trim().is_empty());
-                    match leg {
-                        Some(d) => {
-                            let (preamble, sections) = split_sections(&d.text);
-                            rsx! {
-                                div { class: "ledger-legacy-note",
-                                    "Showing your previous overview. Press Build ledger to fold your meetings into the new project ledger."
-                                }
-                                div { class: "overview-body",
-                                    if !preamble.is_empty() { div { class: "overview-pre", "{preamble}" } }
-                                    for (i, (heading, body)) in sections.into_iter().enumerate() {
-                                        details { key: "{i}", class: "overview-sec", open: i == 0,
-                                            summary { class: "overview-sec-head", "{heading}" }
-                                            div { class: "overview-sec-body", "{body}" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        None => rsx! {
-                            div { class: "empty",
-                                if is_busy {
-                                    "Building your project ledger — folding each meeting in. Runs in the background and can take a few minutes on CPU."
-                                } else {
-                                    "No project ledger yet. Press Build ledger to fold your meetings into a living, project-grouped view of action items, decisions, and open questions."
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// One project in the ledger: a collapsible card with its open items, a
-/// completed-history section, an add-item row, and inline edit/archive/delete.
-#[component]
-fn ProjectCard(
-    project: ProjectView,
-    targets: Vec<(String, String)>,
-    on_action: EventHandler<LedgerAction>,
-) -> Element {
-    let archived = project.status == "archived";
-    let active: Vec<ItemView> = project.active_items().cloned().collect();
-    let done: Vec<ItemView> = project.done_items().cloned().collect();
-    let done_count = done.len();
-
-    let mut editing = use_signal(|| false);
-    let mut name_draft = use_signal(String::new);
-    let mut desc_draft = use_signal(String::new);
-    let mut adding = use_signal(|| false);
-    let mut new_text = use_signal(String::new);
-    let mut new_owner = use_signal(String::new);
-    let mut new_kind = use_signal(|| "action".to_string());
-
-    rsx! {
-        details { class: if archived { "ledger-project archived" } else { "ledger-project" }, open: !archived,
-            summary { class: "ledger-project-head",
-                span { class: "ledger-project-name", "{project.name}" }
-                span { class: "ledger-project-meta",
-                    "{active.len()} open · {done_count} done"
-                    if archived { " · archived" }
-                }
-            }
-
-            // Inline project rename / description editor.
-            if editing() {
-                div { class: "ledger-project-edit",
-                    input {
-                        class: "ledger-edit-text",
-                        value: "{name_draft}",
-                        oninput: move |e| name_draft.set(e.value()),
-                    }
-                    input {
-                        class: "ledger-edit-text",
-                        placeholder: "one-line state (optional)",
-                        value: "{desc_draft}",
-                        oninput: move |e| desc_draft.set(e.value()),
-                    }
-                    button {
-                        class: "tbtn ghost",
-                        title: "Save",
-                        onclick: {
-                            let id = project.id.clone();
-                            move |_| {
-                                let name = name_draft();
-                                if !name.trim().is_empty() {
-                                    on_action.call(LedgerAction::RenameProject { id: id.clone(), name });
-                                }
-                                on_action.call(LedgerAction::SetDescription { id: id.clone(), description: desc_draft() });
-                                editing.set(false);
-                            }
-                        },
-                        {icon("check")}
-                    }
-                    button { class: "tbtn ghost", title: "Cancel", onclick: move |_| editing.set(false), {icon("close")} }
-                }
-            } else if let Some(d) = project.description.clone() {
-                if !d.trim().is_empty() {
-                    div { class: "ledger-project-desc", "{d}" }
-                }
-            }
-
-            // Open items.
-            div { class: "ledger-items",
-                for it in active {
-                    ItemRow { key: "{it.id}", item: it, targets: targets.clone(), on_action }
-                }
-            }
-
-            // Add a hand-written item.
-            if adding() {
-                div { class: "ledger-add",
-                    select {
-                        class: "ledger-kind-select",
-                        value: "{new_kind}",
-                        onchange: move |e| new_kind.set(e.value()),
-                        option { value: "action", "Action" }
-                        option { value: "question", "Question" }
-                        option { value: "decision", "Decision" }
-                    }
-                    input {
-                        class: "ledger-edit-text",
-                        placeholder: "What needs tracking?",
-                        value: "{new_text}",
-                        oninput: move |e| new_text.set(e.value()),
-                    }
-                    input {
-                        class: "ledger-edit-owner",
-                        placeholder: "owner",
-                        value: "{new_owner}",
-                        oninput: move |e| new_owner.set(e.value()),
-                    }
-                    button {
-                        class: "tbtn ghost",
-                        title: "Add",
-                        onclick: {
-                            let id = project.id.clone();
-                            move |_| {
-                                let text = new_text();
-                                if !text.trim().is_empty() {
-                                    on_action.call(LedgerAction::AddItem {
-                                        project_id: id.clone(),
-                                        kind: new_kind(),
-                                        text,
-                                        owner: new_owner(),
-                                    });
-                                }
-                                new_text.set(String::new());
-                                new_owner.set(String::new());
-                                adding.set(false);
-                            }
-                        },
-                        {icon("check")}
-                    }
-                    button { class: "tbtn ghost", title: "Cancel", onclick: move |_| adding.set(false), {icon("close")} }
-                }
-            } else {
-                button { class: "ledger-add-btn", onclick: move |_| adding.set(true),
-                    {icon("plus")} "Add item"
-                }
-            }
-
-            // Completed history.
-            if done_count > 0 {
-                details { class: "ledger-done",
-                    summary { "Completed ({done_count})" }
-                    for it in done {
-                        ItemRow { key: "{it.id}", item: it, targets: targets.clone(), on_action }
-                    }
-                }
-            }
-
-            // Project-level controls.
-            div { class: "ledger-project-tools",
-                button {
-                    class: "tbtn ghost",
-                    title: "Edit name / state",
-                    onclick: {
-                        let n = project.name.clone();
-                        let d = project.description.clone().unwrap_or_default();
-                        move |_| { name_draft.set(n.clone()); desc_draft.set(d.clone()); editing.set(true); }
-                    },
-                    {icon("pen")}
-                }
-                button {
-                    class: "tbtn ghost",
-                    title: if archived { "Unarchive" } else { "Archive" },
-                    onclick: {
-                        let id = project.id.clone();
-                        move |_| on_action.call(LedgerAction::Archive { id: id.clone(), archived: !archived })
-                    },
-                    {icon("archive")}
-                }
-                button {
-                    class: "tbtn ghost danger",
-                    title: "Delete project",
-                    onclick: {
-                        let id = project.id.clone();
-                        move |_| on_action.call(LedgerAction::DeleteProject(id.clone()))
-                    },
-                    {icon("trash")}
-                }
-            }
-        }
-    }
-}
-
-/// A single ledger item row: kind badge, text, owner, provenance, and inline
-/// controls (complete/reopen, edit, move, delete).
-#[component]
-fn ItemRow(
-    item: ItemView,
-    targets: Vec<(String, String)>,
-    on_action: EventHandler<LedgerAction>,
-) -> Element {
-    let done = item.status == "done";
-    let mut editing = use_signal(|| false);
-    let mut text_draft = use_signal(String::new);
-    let mut owner_draft = use_signal(String::new);
-
-    rsx! {
-        div { class: if done { "ledger-item done" } else { "ledger-item" },
-            span { class: "ledger-kind k-{item.kind}", "{kind_label(&item.kind)}" }
-            if editing() {
-                input {
-                    class: "ledger-edit-text",
-                    value: "{text_draft}",
-                    oninput: move |e| text_draft.set(e.value()),
-                }
-                input {
-                    class: "ledger-edit-owner",
-                    placeholder: "owner",
-                    value: "{owner_draft}",
-                    oninput: move |e| owner_draft.set(e.value()),
-                }
-                button {
-                    class: "tbtn ghost",
-                    title: "Save",
-                    onclick: {
-                        let id = item.id.clone();
-                        move |_| {
-                            on_action.call(LedgerAction::EditItem { id: id.clone(), text: text_draft(), owner: owner_draft() });
-                            editing.set(false);
-                        }
-                    },
-                    {icon("check")}
-                }
-                button { class: "tbtn ghost", title: "Cancel", onclick: move |_| editing.set(false), {icon("close")} }
-            } else {
-                span { class: "ledger-item-text", "{item.text}" }
-                if let Some(o) = item.owner.clone() {
-                    span { class: "ledger-owner", "{o}" }
-                }
-                if item.manual {
-                    span { class: "ledger-manual", title: "hand-edited", {icon("pen")} }
-                }
-                div { class: "ledger-item-tools",
-                    button {
-                        class: "tbtn ghost",
-                        title: if done { "Reopen" } else { "Mark done" },
-                        onclick: {
-                            let id = item.id.clone();
-                            move |_| on_action.call(LedgerAction::SetItemStatus {
-                                id: id.clone(),
-                                status: if done { "open".to_string() } else { "done".to_string() },
-                            })
-                        },
-                        {icon(if done { "refresh" } else { "check" })}
-                    }
-                    if targets.len() > 1 {
-                        select {
-                            class: "ledger-move",
-                            title: "Move to project",
-                            onchange: {
-                                let id = item.id.clone();
-                                move |e| {
-                                    let pid = e.value();
-                                    if !pid.is_empty() {
-                                        on_action.call(LedgerAction::MoveItem { item_id: id.clone(), project_id: pid });
-                                    }
-                                }
-                            },
-                            option { value: "", "Move…" }
-                            for (tid, tname) in targets.iter().cloned() {
-                                option { value: "{tid}", "{tname}" }
-                            }
-                        }
-                    }
-                    button {
-                        class: "tbtn ghost",
-                        title: "Edit",
-                        onclick: {
-                            let t = item.text.clone();
-                            let o = item.owner.clone().unwrap_or_default();
-                            move |_| { text_draft.set(t.clone()); owner_draft.set(o.clone()); editing.set(true); }
-                        },
-                        {icon("pen")}
-                    }
-                    button {
-                        class: "tbtn ghost danger",
-                        title: "Delete",
-                        onclick: {
-                            let id = item.id.clone();
-                            move |_| on_action.call(LedgerAction::DeleteItem(id.clone()))
-                        },
-                        {icon("trash")}
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Short badge label for an item kind.
-fn kind_label(kind: &str) -> &'static str {
-    match kind {
-        "question" => "Question",
-        "decision" => "Decision",
-        _ => "Action",
-    }
-}
-
-/// Split overview Markdown into an optional preamble and `## `-headed sections,
-/// so the UI can render each project as a collapsible block.
-fn split_sections(md: &str) -> (String, Vec<(String, String)>) {
-    let mut preamble = String::new();
-    let mut sections: Vec<(String, String)> = Vec::new();
-    let mut cur: Option<(String, String)> = None;
-    for line in md.lines() {
-        if let Some(h) = line.strip_prefix("## ") {
-            if let Some(s) = cur.take() {
-                sections.push(s);
-            }
-            cur = Some((h.trim().to_string(), String::new()));
-        } else if let Some((_, body)) = cur.as_mut() {
-            body.push_str(line);
-            body.push('\n');
-        } else {
-            preamble.push_str(line);
-            preamble.push('\n');
-        }
-    }
-    if let Some(s) = cur.take() {
-        sections.push(s);
-    }
-    (
-        preamble.trim().to_string(),
-        sections
-            .into_iter()
-            .map(|(h, b)| (h, b.trim().to_string()))
-            .collect(),
-    )
 }
 
 /// A grounded chat panel (Phase 23d): a scrolling Q&A log + an input row. The

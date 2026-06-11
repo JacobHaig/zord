@@ -114,17 +114,12 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
-    /// Print the rolling project ledger. `--refresh` folds in new meetings
-    /// first; `--rebuild` wipes and replays every meeting (destructive — drops
-    /// manual edits). Fold/rebuild need `--features llm-local` or `llm-remote`;
-    /// plain printing does not.
+    /// Print the living overview document (Phase 39). Use `--update` to fold
+    /// any un-folded meetings into it first (requires an AI build).
     Overview {
-        /// Fold not-yet-applied meetings into the ledger before printing.
+        /// Fold un-folded meetings into the overview document before printing.
         #[arg(long)]
-        refresh: bool,
-        /// Wipe the ledger and replay every meeting (DESTRUCTIVE).
-        #[arg(long)]
-        rebuild: bool,
+        update: bool,
         #[arg(long)]
         db: Option<PathBuf>,
     },
@@ -177,11 +172,7 @@ fn main() -> Result<()> {
         Cmd::Decrypt { db } => cmd_decrypt(db),
         Cmd::Summarize { session_id, db } => cmd_summarize(&session_id, db),
         Cmd::Compress { session_id, db } => cmd_compress(&session_id, db),
-        Cmd::Overview {
-            refresh,
-            rebuild,
-            db,
-        } => cmd_overview(refresh, rebuild, db),
+        Cmd::Overview { update, db } => cmd_overview(update, db),
         Cmd::Diarize { session_id, db } => cmd_diarize(&session_id, db),
     }
 }
@@ -353,43 +344,86 @@ fn cmd_compress(_session_id: &str, _db: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote`")
 }
 
-/// Print the project ledger (Phase 26). Optionally fold pending meetings or
-/// rebuild from scratch first (both need an AI build). Printing itself is
-/// LLM-free, so it works in any build once the ledger has been folded.
-fn cmd_overview(refresh: bool, rebuild: bool, db: Option<PathBuf>) -> Result<()> {
+/// Print the living overview document (Phase 39). Optionally fold un-folded
+/// meetings into it first (needs an AI build). Printing is always LLM-free.
+fn cmd_overview(update: bool, db: Option<PathBuf>) -> Result<()> {
     let db_path = resolve_db(db)?;
-    if rebuild || refresh {
-        fold_ledger(&db_path, rebuild)?;
+    if update {
+        update_overview_doc_cli(&db_path)?;
     }
     let store = Store::open(&db_path)?;
-    match zord_overview::ledger_context(&store)? {
-        Some(text) => println!("{text}"),
-        None => eprintln!(
-            "The project ledger is empty. Run `zord overview --refresh` to fold your meetings in (needs an AI build: --features llm-local and/or llm-remote)."
-        ),
+    let doc = store
+        .get_meta("overview_doc")
+        .ok()
+        .flatten()
+        .map(|(v, _)| v)
+        .unwrap_or_default();
+    if doc.trim().is_empty() {
+        eprintln!("The overview document is empty. Record some meetings, then run `zord overview --update` (needs an AI build: --features llm-local and/or llm-remote) to populate it.");
+    } else {
+        println!("{doc}");
     }
     Ok(())
 }
 
-/// Fold pending meetings into the ledger, or rebuild it from scratch.
+/// Fold un-folded meetings into the living overview document (CLI path).
 #[cfg(any(feature = "llm-local", feature = "llm-remote"))]
-fn fold_ledger(db_path: &std::path::Path, rebuild: bool) -> Result<()> {
+fn update_overview_doc_cli(db_path: &std::path::Path) -> Result<()> {
+    use zord_store::Store;
     let settings = zord_config::Settings::load();
     let llm = build_llm_backend(&settings)?;
+    let store = Store::open(db_path)?;
+    // Get all ended sessions with transcripts and filter to unfolded ones.
+    let all_sessions = store.list_sessions()?;
+    let sessions: Vec<_> = all_sessions
+        .iter()
+        .filter(|s| s.ended_at.is_some() && s.overview_folded_ms.is_none())
+        .collect();
+    if sessions.is_empty() {
+        eprintln!("Overview is up to date — no un-folded sessions.");
+        return Ok(());
+    }
     let mut progress = |note: &str| eprintln!("  {note}");
-    if rebuild {
-        eprintln!("Rebuilding the ledger from every meeting (discards manual edits)…");
-        zord_overview::rebuild_from_history(db_path, &settings, &llm, &mut progress)?;
-    } else {
-        eprintln!("Folding new meetings into the ledger…");
-        zord_overview::fold_pending(db_path, &settings, &llm, &mut progress)?;
+    let mut doc = store
+        .get_meta("overview_doc")
+        .ok()
+        .flatten()
+        .map(|(v, _)| v)
+        .unwrap_or_default();
+    for s in &sessions {
+        let label = format!(
+            "{} — {}",
+            &s.id[..8.min(s.id.len())],
+            s.title.as_deref().unwrap_or(&s.id)
+        );
+        let input = store.get_compressed(&s.id)?.unwrap_or_default();
+        if input.trim().is_empty() {
+            progress(&format!("Skipping {} (no transcript)", &s.id));
+            continue;
+        }
+        progress(&format!("Folding {}…", &s.id));
+        match zord_overview::update_document(&doc, &input, &label, &llm, &settings, &mut progress) {
+            Ok(updated) => {
+                let _ = store.set_meta("overview_doc_prev", &doc);
+                doc = updated;
+                let _ = store.set_meta("overview_doc", &doc);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let _ = store.set_overview_folded(&s.id, now);
+            }
+            Err(e) => {
+                eprintln!("  failed: {e}");
+            }
+        }
     }
     Ok(())
 }
 
 #[cfg(not(any(feature = "llm-local", feature = "llm-remote")))]
-fn fold_ledger(_db_path: &std::path::Path, _rebuild: bool) -> Result<()> {
-    anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote` to fold/rebuild the ledger")
+fn update_overview_doc_cli(_db_path: &std::path::Path) -> Result<()> {
+    anyhow::bail!("this build has no AI support — rebuild with `--features llm-local` and/or `--features llm-remote` to update the overview")
 }
 
 /// Align "Others" transcript segments to diarized speaker spans by max overlap,
