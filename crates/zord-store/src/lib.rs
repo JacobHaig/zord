@@ -637,6 +637,22 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Total number of sessions stored (for diagnostic reporting only).
+    pub fn count_sessions(&self) -> Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)
+            .map_err(Into::into)
+    }
+
+    /// Total number of transcript segments stored (for diagnostic reporting only).
+    pub fn count_segments(&self) -> Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM segments", [], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)
+            .map_err(Into::into)
+    }
+
     /// All segments for a session, ordered by time.
     pub fn segments(&self, session_id: &str) -> Result<Vec<Segment>> {
         let mut stmt = self.conn.prepare(

@@ -454,6 +454,10 @@ pub enum DbCmd {
         start_ms: u64,
         end_ms: u64,
     },
+    /// Export a diagnostic bundle (Phase 43c): a zip written to the exports dir
+    /// containing logs, a redacted config, and system info. Replies with
+    /// [`Event::Exported`] (path) on success or [`Event::Notice`] on failure.
+    ExportDiagnostics,
 }
 
 /// Replay commands for the playback worker. The rodio output stream is `!Send`
@@ -2060,6 +2064,19 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     jobs.end(&ev, &jid);
                 });
             }
+
+            DbCmd::ExportDiagnostics => {
+                // The bundle is small (a few log files + JSON) — synchronous on
+                // the db thread is fine; mirrors the DbCmd::Export pattern.
+                match export_diagnostics(&store) {
+                    Ok(path) => {
+                        let _ = ev.send(Event::Exported(path));
+                    }
+                    Err(e) => {
+                        let _ = ev.send(Event::Notice(format!("diagnostic export failed: {e}")));
+                    }
+                }
+            }
         }
     }
 }
@@ -2948,6 +2965,160 @@ fn export_session(store: &Store, id: &str, format: zord_export::Format) -> anyho
     let path = exports_dir()?.join(format!("{id}.{}", format.extension()));
     std::fs::write(&path, rendered)?;
     Ok(path.display().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic bundle (Phase 43c)
+// ---------------------------------------------------------------------------
+
+/// Return a pretty-printed `config.json` with every credential-ish field
+/// replaced by an empty string.
+///
+/// Redacted fields:
+/// - `discord_bot_token` — the user's Discord bot token
+/// - `llm_api_key`       — bearer token for the external LLM server
+///
+/// The DB passphrase is **never in `Settings`** (it lives exclusively in the
+/// OS keychain via `zord_config::keychain`) so there is nothing to redact there.
+pub fn redacted_settings_json(s: &zord_config::Settings) -> String {
+    let mut v: serde_json::Value =
+        serde_json::to_value(s).unwrap_or(serde_json::Value::Object(Default::default()));
+    if let Some(obj) = v.as_object_mut() {
+        for field in &["discord_bot_token", "llm_api_key"] {
+            if let Some(entry) = obj.get_mut(*field) {
+                *entry = serde_json::Value::String(String::new());
+            }
+        }
+    }
+    serde_json::to_string_pretty(&v).unwrap_or_default()
+}
+
+/// Write a diagnostic bundle zip to the exports directory and return its path.
+///
+/// Bundle layout:
+/// ```text
+/// logs/zord.log        — main app log (if present)
+/// logs/crash.log       — panic log (if present)
+/// logs/llm-trace.log   — LLM phase trace (if present)
+/// config.json          — settings with credentials redacted
+/// system.txt           — version, OS, arch, feature flags, DB encrypted?, session/segment counts, model files
+/// ```
+///
+/// No transcript text or audio is included.
+fn export_diagnostics(store: &Store) -> anyhow::Result<String> {
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+
+    let settings = zord_config::Settings::load();
+    let out_dir = exports_dir()?;
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let zip_path = out_dir.join(format!("zord-diagnostics-{unix}.zip"));
+
+    let file = std::fs::File::create(&zip_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+
+    // --- logs/ ---
+    if let Ok(logs) = zord_config::logs_dir() {
+        for name in &["zord.log", "crash.log", "llm-trace.log"] {
+            let p = logs.join(name);
+            if p.exists() {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    zip.start_file(format!("logs/{name}"), opts)?;
+                    zip.write_all(&bytes)?;
+                }
+            }
+        }
+    }
+
+    // --- config.json (secrets redacted) ---
+    zip.start_file("config.json", opts)?;
+    zip.write_all(redacted_settings_json(&settings).as_bytes())?;
+
+    // --- system.txt ---
+    let session_count = store.count_sessions().unwrap_or(0);
+    let segment_count = store.count_segments().unwrap_or(0);
+
+    // Model files present: names only, no paths.
+    let model_names: Vec<String> = zord_config::models_dir()
+        .ok()
+        .and_then(|d| std::fs::read_dir(&d).ok())
+        .map(|entries| {
+            let mut names: Vec<String> = entries
+                .flatten()
+                .filter_map(|e| {
+                    let n = e.file_name().into_string().ok()?;
+                    // Skip directories (Parakeet bundles) and hidden files.
+                    if n.starts_with('.') {
+                        None
+                    } else {
+                        Some(n)
+                    }
+                })
+                .collect();
+            names.sort();
+            names
+        })
+        .unwrap_or_default();
+
+    // Feature flags compiled in.
+    let mut features: Vec<&str> = Vec::new();
+    if cfg!(feature = "parakeet") {
+        features.push("parakeet");
+    }
+    if cfg!(feature = "llm-local") {
+        features.push("llm-local");
+    }
+    if cfg!(feature = "llm-remote") {
+        features.push("llm-remote");
+    }
+    if cfg!(feature = "diarization") {
+        features.push("diarization");
+    }
+    if cfg!(feature = "voiceprints") {
+        features.push("voiceprints");
+    }
+    if cfg!(feature = "encryption") {
+        features.push("encryption");
+    }
+    if cfg!(feature = "discord") {
+        features.push("discord");
+    }
+    if cfg!(feature = "self-update") {
+        features.push("self-update");
+    }
+    let features_str = if features.is_empty() {
+        "none".to_string()
+    } else {
+        features.join(", ")
+    };
+
+    let mut system = String::new();
+    system.push_str(&format!("version: {}\n", env!("CARGO_PKG_VERSION")));
+    system.push_str(&format!("channel: {}\n", zord_core::DIST_CHANNEL));
+    system.push_str(&format!("os: {}\n", std::env::consts::OS));
+    system.push_str(&format!("arch: {}\n", std::env::consts::ARCH));
+    system.push_str(&format!("features: {}\n", features_str));
+    system.push_str(&format!("db_encrypted: {}\n", settings.encrypted));
+    system.push_str(&format!("sessions: {}\n", session_count));
+    system.push_str(&format!("segments: {}\n", segment_count));
+    system.push_str("models:\n");
+    for n in &model_names {
+        system.push_str(&format!("  - {n}\n"));
+    }
+
+    zip.start_file("system.txt", opts)?;
+    zip.write_all(system.as_bytes())?;
+
+    zip.finish()?;
+
+    tracing::info!(path = %zip_path.display(), "diagnostic bundle written");
+    Ok(zip_path.display().to_string())
 }
 
 /// Mix every retained track of a session into `exports/<id>.merged.wav`
@@ -5019,5 +5190,43 @@ mod tests {
         assert_eq!(effective_transcribe_workers(4, 0), 1);
         // cap already clamped to 1 by caller; floor holds.
         assert_eq!(effective_transcribe_workers(1, 0), 1);
+    }
+
+    #[test]
+    fn redacted_settings_json_clears_secrets_preserves_rest() {
+        let s = zord_config::Settings {
+            discord_bot_token: "super-secret-bot-token".to_string(),
+            llm_api_key: "sk-very-secret-key".to_string(),
+            llm_base_url: "http://localhost:1234".to_string(),
+            model: "large-v3-turbo-q5_0".to_string(),
+            ..Default::default()
+        };
+
+        let json = redacted_settings_json(&s);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        // Secrets must be empty.
+        assert_eq!(
+            v["discord_bot_token"].as_str().unwrap_or("_not_empty_"),
+            "",
+            "discord_bot_token must be redacted"
+        );
+        assert_eq!(
+            v["llm_api_key"].as_str().unwrap_or("_not_empty_"),
+            "",
+            "llm_api_key must be redacted"
+        );
+
+        // Non-secret fields must survive intact.
+        assert_eq!(
+            v["llm_base_url"].as_str().unwrap_or(""),
+            "http://localhost:1234",
+            "llm_base_url must not be redacted"
+        );
+        assert_eq!(
+            v["model"].as_str().unwrap_or(""),
+            "large-v3-turbo-q5_0",
+            "model must not be redacted"
+        );
     }
 }

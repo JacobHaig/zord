@@ -125,6 +125,14 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* Record lives permanently at the sidebar foot; pushed down, never moves. */
 .sidebar-foot { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .sidebar-foot .record { width: 100%; }
+/* Per-app capture picker (Phase 43g): compact select + optional error badge. */
+.app-capture-row { display: flex; align-items: center; gap: 4px; }
+.app-capture-select {
+  flex: 1; min-width: 0; width: 100%;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 5px 8px; font-size: 12px; outline: none;
+}
+.app-capture-err { color: var(--danger); font-size: 13px; flex-shrink: 0; cursor: help; }
 /* Draggable divider between the sidebar and the main column. */
 .splitter { width: 5px; margin-left: -3px; flex-shrink: 0; cursor: col-resize; user-select: none; background: transparent; }
 .splitter:hover, .splitter.active { background: var(--accent); opacity: 0.5; }

@@ -1181,6 +1181,7 @@ fn MainApp() -> Element {
                 system_in_capture,
                 mic_muted,
                 sys_muted,
+                settings,
                 engine: engine.clone(),
                 on_open_session,
                 on_show_live,
@@ -1591,6 +1592,7 @@ fn SessionsSidebar(
     system_in_capture: bool,
     mic_muted: Signal<bool>,
     sys_muted: Signal<bool>,
+    mut settings: Signal<Settings>,
     engine: Engine,
     on_open_session: EventHandler<String>,
     on_show_live: EventHandler<()>,
@@ -1598,6 +1600,25 @@ fn SessionsSidebar(
     on_mute: EventHandler<MouseEvent>,
     on_mute_system: EventHandler<MouseEvent>,
 ) -> Element {
+    // Per-app capture picker (Phase 43g): mirrors the AudioInputSettings picker.
+    // We populate lazily (on mount when mode == "app", and when the select is
+    // opened) to avoid firing the Screen Recording permission prompt eagerly.
+    let mut sidebar_apps = use_signal(Vec::<(String, String)>::new);
+    let mut sidebar_apps_err = use_signal(|| None::<String>);
+    let mut sidebar_refresh_apps = move || match zord_capture::list_capturable_apps() {
+        Ok(list) => {
+            sidebar_apps.set(list.into_iter().map(|a| (a.id, a.name)).collect());
+            sidebar_apps_err.set(None);
+        }
+        Err(e) => sidebar_apps_err.set(Some(e.to_string())),
+    };
+    // Populate on mount when already in "app" mode (user set it in Settings earlier).
+    use_effect(move || {
+        if settings.read().capture_mode == "app" {
+            sidebar_refresh_apps();
+        }
+    });
+
     rsx! {
             aside { class: "sidebar", style: "width: {sidebar_w}px;",
                 div { class: "side-label", "Sessions" }
@@ -1738,6 +1759,77 @@ fn SessionsSidebar(
                 }
                 // ---- Record: permanent primary at the sidebar foot ----
                 div { class: "sidebar-foot",
+                    // Per-app capture picker (Phase 43g): compact app selector
+                    // visible when system audio is in the capture mode AND not
+                    // currently recording. The choice is locked in at Record
+                    // start, so hiding it while recording avoids confusion.
+                    if !recording && system_in_capture && !recording_discord {
+                        div {
+                            class: "app-capture-row",
+                            title: "Record one application's audio instead of the whole desktop",
+                            select {
+                                class: "app-capture-select",
+                                onmousedown: move |_| {
+                                    // Refresh on open — catches newly launched apps
+                                    // without requiring a separate Refresh button.
+                                    sidebar_refresh_apps();
+                                },
+                                onchange: move |e: FormEvent| {
+                                    let val = e.value();
+                                    let mut s = settings.peek().clone();
+                                    if val.is_empty() {
+                                        // "All system audio" choice.
+                                        s.capture_app_id = String::new();
+                                        s.capture_app_name = String::new();
+                                        // Return to the default combined mode when
+                                        // the user explicitly picks "All system audio".
+                                        if s.capture_mode == "app" {
+                                            s.capture_mode = "both".to_string();
+                                        }
+                                    } else {
+                                        s.capture_app_id = val.clone();
+                                        s.capture_app_name = sidebar_apps
+                                            .peek()
+                                            .iter()
+                                            .find(|(id, _)| *id == val)
+                                            .map(|(_, name)| name.clone())
+                                            .unwrap_or_default();
+                                        s.capture_mode = "app".to_string();
+                                    }
+                                    let _ = s.save();
+                                    settings.set(s);
+                                },
+                                // "All system audio" option — selected when
+                                // capture_app_id is empty (i.e. default mode).
+                                option {
+                                    value: "",
+                                    selected: settings.read().capture_app_id.is_empty(),
+                                    "Capture: All system audio"
+                                }
+                                // Keep the saved choice visible even when that app
+                                // is not currently running.
+                                if !settings.read().capture_app_id.is_empty()
+                                    && !sidebar_apps.read().iter().any(|(id, _)| *id == settings.read().capture_app_id)
+                                {
+                                    option {
+                                        value: "{settings.read().capture_app_id}",
+                                        selected: true,
+                                        "Capture: {settings.read().capture_app_name} (not running)"
+                                    }
+                                }
+                                for (id, name) in sidebar_apps.read().iter() {
+                                    option {
+                                        value: "{id}",
+                                        selected: settings.read().capture_app_id == *id,
+                                        "Capture: {name}"
+                                    }
+                                }
+                            }
+                            if let Some(e) = sidebar_apps_err.read().clone() {
+                                span { class: "app-capture-err", title: "{e}", "⚠" }
+                            }
+                        }
+                    }
                     if recording && system_in_capture && !recording_discord {
                         button {
                             class: if *sys_muted.read() { "record muted" } else { "record mute" },
@@ -2565,7 +2657,7 @@ fn SettingsOverlay(
                                 FilesSettings { settings, notice, engine: engine.clone() }
                                 }
                                 if *settings_tab.read() == "about" {
-                                AboutSettings { settings, notice, show_settings, show_wizard }
+                                AboutSettings { settings, notice, show_settings, show_wizard, engine: engine.clone() }
                                 }
                                 } // settings-pane
                                 } // settings-layout
@@ -3352,13 +3444,14 @@ fn ThemeSettings(settings: Signal<Settings>) -> Element {
 }
 
 /// Settings → About: a one-line local-only blurb, version/channel, updates,
-/// and the setup-wizard re-run.
+/// setup-wizard re-run, and the diagnostic bundle export (Phase 43c).
 #[component]
 fn AboutSettings(
     settings: Signal<Settings>,
-    notice: Signal<Option<String>>,
+    mut notice: Signal<Option<String>>,
     mut show_settings: Signal<bool>,
     mut show_wizard: Signal<bool>,
+    engine: Engine,
 ) -> Element {
     // Update controls exist only in `self-update` builds (the GitHub channel);
     // store builds neither check nor install — the store does.
@@ -3392,6 +3485,20 @@ fn AboutSettings(
                     "Run setup again"
                 }
             }
+            // --- Diagnostic bundle (Phase 43c) ---
+            div { class: "subhead", "Bug reporting" }
+            div { class: "btn-row",
+                button {
+                    class: "mbtn",
+                    title: "Write a zip you can attach to a bug report",
+                    onclick: move |_| {
+                        let _ = engine.db_tx.send(DbCmd::ExportDiagnostics);
+                        notice.set(Some("Building diagnostic bundle…".to_string()));
+                    },
+                    {icon("archive")} "Export diagnostic bundle"
+                }
+            }
+            p { class: "field-note", "No transcripts or audio included; secrets (bot token, API keys) are redacted. The zip lands in your Exports folder." }
             {update_ui}
         }
     }
