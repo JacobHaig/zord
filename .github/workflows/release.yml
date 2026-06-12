@@ -31,7 +31,7 @@ env:
   # included; it requires vendored OpenSSL (macOS: fine with existing toolchain;
   # Windows: Strawberry Perl ships on windows-latest, NASM installed explicitly).
   # The channel step appends self-update for github builds.
-  FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord,encryption"
+  FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord,encryption,semantic"
   # The CLI (zord-app) only declares a subset — voiceprints/discord/self-update
   # are GUI/integration features it doesn't have; passing them fails the build.
   CLI_FEATURES: "diarization,llm-local,llm-remote,parakeet,encryption"

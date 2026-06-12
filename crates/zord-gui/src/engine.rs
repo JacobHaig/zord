@@ -562,6 +562,21 @@ pub enum SummCmd {
     RecompressAll,
 }
 
+/// Commands for the embed worker (Phase 45 semantic search).
+/// Producer code (`#[cfg(feature = "semantic")]`) is gated; the enum itself is
+/// always compiled so the Engine struct can hold the sender unconditionally.
+#[allow(dead_code)]
+pub enum EmbedCmd {
+    /// Chunk + embed a single ended session and persist the vectors.
+    EmbedSession(String),
+    /// Backfill all sessions that are missing embeddings for the current model.
+    /// Job key "semantic"; cancellable between sessions.
+    BackfillAll,
+    /// Embed a query string and run cosine search over the full index; results
+    /// are emitted as `Event::SearchResults`.
+    Query(String),
+}
+
 /// Registry of cancellable background jobs: job id → cooperative cancel flag.
 /// Workers register a token on start, poll it at safe checkpoints, and remove it
 /// on finish; the GUI flips it via [`Engine::cancel_job`]. Rust can't kill a
@@ -638,6 +653,10 @@ pub struct Engine {
     pub summ_tx: mpsc::Sender<SummCmd>,
     /// Replay a transcript line from a retained WAV.
     pub play_tx: mpsc::Sender<PlayCmd>,
+    /// Semantic-search embedding worker (Phase 45). Always present so the
+    /// GUI can unconditionally call `embed_tx.send(…)` inside a `cfg!` block.
+    #[allow(dead_code)]
+    pub embed_tx: mpsc::Sender<EmbedCmd>,
     /// Cancellable background-job registry (see [`Jobs`]).
     pub jobs: Jobs,
 }
@@ -682,24 +701,29 @@ impl Engine {
         let (model_tx, model_rx) = mpsc::channel::<ModelCmd>();
         let (summ_tx, summ_rx) = mpsc::channel::<SummCmd>();
         let (play_tx, play_rx) = mpsc::channel::<PlayCmd>();
+        let (embed_tx, embed_rx) = mpsc::channel::<EmbedCmd>();
         let jobs = Jobs::default();
 
         {
             let ev = ev_tx.clone();
             let dbp = db_path.clone();
             let stx = summ_tx.clone();
+            let etx = embed_tx.clone();
             thread::spawn(move || {
                 let sup = ev.clone();
-                supervise("recorder", &sup, move || control_loop(rec_rx, ev, dbp, stx));
+                supervise("recorder", &sup, move || {
+                    control_loop(rec_rx, ev, dbp, stx, etx)
+                });
             });
         }
         {
             let ev = ev_tx.clone();
             let dbp = db_path.clone();
             let jobs = jobs.clone();
+            let etx = embed_tx.clone();
             thread::spawn(move || {
                 let sup = ev.clone();
-                supervise("database", &sup, move || db_loop(db_rx, ev, dbp, jobs));
+                supervise("database", &sup, move || db_loop(db_rx, ev, dbp, jobs, etx));
             });
         }
         {
@@ -712,11 +736,21 @@ impl Engine {
         {
             let ev = ev_tx.clone();
             let jobs = jobs.clone();
+            let dbp = db_path.clone();
             thread::spawn(move || {
                 let sup = ev.clone();
                 supervise("summarize", &sup, move || {
-                    summarize_loop(summ_rx, ev, db_path, jobs)
+                    summarize_loop(summ_rx, ev, dbp, jobs)
                 });
+            });
+        }
+        {
+            let ev = ev_tx.clone();
+            let jobs = jobs.clone();
+            let dbp = db_path.clone();
+            thread::spawn(move || {
+                let sup = ev.clone();
+                supervise("embed", &sup, move || embed_loop(embed_rx, ev, dbp, jobs));
             });
         }
         {
@@ -751,6 +785,7 @@ impl Engine {
                 model_tx,
                 summ_tx,
                 play_tx,
+                embed_tx,
                 jobs,
             },
             ev_rx,
@@ -1985,7 +2020,13 @@ fn kb_remove_session(dir: &str, session_id: &str) {
 type TimelineCache =
     Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<TimelineLane>)>>>;
 
-fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathBuf, jobs: Jobs) {
+fn db_loop(
+    rx: mpsc::Receiver<DbCmd>,
+    ev: UnboundedSender<Event>,
+    db_path: PathBuf,
+    jobs: Jobs,
+    embed_tx: mpsc::Sender<EmbedCmd>,
+) {
     let store = match Store::open(&db_path) {
         Ok(s) => s,
         Err(e) => {
@@ -2286,11 +2327,12 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let ev = ev.clone();
                 let db_path = db_path.clone();
                 let jobs = jobs.clone();
+                let etx = embed_tx.clone();
                 thread::spawn(move || {
                     let jid = format!("retranscribe:{id}");
                     let token = jobs.begin(&ev, &jid, "retranscribe", "Re-transcribing meeting");
                     supervise("retranscribe", &ev, || {
-                        retranscribe_session_ondemand(&db_path, &id, &ev, &token)
+                        retranscribe_session_ondemand(&db_path, &id, &ev, &token, &etx)
                     });
                     jobs.end(&ev, &jid);
                 });
@@ -2743,7 +2785,348 @@ impl TimelineState {
     }
 }
 
-/// Owns the audio output stream (created lazily on first play) and plays one
+// Owns the audio output stream (created lazily on first play) and plays one
+// ---------------------------------------------------------------------------
+// Phase 45: semantic-search embed worker
+// ---------------------------------------------------------------------------
+
+/// Model name used as the `model` column in `chunk_embeddings`.
+#[allow(dead_code)]
+pub(crate) const EMBED_MODEL_ID: &str = "bge-small-en-v1.5";
+
+/// File layout under the models dir for the BGE-small-en-v1.5 ONNX model.
+/// Matches the Xenova/bge-small-en-v1.5 HuggingFace repo layout.
+#[allow(dead_code)]
+const EMBED_MODEL_DIR: &str = "bge-small-en-v1.5";
+
+/// HF repo files we download via zord-net (proxy-aware).
+#[cfg(feature = "semantic")]
+const EMBED_FILES: &[(&str, &str)] = &[
+    (
+        "onnx/model.onnx",
+        "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx",
+    ),
+    (
+        "tokenizer.json",
+        "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer.json",
+    ),
+    (
+        "config.json",
+        "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/config.json",
+    ),
+    (
+        "special_tokens_map.json",
+        "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/special_tokens_map.json",
+    ),
+    (
+        "tokenizer_config.json",
+        "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer_config.json",
+    ),
+];
+
+/// Returns `true` if all model files are present in the models dir.
+#[allow(dead_code)]
+pub fn semantic_model_present() -> bool {
+    let Ok(dir) = zord_config::models_dir() else {
+        return false;
+    };
+    let model_dir = dir.join(EMBED_MODEL_DIR);
+    [
+        "onnx/model.onnx",
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+    ]
+    .iter()
+    .all(|f| model_dir.join(f).exists())
+}
+
+/// Embed worker: lazy-loads the model on the first command, keeps it resident.
+/// Non-`semantic` builds compile to a drain loop (channel consumed, no-op).
+fn embed_loop(
+    rx: mpsc::Receiver<EmbedCmd>,
+    #[allow(unused_variables)] ev: UnboundedSender<Event>,
+    #[allow(unused_variables)] db_path: PathBuf,
+    #[allow(unused_variables)] jobs: Jobs,
+) {
+    // In non-semantic builds this is a pure drain loop so the channel never blocks.
+    #[cfg(not(feature = "semantic"))]
+    {
+        while rx.recv().is_ok() {}
+    }
+
+    #[cfg(feature = "semantic")]
+    embed_loop_impl(rx, ev, db_path, jobs);
+}
+
+#[cfg(feature = "semantic")]
+fn embed_loop_impl(
+    rx: mpsc::Receiver<EmbedCmd>,
+    ev: UnboundedSender<Event>,
+    db_path: PathBuf,
+    jobs: Jobs,
+) {
+    use fastembed::{
+        InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
+    };
+    use zord_store::{chunk_segments, cosine_similarity, Store};
+
+    /// Load (or re-use) the embedding model. Returns `None` and logs a notice
+    /// if the model files are not yet downloaded.
+    fn load_model(ev: &UnboundedSender<Event>) -> Option<TextEmbedding> {
+        let dir = match zord_config::models_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("embed: cannot resolve models dir: {e}");
+                return None;
+            }
+        };
+        let model_dir = dir.join(EMBED_MODEL_DIR);
+
+        // Read required files.
+        let read = |rel: &str| -> Option<Vec<u8>> { std::fs::read(model_dir.join(rel)).ok() };
+        let onnx = read("onnx/model.onnx")?;
+        let tokenizer_json = read("tokenizer.json")?;
+        let config_json = read("config.json")?;
+        let special_tokens_map = read("special_tokens_map.json")?;
+        let tokenizer_config = read("tokenizer_config.json")?;
+
+        let tok_files = TokenizerFiles {
+            tokenizer_file: tokenizer_json,
+            config_file: config_json,
+            special_tokens_map_file: special_tokens_map,
+            tokenizer_config_file: tokenizer_config,
+        };
+        let user_model = UserDefinedEmbeddingModel::new(onnx, tok_files);
+        let opts = InitOptionsUserDefined::new().with_intra_threads(2);
+
+        match TextEmbedding::try_new_from_user_defined(user_model, opts) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!("embed: failed to load embedding model: {e}");
+                let _ = ev.send(Event::Notice(format!(
+                    "Semantic search model failed to load: {e}"
+                )));
+                None
+            }
+        }
+    }
+
+    /// Ensure all model files are downloaded. Returns `true` on success.
+    fn ensure_model_files(ev: &UnboundedSender<Event>) -> bool {
+        let dir = match zord_config::models_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("embed: {e}")));
+                return false;
+            }
+        };
+        let model_dir = dir.join(EMBED_MODEL_DIR);
+        let _ = std::fs::create_dir_all(model_dir.join("onnx"));
+
+        for (rel_path, url) in EMBED_FILES {
+            let dest = model_dir.join(rel_path);
+            if dest.exists()
+                && std::fs::metadata(&dest)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            tracing::info!(%url, "embed: downloading model file {rel_path}");
+            let _ = ev.send(Event::Notice(format!(
+                "Downloading semantic search model ({rel_path})…"
+            )));
+            if let Err(e) = zord_net::download_to_file(url, &dest, &mut |_, _| {}) {
+                let _ = ev.send(Event::Notice(format!(
+                    "Semantic search model download failed ({rel_path}): {e}"
+                )));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Embed and store chunks for a single session. Returns `true` on success.
+    fn embed_session(
+        session_id: &str,
+        store: &Store,
+        model: &mut TextEmbedding,
+        _ev: &UnboundedSender<Event>,
+    ) -> bool {
+        let segs = match store.segments(session_id) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("embed: segments({session_id}): {e}");
+                return false;
+            }
+        };
+        let chunks = chunk_segments(&segs);
+        if chunks.is_empty() {
+            // No segments — write empty rows so the session is not listed as missing.
+            let _ = store.replace_chunk_embeddings(session_id, EMBED_MODEL_ID, &[]);
+            return true;
+        }
+        let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+        let embeddings = match model.embed(texts, None) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("embed: embed({session_id}): {e}");
+                return false;
+            }
+        };
+        let rows: Vec<(usize, i64, u64, Vec<f32>)> = chunks
+            .iter()
+            .zip(embeddings)
+            .enumerate()
+            .map(|(idx, (chunk, emb))| (idx, chunk.seg_id, chunk.t_start_ms, emb))
+            .collect();
+        if let Err(e) = store.replace_chunk_embeddings(session_id, EMBED_MODEL_ID, &rows) {
+            tracing::warn!("embed: store({session_id}): {e}");
+            return false;
+        }
+        true
+    }
+
+    let mut model_cache: Option<TextEmbedding> = None;
+
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            EmbedCmd::EmbedSession(session_id) => {
+                // Silent no-op when model files aren't downloaded yet — the
+                // BackfillAll / "Build semantic index" button is the entry point
+                // for the explicit download + index flow.
+                if !semantic_model_present() {
+                    continue;
+                }
+                if model_cache.is_none() {
+                    model_cache = load_model(&ev);
+                }
+                let Some(model) = model_cache.as_mut() else {
+                    continue;
+                };
+                let Ok(store) = Store::open(&db_path) else {
+                    continue;
+                };
+                embed_session(&session_id, &store, model, &ev);
+            }
+
+            EmbedCmd::BackfillAll => {
+                // Explicit request from the UI — download if needed, then index.
+                let jid = "semantic";
+                if jobs.is_running(jid) {
+                    continue;
+                }
+                let token = jobs.begin(&ev, jid, "semantic", "Building semantic index");
+
+                if !semantic_model_present() {
+                    let _ = ev.send(Event::Notice(
+                        "Downloading semantic search model (first run)…".to_string(),
+                    ));
+                    if !ensure_model_files(&ev) {
+                        jobs.end(&ev, jid);
+                        continue;
+                    }
+                    let _ = ev.send(Event::Notice("Semantic model downloaded.".to_string()));
+                }
+
+                if model_cache.is_none() {
+                    model_cache = load_model(&ev);
+                }
+                let Some(model) = model_cache.as_mut() else {
+                    jobs.end(&ev, jid);
+                    continue;
+                };
+                let Ok(store) = Store::open(&db_path) else {
+                    jobs.end(&ev, jid);
+                    continue;
+                };
+                let missing = store
+                    .sessions_missing_embeddings(EMBED_MODEL_ID)
+                    .unwrap_or_default();
+                let total = missing.len();
+                if total == 0 {
+                    let _ = ev.send(Event::Notice(
+                        "Semantic index is already up to date.".to_string(),
+                    ));
+                } else {
+                    let _ = ev.send(Event::Notice(format!(
+                        "Building semantic index for {total} session(s)…"
+                    )));
+                    let mut done = 0usize;
+                    for sid in missing {
+                        if cancelled(&token) {
+                            break;
+                        }
+                        if embed_session(&sid, &store, model, &ev) {
+                            done += 1;
+                        }
+                    }
+                    let _ = ev.send(Event::Notice(format!(
+                        "Semantic index built ({done}/{total} sessions)."
+                    )));
+                }
+                jobs.end(&ev, jid);
+            }
+
+            EmbedCmd::Query(text) => {
+                if !semantic_model_present() {
+                    // Index not built yet — emit empty results (the SearchView
+                    // will show the "index incomplete" hint).
+                    let _ = ev.send(Event::SearchResults(Vec::new()));
+                    continue;
+                }
+                if model_cache.is_none() {
+                    model_cache = load_model(&ev);
+                }
+                let Some(model) = model_cache.as_mut() else {
+                    let _ = ev.send(Event::SearchResults(Vec::new()));
+                    continue;
+                };
+                let query_emb = match model.embed(vec![text], None) {
+                    Ok(mut v) => v.pop().unwrap_or_default(),
+                    Err(e) => {
+                        let _ = ev.send(Event::Notice(format!("Semantic query failed: {e}")));
+                        let _ = ev.send(Event::SearchResults(Vec::new()));
+                        continue;
+                    }
+                };
+                let Ok(store) = Store::open(&db_path) else {
+                    let _ = ev.send(Event::SearchResults(Vec::new()));
+                    continue;
+                };
+                let all = store
+                    .all_chunk_embeddings(EMBED_MODEL_ID)
+                    .unwrap_or_default();
+
+                const SCORE_FLOOR: f32 = 0.35;
+                const TOP_K: usize = 20;
+
+                let mut scored: Vec<(f32, String, i64)> = all
+                    .into_iter()
+                    .map(|(sid, seg_id, _t, emb)| {
+                        let score = cosine_similarity(&query_emb, &emb);
+                        (score, sid, seg_id)
+                    })
+                    .filter(|(s, _, _)| *s >= SCORE_FLOOR)
+                    .collect();
+                scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+                scored.truncate(TOP_K);
+
+                // Resolve each seg_id → Segment.
+                let mut results: Vec<(String, zord_core::Segment)> = Vec::new();
+                for (_score, sid, seg_id) in scored {
+                    if let Ok(Some((_stored_sid, seg))) = store.get_segment_by_id(seg_id) {
+                        results.push((sid, seg));
+                    }
+                }
+                let _ = ev.send(Event::SearchResults(results));
+            }
+        }
+    }
+}
+
 /// clip at a time: a new `Play` replaces the current clip, `Stop` silences.
 /// Emits [`Event::Playing`] transitions so the UI can mark the active line.
 /// Phase 42b: also handles `TimelinePlay` / `TimelinePause` / `TimelineResume`
@@ -3853,6 +4236,7 @@ fn control_loop(
     ev: UnboundedSender<Event>,
     db_path: PathBuf,
     summ_tx: mpsc::Sender<SummCmd>,
+    embed_tx: mpsc::Sender<EmbedCmd>,
 ) {
     // Active microphone *test* (setup wizard) between sessions: the capture
     // source plus the stop flag of its level-pump thread. Dropped (capture
@@ -3949,9 +4333,9 @@ fn control_loop(
                     || std::env::var("ZORD_DISCORD").is_ok()
                     || std::env::var("ZORD_FAKE_INTEGRATION").is_ok();
                 let ended = if integration {
-                    run_integration_session(opts, &rx, &ev, &db_path, &summ_tx)
+                    run_integration_session(opts, &rx, &ev, &db_path, &summ_tx, &embed_tx)
                 } else {
-                    run_session(opts, &rx, &ev, &db_path, &summ_tx)
+                    run_session(opts, &rx, &ev, &db_path, &summ_tx, &embed_tx)
                 };
                 if ended {
                     break; // session ended due to Shutdown
@@ -4021,6 +4405,7 @@ fn run_session(
     ev: &UnboundedSender<Event>,
     db_path: &PathBuf,
     summ_tx: &mpsc::Sender<SummCmd>,
+    #[allow(unused_variables)] embed_tx: &mpsc::Sender<EmbedCmd>,
 ) -> bool {
     let SessionOpts {
         model,
@@ -4376,6 +4761,16 @@ fn run_session(
             session: Some(session_id.clone()),
         });
     }
+    // Auto-embed after transcription (Phase 45): if the transcript is now
+    // final (post pass ran or live was on), enqueue an embed job so the
+    // session appears in semantic search without the user needing to press
+    // "Build semantic index". Gated: only when the `semantic` feature is
+    // compiled in. Never blocks, never notices when the model isn't yet
+    // downloaded — the Backfill button is the explicit entry point for that.
+    #[cfg(feature = "semantic")]
+    if post_pass || live {
+        let _ = embed_tx.send(EmbedCmd::EmbedSession(session_id.clone()));
+    }
     if !persist_audio {
         if let Some(wav) = others_wav.as_ref() {
             let _ = std::fs::remove_file(wav);
@@ -4412,6 +4807,7 @@ fn run_integration_session(
     ev: &UnboundedSender<Event>,
     db_path: &PathBuf,
     summ_tx: &mpsc::Sender<SummCmd>,
+    #[allow(unused_variables)] embed_tx: &mpsc::Sender<EmbedCmd>,
 ) -> bool {
     // No mic/desktop capture in integration mode — all audio (Me included) comes
     // from the platform's per-participant streams.
@@ -4697,6 +5093,11 @@ fn run_integration_session(
             session: Some(session_id.clone()),
         });
     }
+    // Auto-embed (Phase 45 — same as run_session).
+    #[cfg(feature = "semantic")]
+    if post_pass || live {
+        let _ = embed_tx.send(EmbedCmd::EmbedSession(session_id.clone()));
+    }
 
     #[cfg(feature = "voiceprints")]
     enroll_integration_tracks(&store, &session_id, &session_dir, ev);
@@ -4849,6 +5250,7 @@ fn retranscribe_session_ondemand(
     session_id: &str,
     ev: &UnboundedSender<Event>,
     token: &Arc<AtomicBool>,
+    #[allow(unused_variables)] embed_tx: &mpsc::Sender<EmbedCmd>,
 ) {
     let done = |ev: &UnboundedSender<Event>| {
         let _ = ev.send(Event::Retranscribed);
@@ -4907,6 +5309,11 @@ fn retranscribe_session_ondemand(
             .flatten()
             .unwrap_or(0);
         diarize_session_ondemand(db_path, session_id, pinned, ev, token);
+    }
+    // Auto-embed after re-transcription (Phase 45).
+    #[cfg(feature = "semantic")]
+    if ok {
+        let _ = embed_tx.send(EmbedCmd::EmbedSession(session_id.to_string()));
     }
     done(ev)
 }

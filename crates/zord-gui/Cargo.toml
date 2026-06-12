@@ -37,6 +37,10 @@ diarization = ["dep:zord-diarize", "zord-diarize/sherpa"]
 voiceprints = ["diarization"]
 # Discord voice integration (per-participant capture via songbird; heavy build).
 discord = ["zord-integrations/discord"]
+# Meaning-based search: a local ONNX text-embedding model (BGE-small-en-v1.5,
+# ~24 MB) embeds transcript chunks and scores them by cosine similarity.
+# Heavy build dep: ort (ONNX Runtime) + fastembed — hence opt-in.
+semantic = ["dep:fastembed"]
 # In-app update check + Windows in-place install (Phase 34). Compiled ONLY into
 # the GitHub / own-store channel — store builds (Steam/MS Store) must not
 # self-update (the store does it), so their release jobs omit this feature.
@@ -82,3 +86,8 @@ pulldown-cmark = { version = "0.12", default-features = false, features = [
 # report. Pure Rust (no libz dependency) with deflate compression only — the
 # bundle is small (a few log files + JSON), so bzip2/zstd are not worth the size.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Semantic search (Phase 45): local text-embedding inference via ONNX Runtime.
+# Only compiled when the `semantic` feature is enabled. We disable the default
+# hf-hub feature so fastembed does NOT pull in the HF HTTP client — we download
+# model files ourselves via zord-net so our proxy-aware agent is used.
+fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls"], optional = true }

@@ -1823,16 +1823,18 @@ short-id, session markdown renderer (golden), rename-moves-file,
 delete-removes-file. Gate: fmt + clippy + tests all pass. Live
 verification pending (requires a running app).
 
-### Phase 45 — Semantic search (planned)
-Meaning-based search beside FTS: a local text-embedding model (small ONNX,
-e.g. bge-small/MiniLM class — downloaded on demand like other models)
-embeds transcript chunks (per ~segment-group) into a `segment_embeddings`
-table (blob vectors, same pattern as voiceprints); brute-force cosine is
-plenty at this scale. Search view gains a "Semantic" toggle: query →
-embed → top-K chunks → results grouped by session with jump-to-line; the
-cross-meeting chat's grounding can reuse the same retrieval as a follow-up.
-Embeddings computed post-transcription (job, cancellable, backfill button).
-Likely behind a `semantic` Cargo feature (ONNX text-embedding runtime dep).
+### Phase 45 — Semantic search ✅ DONE
+Meaning-based search beside FTS: BGE-small-en-v1.5 (384-dim, MIT, ~24 MB
+ONNX) embeds ~250-word transcript chunks into a `chunk_embeddings` table
+(f32 LE blob, CASCADE delete, same pattern as voiceprints); brute-force
+cosine (top-20, floor 0.35) is plenty at this scale. Search view gains a
+Keyword/Semantic mode toggle (only in `semantic` builds); empty-index hint
++ "Build semantic index" button in Settings → AI. Model files downloaded
+via zord-net proxy-aware agent from Xenova/bge-small-en-v1.5 on first use.
+Auto-chains after post-stop transcription and re-transcription. Behind
+`semantic` Cargo feature (fastembed 5.x + ort ONNX Runtime).
+Note: brute-force scale ceiling (~tens of thousands of chunks); live
+end-to-end embedding verification pending first model download.
 
 ### Business split — strategic direction (recorded June 2026)
 The app will eventually fork into a **premium / business-user tier**

@@ -517,11 +517,20 @@ impl Store {
     }
 
     /// Remove all segments for a session (used before re-transcribing).
+    /// Also clears any stale chunk embeddings — a new transcript invalidates
+    /// the old vector index (Phase 45).
     pub fn clear_segments(&self, session_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM segments WHERE session_id = ?1",
             params![session_id],
         )?;
+        // Embeddings are derived from segments; stale vectors must not survive a
+        // re-transcription.  Ignore errors (the table may not exist yet on old DBs
+        // opened before Phase 45, though the schema migration creates it on open).
+        let _ = self.conn.execute(
+            "DELETE FROM chunk_embeddings WHERE session_id = ?1",
+            params![session_id],
+        );
         Ok(())
     }
 
@@ -1157,6 +1166,106 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 45: semantic-search chunk-embedding store
+    // -----------------------------------------------------------------------
+
+    /// Replace ALL chunk embeddings for a session (atomically delete-then-insert).
+    ///
+    /// `rows` is a slice of `(chunk_idx, seg_id, t_start_ms, embedding)` tuples.
+    /// Passing an empty slice clears the session's embeddings without inserting new ones.
+    pub fn replace_chunk_embeddings(
+        &self,
+        session_id: &str,
+        model: &str,
+        rows: &[(usize, i64, u64, Vec<f32>)],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM chunk_embeddings WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        for (chunk_idx, seg_id, t_start_ms, emb) in rows {
+            tx.execute(
+                "INSERT INTO chunk_embeddings
+                 (session_id, chunk_idx, seg_id, t_start_ms, model, embedding)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    session_id,
+                    *chunk_idx as i64,
+                    seg_id,
+                    i64v(*t_start_ms),
+                    model,
+                    embedding_to_blob(emb),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// All chunk embeddings for the given model, across all sessions.
+    /// Returns `(session_id, seg_id, t_start_ms, embedding)` quads for scoring.
+    #[allow(clippy::type_complexity)]
+    pub fn all_chunk_embeddings(&self, model: &str) -> Result<Vec<(String, i64, u64, Vec<f32>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, seg_id, t_start_ms, embedding
+             FROM chunk_embeddings WHERE model = ?1",
+        )?;
+        let rows = stmt.query_map(params![model], |r| {
+            let session_id: String = r.get(0)?;
+            let seg_id: i64 = r.get(1)?;
+            let t_start_ms: i64 = r.get(2)?;
+            let blob: Vec<u8> = r.get(3)?;
+            Ok((session_id, seg_id, t_start_ms as u64, blob))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (sid, seg_id, t_start_ms, blob) = row?;
+            result.push((sid, seg_id, t_start_ms, blob_to_embedding(&blob)));
+        }
+        Ok(result)
+    }
+
+    /// Session ids (ended, has at least one segment) that have NO chunk rows
+    /// for `model` — the backfill candidate list.
+    pub fn sessions_missing_embeddings(&self, model: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM sessions
+             WHERE ended_at IS NOT NULL
+               AND id IN (SELECT DISTINCT session_id FROM segments)
+               AND id NOT IN (
+                   SELECT DISTINCT session_id FROM chunk_embeddings WHERE model = ?1
+               )
+             ORDER BY started_at",
+        )?;
+        let rows = stmt.query_map(params![model], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Remove all chunk embeddings for a session (e.g. on explicit reset).
+    pub fn clear_chunk_embeddings(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM chunk_embeddings WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Look up a segment by its database id, returning `(session_id, segment)`.
+    /// Used by the semantic-search query path to resolve chunk hit → transcript line.
+    pub fn get_segment_by_id(&self, seg_id: i64) -> Result<Option<(String, Segment)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, id, source, t_start_ms, t_end_ms, text, words_json, speaker
+             FROM segments WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![seg_id], |r| {
+            let session_id: String = r.get(0)?;
+            Ok((session_id, row_to_segment_offset(r, 1)?))
+        })?;
+        Ok(rows.next().transpose()?)
+    }
 }
 
 /// Best-effort `ALTER TABLE`s for columns added after the base schema; each is
@@ -1334,6 +1443,21 @@ fn create_schema(conn: &Connection) -> Result<()> {
                 INSERT INTO segments_fts(segments_fts, rowid, text) VALUES ('delete', old.id, old.text);
                 INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
             END;
+
+            -- Phase 45: semantic search — one embedding vector per transcript chunk.
+            -- `chunk_idx` is the 0-based position in the session's chunk sequence;
+            -- `seg_id` is the id of the first segment of the chunk (jump target).
+            CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                chunk_idx   INTEGER NOT NULL,
+                seg_id      INTEGER NOT NULL,
+                t_start_ms  INTEGER NOT NULL,
+                model       TEXT    NOT NULL,
+                embedding   BLOB    NOT NULL,
+                PRIMARY KEY (session_id, chunk_idx)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_model
+                ON chunk_embeddings(model, session_id);
             "#,
     )?;
     Ok(())
@@ -1421,6 +1545,103 @@ pub fn best_voiceprint_match(
     }
     let c = &cands[best_i];
     Some((c.0, c.1.clone(), best))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 45: pure transcript chunker — no I/O, fully testable
+// ---------------------------------------------------------------------------
+
+/// Target word count per chunk (soft ceiling; a chunk can be a little larger
+/// when the final segment that tips it over is very long).
+const CHUNK_TARGET_WORDS: usize = 250;
+
+/// One transcript chunk ready for embedding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chunk {
+    /// id of the **first** segment in the chunk (used as the jump target in search results).
+    pub seg_id: i64,
+    /// Millisecond offset of the chunk's first segment from session start.
+    pub t_start_ms: u64,
+    /// Speaker-labelled text concatenated from consecutive segments, separated by `\n`.
+    /// Format: `"[Me] text\n[Speaker 1] text\n…"`.
+    pub text: String,
+}
+
+/// Chunk a flat, time-ordered `[Segment]` slice into groups of ≤ `CHUNK_TARGET_WORDS`
+/// words each. Speaker label is prepended to every line so the embedding
+/// captures *who* said something alongside *what*.
+///
+/// Segments with empty (whitespace-only) text are skipped. The returned
+/// `Vec<Chunk>` may be empty when there are no non-empty segments.
+pub fn chunk_segments(segs: &[zord_core::Segment]) -> Vec<Chunk> {
+    let mut chunks: Vec<Chunk> = Vec::new();
+
+    // Current in-progress chunk state.
+    let mut cur_seg_id: Option<i64> = None;
+    let mut cur_t_start: u64 = 0;
+    let mut cur_lines: Vec<String> = Vec::new();
+    let mut cur_words: usize = 0;
+
+    let flush = |cur_lines: &mut Vec<String>,
+                 cur_seg_id: &mut Option<i64>,
+                 cur_t_start: &mut u64,
+                 chunks: &mut Vec<Chunk>| {
+        if let Some(seg_id) = cur_seg_id.take() {
+            chunks.push(Chunk {
+                seg_id,
+                t_start_ms: *cur_t_start,
+                text: cur_lines.join("\n"),
+            });
+        }
+        cur_lines.clear();
+    };
+
+    for seg in segs {
+        let trimmed = seg.text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let label = match seg.source {
+            zord_core::Source::Me => "Me".to_string(),
+            zord_core::Source::Others => match seg.speaker {
+                Some(idx) => format!("Speaker {}", idx + 1),
+                None => "Others".to_string(),
+            },
+        };
+        let line = format!("[{label}] {trimmed}");
+        let word_count = trimmed.split_whitespace().count();
+
+        // If adding this segment would exceed the target AND the chunk is non-empty,
+        // flush first (never split a segment, so we may overshoot by one segment).
+        if cur_words > 0 && cur_words + word_count > CHUNK_TARGET_WORDS {
+            flush(
+                &mut cur_lines,
+                &mut cur_seg_id,
+                &mut cur_t_start,
+                &mut chunks,
+            );
+            cur_words = 0;
+        }
+
+        if cur_seg_id.is_none() {
+            // Starting a new chunk: record the anchor segment.
+            cur_seg_id = seg.id;
+            cur_t_start = seg.t_start_ms;
+        }
+        cur_lines.push(line);
+        cur_words += word_count;
+    }
+
+    // Flush the last partial chunk.
+    flush(
+        &mut cur_lines,
+        &mut cur_seg_id,
+        &mut cur_t_start,
+        &mut chunks,
+    );
+
+    chunks
 }
 
 /// Build a `Session` from a row selected as `(id, started_at, ended_at, title,
@@ -2229,5 +2450,235 @@ mod range_delete_tests {
         let deleted = s.delete_segments_in_range("s2", 5_000, 5_000).unwrap();
         assert_eq!(deleted, 0);
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod chunk_embedding_tests {
+    use super::*;
+    use zord_core::{Segment, Session, Source};
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zord-cemb-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    fn mk_session(s: &Store, id: &str, ended: bool) {
+        s.create_session(&Session {
+            id: id.into(),
+            started_at: 1,
+            ended_at: if ended { Some(2) } else { None },
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+            overview_folded_ms: None,
+        })
+        .unwrap();
+    }
+
+    fn mk_seg(id: &str, t0: u64, t1: u64, text: &str) -> (String, Segment) {
+        (
+            id.into(),
+            Segment {
+                id: None,
+                source: Source::Me,
+                t_start_ms: t0,
+                t_end_ms: t1,
+                text: text.into(),
+                words: vec![],
+                speaker: None,
+            },
+        )
+    }
+
+    fn approx_eq(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    #[test]
+    fn roundtrip_and_all_embeddings() {
+        let db = tmp_db("roundtrip");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1", true);
+
+        let emb_a: Vec<f32> = vec![1.0, 0.0, 0.0];
+        let emb_b: Vec<f32> = vec![0.0, 1.0, 0.0];
+        s.replace_chunk_embeddings(
+            "s1",
+            "bge-small-en-v1.5",
+            &[(0, 42, 1000, emb_a.clone()), (1, 99, 5000, emb_b.clone())],
+        )
+        .unwrap();
+
+        let all = s.all_chunk_embeddings("bge-small-en-v1.5").unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Find both chunks by seg_id.
+        let row_a = all.iter().find(|(_, sid, _, _)| *sid == 42).unwrap();
+        let row_b = all.iter().find(|(_, sid, _, _)| *sid == 99).unwrap();
+        assert_eq!(row_a.0, "s1");
+        assert_eq!(row_a.2, 1000);
+        assert!(approx_eq(&row_a.3, &emb_a));
+        assert_eq!(row_b.2, 5000);
+        assert!(approx_eq(&row_b.3, &emb_b));
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn replace_semantics() {
+        let db = tmp_db("replace");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1", true);
+
+        // Insert two rows…
+        s.replace_chunk_embeddings(
+            "s1",
+            "bge-small-en-v1.5",
+            &[(0, 1, 0, vec![1.0]), (1, 2, 1000, vec![2.0])],
+        )
+        .unwrap();
+        // …then replace with one row: the old two must be gone.
+        s.replace_chunk_embeddings("s1", "bge-small-en-v1.5", &[(0, 9, 0, vec![9.0])])
+            .unwrap();
+
+        let all = s.all_chunk_embeddings("bge-small-en-v1.5").unwrap();
+        assert_eq!(all.len(), 1, "replace must delete old rows first");
+        assert_eq!(all[0].1, 9);
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn sessions_missing_embeddings_list() {
+        let db = tmp_db("missing");
+        let s = Store::open(&db).unwrap();
+
+        // s1: ended + has segments — should appear in missing list.
+        mk_session(&s, "s1", true);
+        let (sid, seg) = mk_seg("s1", 0, 1000, "hello");
+        let rowid = s.insert_segment(&sid, &seg).unwrap();
+
+        // s2: live (no ended_at) — must NOT appear.
+        mk_session(&s, "s2", false);
+        let (sid2, seg2) = mk_seg("s2", 0, 1000, "live");
+        let _ = s.insert_segment(&sid2, &seg2).unwrap();
+
+        // s3: ended but no segments — must NOT appear.
+        mk_session(&s, "s3", true);
+
+        let missing = s.sessions_missing_embeddings("bge-small-en-v1.5").unwrap();
+        assert_eq!(missing, vec!["s1"]);
+
+        // Index s1 — it should disappear from the missing list.
+        s.replace_chunk_embeddings("s1", "bge-small-en-v1.5", &[(0, rowid, 0, vec![1.0])])
+            .unwrap();
+        let missing2 = s.sessions_missing_embeddings("bge-small-en-v1.5").unwrap();
+        assert!(missing2.is_empty());
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn cascade_on_session_delete() {
+        let db = tmp_db("cascade");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1", true);
+        s.replace_chunk_embeddings("s1", "bge-small-en-v1.5", &[(0, 1, 0, vec![1.0])])
+            .unwrap();
+        assert_eq!(
+            s.all_chunk_embeddings("bge-small-en-v1.5").unwrap().len(),
+            1
+        );
+        // Deleting the session must cascade to chunk_embeddings.
+        s.delete_session("s1").unwrap();
+        assert!(s
+            .all_chunk_embeddings("bge-small-en-v1.5")
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod chunk_segments_tests {
+    use super::*;
+    use zord_core::{Segment, Source};
+
+    fn seg(id: i64, t0: u64, t1: u64, text: &str, src: Source, spk: Option<i32>) -> Segment {
+        Segment {
+            id: Some(id),
+            source: src,
+            t_start_ms: t0,
+            t_end_ms: t1,
+            text: text.into(),
+            words: vec![],
+            speaker: spk,
+        }
+    }
+
+    #[test]
+    fn empty_input_produces_no_chunks() {
+        assert!(chunk_segments(&[]).is_empty());
+    }
+
+    #[test]
+    fn single_segment_is_one_chunk() {
+        let segs = vec![seg(1, 0, 1000, "Hello world", Source::Me, None)];
+        let chunks = chunk_segments(&segs);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].seg_id, 1);
+        assert_eq!(chunks[0].t_start_ms, 0);
+        assert!(chunks[0].text.contains("[Me] Hello world"));
+    }
+
+    #[test]
+    fn speaker_labels_formatted_correctly() {
+        let segs = vec![
+            seg(1, 0, 1000, "I said this", Source::Me, None),
+            seg(2, 1000, 2000, "They replied", Source::Others, Some(0)),
+            seg(3, 2000, 3000, "No speaker", Source::Others, None),
+        ];
+        let chunks = chunk_segments(&segs);
+        // All three fit in one chunk.
+        assert_eq!(chunks.len(), 1);
+        let text = &chunks[0].text;
+        assert!(text.contains("[Me] I said this"), "got: {text}");
+        assert!(text.contains("[Speaker 1] They replied"), "got: {text}");
+        assert!(text.contains("[Others] No speaker"), "got: {text}");
+    }
+
+    #[test]
+    fn splits_on_word_count_boundary() {
+        // Build enough words to force a split at CHUNK_TARGET_WORDS (250).
+        // Each segment has 100 words; after 250 the third should be a new chunk.
+        let word = "word";
+        let text_100: String = std::iter::repeat_n(word, 100).collect::<Vec<_>>().join(" ");
+        let segs = vec![
+            seg(1, 0, 1000, &text_100, Source::Me, None), // 100 words → chunk1
+            seg(2, 1000, 2000, &text_100, Source::Me, None), // 200 words → still chunk1
+            seg(3, 2000, 3000, &text_100, Source::Me, None), // 300 words → new chunk
+            seg(4, 3000, 4000, "short", Source::Me, None), // 301 words → chunk2
+        ];
+        let chunks = chunk_segments(&segs);
+        assert_eq!(chunks.len(), 2, "expected 2 chunks, got {}", chunks.len());
+        assert_eq!(chunks[0].seg_id, 1);
+        assert_eq!(chunks[1].seg_id, 3);
+    }
+
+    #[test]
+    fn skips_whitespace_only_segments() {
+        let segs = vec![
+            seg(1, 0, 1000, "   ", Source::Me, None),
+            seg(2, 1000, 2000, "real text", Source::Me, None),
+            seg(3, 2000, 3000, "", Source::Others, None),
+        ];
+        let chunks = chunk_segments(&segs);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].seg_id, 2);
     }
 }

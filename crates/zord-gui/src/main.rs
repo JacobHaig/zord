@@ -14,8 +14,8 @@ mod wizard;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{
-    AudioFiles, ChatScope, DbCmd, Engine, Event, ModelCmd, ModelInfo, PlayCmd, RecorderCmd, Status,
-    SummCmd, TimelineLane,
+    AudioFiles, ChatScope, DbCmd, EmbedCmd, Engine, Event, ModelCmd, ModelInfo, PlayCmd,
+    RecorderCmd, Status, SummCmd, TimelineLane,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -360,6 +360,9 @@ fn MainApp() -> Element {
         use_signal(std::collections::HashMap::<String, (bool, bool, bool)>::new);
     let session_filter = use_signal(String::new);
     let mut search_results = use_signal(Vec::<(String, Segment)>::new);
+    // Semantic search: whether the search view is in Keyword or Semantic mode.
+    // Only meaningful in `semantic` builds; always "keyword" otherwise.
+    let search_mode = use_signal(|| "keyword".to_string());
     // Dedicated search view: the live query text, plus a pending "scroll to this
     // segment after the session loads" + which line to briefly highlight.
     let mut search_query = use_signal(String::new);
@@ -1037,6 +1040,9 @@ fn MainApp() -> Element {
             if q.trim().is_empty() {
                 search_results.set(Vec::new());
                 note_results.set(Vec::new());
+            } else if cfg!(feature = "semantic") && *search_mode.peek() == "semantic" {
+                // Semantic mode: route to the embed worker for cosine search.
+                let _ = engine.embed_tx.send(EmbedCmd::Query(q));
             } else {
                 let _ = engine.db_tx.send(DbCmd::Search(q));
             }
@@ -1341,8 +1347,10 @@ fn MainApp() -> Element {
                         note_results,
                         sessions,
                         query: search_query,
+                        mode: search_mode,
                         on_query,
                         on_open: on_open_result,
+                        engine: engine.clone(),
                     }
                 } else if *view.read() == View::Speakers {
                     {
@@ -3279,6 +3287,30 @@ fn AiSettings(
                                                     }
                                                 }
                                                 SummaryPromptSettings { settings }
+                                                // Phase 45: semantic search index management.
+                                                if cfg!(feature = "semantic") {
+                                                    {
+                                                        let engine_sem = engine.clone();
+                                                        rsx! {
+                                                            div { class: "settings-subsection",
+                                                                h4 { "Semantic search" }
+                                                                p { class: "field-note",
+                                                                    "Builds a local embedding index (BGE-small-en-v1.5, ~24 MB) so the Search view can find passages by meaning, not just keywords. The model downloads on first run and stays on device. Brute-force cosine scoring — fast for libraries up to ~100 k transcript chunks."
+                                                                }
+                                                                div { class: "btn-row",
+                                                                    button {
+                                                                        class: "mbtn ghost",
+                                                                        onclick: move |_| {
+                                                                            let _ = engine_sem.embed_tx.send(EmbedCmd::BackfillAll);
+                                                                        },
+                                                                        "Build semantic index"
+                                                                    }
+                                                                }
+                                                                p { class: "field-note", "Downloads the model on first run. Indexing runs in the background; you can use the app normally. Re-run after adding new sessions." }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -4147,8 +4179,10 @@ fn SearchView(
     note_results: Signal<Vec<(String, String)>>,
     sessions: Signal<Vec<Session>>,
     query: Signal<String>,
+    mut mode: Signal<String>,
     on_query: EventHandler<String>,
     on_open: EventHandler<(String, Option<i64>)>,
+    engine: Engine,
 ) -> Element {
     use std::collections::HashMap;
     let sess = sessions.read();
@@ -4158,6 +4192,8 @@ fn SearchView(
         .map(|s| (s.id.clone(), session_title(s)))
         .collect();
     let note_hits: Vec<(String, String)> = note_results.read().clone();
+
+    let is_semantic = cfg!(feature = "semantic") && *mode.read() == "semantic";
 
     // Group hits by session, sort lines chronologically, sessions newest-first.
     let mut groups: HashMap<String, Vec<Segment>> = HashMap::new();
@@ -4176,25 +4212,84 @@ fn SearchView(
 
     rsx! {
         div { class: "search-view",
-            input {
-                class: "search-input-big",
-                r#type: "text",
-                placeholder: "Search all transcripts…",
-                autofocus: true,
-                value: "{query}",
-                oninput: move |e| on_query.call(e.value()),
+            div { class: "search-top-row",
+                input {
+                    class: "search-input-big",
+                    r#type: "text",
+                    placeholder: if is_semantic { "Meaning-based search…" } else { "Search all transcripts…" },
+                    autofocus: true,
+                    value: "{query}",
+                    oninput: move |e| on_query.call(e.value()),
+                }
+                // Mode toggle — only visible in `semantic` builds.
+                if cfg!(feature = "semantic") {
+                    div { class: "search-mode-toggle",
+                        button {
+                            class: if !is_semantic { "stab active" } else { "stab" },
+                            onclick: move |_| {
+                                mode.set("keyword".into());
+                                // Re-run the current query in the new mode.
+                                let q = query.peek().clone();
+                                on_query.call(q);
+                            },
+                            "Keyword"
+                        }
+                        button {
+                            class: if is_semantic { "stab active" } else { "stab" },
+                            onclick: move |_| {
+                                mode.set("semantic".into());
+                                let q = query.peek().clone();
+                                on_query.call(q);
+                            },
+                            "Semantic"
+                        }
+                    }
+                }
             }
             if !q_empty {
                 div { class: "search-count",
-                    "{total} transcript match(es) across {ordered.len()} meeting(s)"
-                    if !note_hits.is_empty() { " · {note_hits.len()} in notes" }
+                    if is_semantic {
+                        "Top {total} semantic match(es) across {ordered.len()} meeting(s) · ranked by meaning"
+                    } else {
+                        "{total} transcript match(es) across {ordered.len()} meeting(s)"
+                        if !note_hits.is_empty() { " · {note_hits.len()} in notes" }
+                    }
                 }
             }
             div { class: "search-results",
                 if q_empty {
-                    div { class: "empty", "Search every meeting's transcript and your session notes." }
+                    if is_semantic {
+                        div { class: "empty", "Search by meaning — finds relevant passages even without exact keyword matches." }
+                    } else {
+                        div { class: "empty", "Search every meeting's transcript and your session notes." }
+                    }
                 } else if no_hits {
-                    div { class: "empty", "No matches." }
+                    if is_semantic && cfg!(feature = "semantic") {
+                        // Empty semantic results — check if the index is incomplete.
+                        {
+                            let engine_hint = engine.clone();
+                            rsx! {
+                                div { class: "empty",
+                                    "No semantic matches found."
+                                    br {}
+                                    span { class: "field-note",
+                                        "If you haven't built the semantic index yet, go to Settings → AI → \"Build semantic index\"."
+                                    }
+                                    div { class: "btn-row",
+                                        button {
+                                            class: "mbtn ghost",
+                                            onclick: move |_| {
+                                                let _ = engine_hint.embed_tx.send(EmbedCmd::BackfillAll);
+                                            },
+                                            "Build semantic index now"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        div { class: "empty", "No matches." }
+                    }
                 } else {
                     // Host-note matches first (high-signal: links / action items).
                     for (sid, note) in note_hits {
