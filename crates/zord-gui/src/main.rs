@@ -1878,7 +1878,7 @@ fn SessionsSidebar(
                             class: "app-capture-row",
                             title: "Record one application's audio instead of the whole desktop",
                             select {
-                                class: "app-capture-select",
+                                class: if settings.read().capture_app_id.is_empty() { "app-capture-select" } else { "app-capture-select picked" },
                                 onmousedown: move |_| {
                                     // Refresh on open — catches newly launched apps
                                     // without requiring a separate Refresh button.
@@ -4225,7 +4225,7 @@ fn SearchView(
                 if cfg!(feature = "semantic") {
                     div { class: "search-mode-toggle",
                         button {
-                            class: if !is_semantic { "stab active" } else { "stab" },
+                            class: if !is_semantic { "smode active" } else { "smode" },
                             onclick: move |_| {
                                 mode.set("keyword".into());
                                 // Re-run the current query in the new mode.
@@ -4235,7 +4235,7 @@ fn SearchView(
                             "Keyword"
                         }
                         button {
-                            class: if is_semantic { "stab active" } else { "stab" },
+                            class: if is_semantic { "smode active" } else { "smode" },
                             onclick: move |_| {
                                 mode.set("semantic".into());
                                 let q = query.peek().clone();

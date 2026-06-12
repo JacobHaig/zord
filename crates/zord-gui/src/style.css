@@ -54,7 +54,7 @@ body {
 /* ========================= 2. PRIMITIVES ==================================
    Shared interactive behavior for every button family. Composition happens
    here at the CSS level — markup keeps its existing class names. */
-:is(.record, .mbtn, .tbtn, .row-btn, .rail-btn, .stab, .toggle, .chip,
+:is(.record, .mbtn, .tbtn, .row-btn, .rail-btn, .stab, .smode, .toggle, .chip,
     .gen-item, .export-menu-item, .notes-tab, .close-btn,
     .job-cancel, .panel-toggle, .play-btn, .notice-x, .swatch, .session) {
   transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
@@ -62,7 +62,7 @@ body {
               transform var(--t-fast) var(--ease), filter var(--t-fast) var(--ease),
               opacity var(--t-fast) var(--ease);
 }
-:is(.record, .mbtn, .tbtn, .row-btn, .rail-btn, .stab, .toggle, .chip,
+:is(.record, .mbtn, .tbtn, .row-btn, .rail-btn, .stab, .smode, .toggle, .chip,
     .gen-item, .export-menu-item, .close-btn,
     .job-cancel, .swatch):active:not(:disabled) {
   transform: scale(0.97);
@@ -125,13 +125,22 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* Record lives permanently at the sidebar foot; pushed down, never moves. */
 .sidebar-foot { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .sidebar-foot .record { width: 100%; }
-/* Per-app capture picker (Phase 43g): compact select + optional error badge. */
-.app-capture-row { display: flex; align-items: center; gap: 4px; }
+/* Per-app capture picker (Phase 43g): a quiet status line BELOW the Record
+   button — reads as muted text ("Capture: All system audio") until hovered,
+   tints accent when a specific app is picked. A boxy full-width select above
+   Record was visually too loud for a secondary, occasional control. */
+.app-capture-row { display: flex; align-items: center; gap: 4px; order: 99; /* visually below Record (flex column) */ }
 .app-capture-select {
   flex: 1; min-width: 0; width: 100%;
-  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
-  border-radius: 8px; padding: 5px 8px; font-size: 12px; outline: none;
+  appearance: none; -webkit-appearance: none; text-align: center;
+  background: transparent; color: var(--muted); border: 1px solid transparent;
+  border-radius: var(--r-sm); padding: 3px 8px; font: inherit; font-size: 11.5px;
+  cursor: pointer; outline: none;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+              border-color var(--t-fast) var(--ease);
 }
+.app-capture-select:hover { background: var(--panel-2); border-color: var(--line); color: var(--text); }
+.app-capture-select.picked { color: var(--accent); }
 .app-capture-err { color: var(--danger); font-size: 13px; flex-shrink: 0; cursor: help; }
 /* Draggable divider between the sidebar and the main column. */
 .splitter { width: 5px; margin-left: -3px; flex-shrink: 0; cursor: col-resize; user-select: none; background: transparent; }
@@ -471,8 +480,16 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* Dedicated search view */
 .search-view { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
-.search-input-big { padding: 11px 14px; font-size: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); color: var(--text); }
+.search-top-row { display: flex; gap: 8px; align-items: stretch; }
+.search-input-big { flex: 1; min-width: 0; padding: 11px 14px; font-size: 15px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); color: var(--text); }
 .search-input-big:focus { outline: none; border-color: var(--accent); }
+/* Keyword ⟷ Semantic segmented control (its own class — NOT the settings-nav
+   .stab tabs, whose left-aligned styling looked broken here). */
+.search-mode-toggle { display: flex; flex-shrink: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.smode { border: none; background: transparent; color: var(--muted); padding: 0 18px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.smode:hover { background: var(--panel-2); color: var(--text); }
+.smode.active { background: var(--panel-2); color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+.smode + .smode { border-left: 1px solid var(--line); }
 .search-count { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
 /* Normal scrolling block (NOT a flex column — flex items shrink to fit the
    height and, with the group's overflow:hidden, clip their own contents). */
