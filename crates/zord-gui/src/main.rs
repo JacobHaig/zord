@@ -2027,6 +2027,8 @@ fn SessionToolbar(
     let eng_diar = engine.clone();
     let sid_diar = id.clone();
     let sid_rt = id.clone();
+    let eng_fold = engine.clone();
+    let sid_fold = id.clone();
     let eng_maudio = engine.clone();
     let sid_maudio = id.clone();
     let mk = move |fmt: Format| {
@@ -2063,44 +2065,21 @@ fn SessionToolbar(
                 if *show_generate_menu.read() {
                     div { class: "dd-backdrop", onclick: move |_| show_generate_menu.set(false) }
                     div { class: "gen-menu",
-                        // Summarize
+                        // Items run top-to-bottom in PIPELINE order — the order
+                        // you'd actually use them: transcript first, then who
+                        // said it, then the AI digests, then the rollup.
+                        // Re-transcribe — needs kept audio.
                         button {
                             class: "gen-item",
-                            disabled: summarizing(),
+                            disabled: retranscribing() || !has_any_audio,
+                            title: if has_any_audio { "Regenerate the transcript from kept audio with the re-transcription model" } else { "Needs kept audio" },
                             onclick: move |_| {
                                 show_generate_menu.set(false);
-                                if *summarizing.peek() { return; }
-                                summarizing.set(true);
-                                notice.set(Some(if settings.peek().llm_backend == "external" {
-                                    "Summarizing via the external LLM server…".to_string()
-                                } else {
-                                    "Summarizing… (first run downloads the model)".to_string()
-                                }));
-                                let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
+                                if *retranscribing.peek() || !has_any_audio { return; }
+                                confirm_retranscribe.set(Some(sid_rt.clone()));
                             },
-                            span { {icon("sparkles")}  { if has_summary { "Re-summarize" } else { "Summarize" } } }
-                            if summarizing() { span { class: "gen-state", "running…" } }
-                            else if has_summary { span { class: "gen-state ok", {icon("check")} } }
-                        }
-                        // Compress
-                        button {
-                            class: "gen-item",
-                            title: "Condense this meeting into token-minimal dense prose for cross-meeting synthesis",
-                            disabled: compressing(),
-                            onclick: move |_| {
-                                show_generate_menu.set(false);
-                                if *compressing.peek() { return; }
-                                compressing.set(true);
-                                notice.set(Some(if settings.peek().llm_backend == "external" {
-                                    "Compressing via the external LLM server…".to_string()
-                                } else {
-                                    "Compressing… (first run downloads the model)".to_string()
-                                }));
-                                let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
-                            },
-                            span { {icon("archive")}  { if has_compressed { "Re-compress" } else { "Compress" } } }
-                            if compressing() { span { class: "gen-state", "running…" } }
-                            else if has_compressed { span { class: "gen-state ok", {icon("check")} } }
+                            span { {icon("refresh")}  { if retranscribing() { "Re-transcribing…" } else { "Re-transcribe" } } }
+                            if !has_any_audio { span { class: "gen-state", "no audio" } }
                         }
                         // Identify speakers (+ expected-count input) — needs the Others track.
                         div { class: "gen-item-row",
@@ -2135,18 +2114,59 @@ fn SessionToolbar(
                                 oninput: move |e| diar_speakers.set(e.value()),
                             }
                         }
-                        // Re-transcribe — needs kept audio.
+                        // Summarize
                         button {
                             class: "gen-item",
-                            disabled: retranscribing() || !has_any_audio,
-                            title: if has_any_audio { "Regenerate the transcript from kept audio with the re-transcription model" } else { "Needs kept audio" },
+                            disabled: summarizing(),
                             onclick: move |_| {
                                 show_generate_menu.set(false);
-                                if *retranscribing.peek() || !has_any_audio { return; }
-                                confirm_retranscribe.set(Some(sid_rt.clone()));
+                                if *summarizing.peek() { return; }
+                                summarizing.set(true);
+                                notice.set(Some(if settings.peek().llm_backend == "external" {
+                                    "Summarizing via the external LLM server…".to_string()
+                                } else {
+                                    "Summarizing… (first run downloads the model)".to_string()
+                                }));
+                                let _ = eng_sum.summ_tx.send(SummCmd::Summarize(sid.clone()));
                             },
-                            span { {icon("refresh")}  { if retranscribing() { "Re-transcribing…" } else { "Re-transcribe" } } }
-                            if !has_any_audio { span { class: "gen-state", "no audio" } }
+                            span { {icon("sparkles")}  { if has_summary { "Re-summarize" } else { "Summarize" } } }
+                            if summarizing() { span { class: "gen-state", "running…" } }
+                            else if has_summary { span { class: "gen-state ok", {icon("check")} } }
+                        }
+                        // Compress
+                        button {
+                            class: "gen-item",
+                            title: "Condense this meeting line-by-line into its token-minimal form (feeds the Overview)",
+                            disabled: compressing(),
+                            onclick: move |_| {
+                                show_generate_menu.set(false);
+                                if *compressing.peek() { return; }
+                                compressing.set(true);
+                                notice.set(Some(if settings.peek().llm_backend == "external" {
+                                    "Compressing via the external LLM server…".to_string()
+                                } else {
+                                    "Compressing… (first run downloads the model)".to_string()
+                                }));
+                                let _ = eng_comp.summ_tx.send(SummCmd::Compress(sid_comp.clone()));
+                            },
+                            span { {icon("archive")}  { if has_compressed { "Re-compress" } else { "Compress" } } }
+                            if compressing() { span { class: "gen-state", "running…" } }
+                            else if has_compressed { span { class: "gen-state ok", {icon("check")} } }
+                        }
+                        // Update Overview — fold THIS meeting into the living
+                        // document (also the manual fix-up after a range
+                        // re-transcribe, which leaves the auto fold stale).
+                        button {
+                            class: "gen-item",
+                            title: "Fold this meeting into the living Overview document",
+                            onclick: move |_| {
+                                show_generate_menu.set(false);
+                                notice.set(Some("Updating the Overview from this meeting…".to_string()));
+                                let _ = eng_fold.summ_tx.send(SummCmd::UpdateOverviewDoc {
+                                    session: Some(sid_fold.clone()),
+                                });
+                            },
+                            span { {icon("overview")}  "Update Overview" }
                         }
                     }
                 }
