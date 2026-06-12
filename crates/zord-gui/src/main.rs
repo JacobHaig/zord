@@ -6,6 +6,7 @@ mod engine;
 mod osutil;
 mod overview;
 mod speakers;
+mod timeline;
 #[cfg(feature = "self-update")]
 mod update;
 mod wizard;
@@ -14,7 +15,7 @@ use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{
     AudioFiles, ChatScope, DbCmd, Engine, Event, ModelCmd, ModelInfo, PlayCmd, RecorderCmd, Status,
-    SummCmd,
+    SummCmd, TimelineLane,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,6 +52,8 @@ fn icon_paths(name: &str) -> &'static str {
         "speaker" => "<path d='M11 5L6 9H3v6h3l5 4z'/><path d='M15.5 8.5a5 5 0 0 1 0 7'/><path d='M18.5 5.5a9 9 0 0 1 0 13'/>",
         "speaker-off" => "<path d='M11 5L6 9H3v6h3l5 4z'/><line x1='22' y1='9' x2='16' y2='15'/><line x1='16' y1='9' x2='22' y2='15'/>",
         "play" => "<path d='M7 5v14l11-7z'/>",
+        "pause" => "<rect x='6' y='5' width='4' height='14' rx='1' fill='currentColor' stroke='none'/><rect x='14' y='5' width='4' height='14' rx='1' fill='currentColor' stroke='none'/>",
+        "waveform" => "<path d='M2 12h2'/><path d='M5 7v10'/><path d='M9 5v14'/><path d='M13 9v6'/><path d='M17 4v16'/><path d='M21 7v10'/>",
         // AI / speaker actions
         "sparkles" => "<path d='M12 3l1.7 5.3a2 2 0 0 0 1.3 1.3L20.3 11l-5.3 1.7a2 2 0 0 0-1.3 1.3L12 19.3l-1.7-5.3a2 2 0 0 0-1.3-1.3L3.7 11l5.3-1.7a2 2 0 0 0 1.3-1.3z'/>",
         "archive" => "<rect x='3' y='4' width='18' height='4' rx='1'/><path d='M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8'/><line x1='10' y1='12' x2='14' y2='12'/>",
@@ -481,6 +484,18 @@ fn MainApp() -> Element {
     // Phase 38d: voiceprint library (updated by Event::Voiceprints).
     let mut voiceprints = use_signal(Vec::<zord_store::VoiceprintInfo>::new);
 
+    // Phase 42c: session timeline panel signals.
+    // `timeline_open` toggles the panel; opening it fires DbCmd::LoadTimeline.
+    let mut timeline_open = use_signal(|| false);
+    // Amplitude lanes received from Phase 42a (reset when the session changes).
+    let mut timeline_lanes = use_signal(Vec::<TimelineLane>::new);
+    // Current playback position tick from Phase 42b (~250ms).
+    let mut timeline_pos = use_signal(|| Option::<u64>::None);
+    // Per-lane enabled state (missing key = enabled).
+    let lane_enabled = use_signal(std::collections::HashMap::<String, bool>::new);
+    // Whether to overlay all lanes into a single merged graph.
+    let timeline_merged = use_signal(|| false);
+
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
         let initial = settings.peek().clone();
@@ -643,13 +658,20 @@ fn MainApp() -> Element {
                 // Phase 38d: voiceprint library — update the Speakers view signal.
                 Event::Voiceprints(v) => voiceprints.set(v),
 
-                // Phase 42a data layer: timeline lanes computed by the engine
-                // worker.  The panel UI that consumes them lands in Phase 42c.
-                Event::Timeline { .. } => {}
+                // Phase 42a data layer: apply timeline lanes only when the
+                // event's session id matches the currently viewed session
+                // (same guard as Event::Transcript).
+                Event::Timeline { id, lanes } => {
+                    if matches!(&*view.peek(), View::Session(cur) if *cur == id) {
+                        timeline_lanes.set(lanes);
+                    }
+                }
 
-                // Phase 42b: timeline playback position — wired to the scrubber
-                // in Phase 42c.
-                Event::TimelinePos { .. } => {}
+                // Phase 42b: timeline playback position tick — update the
+                // scrubber and stop-state detection.
+                Event::TimelinePos { ms } => {
+                    timeline_pos.set(ms);
+                }
 
                 Event::RemoteModels { models, error } => {
                     if let Some(e) = error {
@@ -964,15 +986,20 @@ fn MainApp() -> Element {
         move |_| {
             view.set(View::Overview);
             find_open.set(false); // leaving the transcript closes the find bar
+            close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
             reset_chat(chat, chat_input, chat_busy, chat_scope);
             let _ = engine.db_tx.send(DbCmd::LoadOverviewDoc);
         }
     };
 
     // Open the dedicated search view (does not clear the prior query/results).
-    let on_open_search = move |_| {
-        view.set(View::Search);
-        find_open.set(false); // leaving the transcript closes the find bar
+    let on_open_search = {
+        let engine = engine.clone();
+        move |_| {
+            view.set(View::Search);
+            find_open.set(false); // leaving the transcript closes the find bar
+            close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
+        }
     };
 
     // Open the Speakers view and refresh the voiceprint list.
@@ -982,6 +1009,7 @@ fn MainApp() -> Element {
             if cfg!(feature = "voiceprints") {
                 view.set(View::Speakers);
                 find_open.set(false); // leaving the transcript closes the find bar
+                close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
                 let _ = engine.db_tx.send(DbCmd::Voiceprints);
             }
         }
@@ -1053,6 +1081,8 @@ fn MainApp() -> Element {
     let on_open_session = {
         let engine = engine.clone();
         move |id: String| {
+            // Close timeline if it was open for a different session.
+            close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
             view.set(View::Session(id.clone()));
             last_export.set(None);
             summary.set(None);
@@ -1074,11 +1104,15 @@ fn MainApp() -> Element {
 
     // Back to the live view; drop any panels left from a saved session viewed
     // mid-recording (the sidebar's pinned "Current recording" row).
-    let on_show_live = move |_: ()| {
-        view.set(View::Live);
-        summary.set(None);
-        compressed.set(None);
-        speaker_names.write().clear();
+    let on_show_live = {
+        let engine = engine.clone();
+        move |_: ()| {
+            close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
+            view.set(View::Live);
+            summary.set(None);
+            compressed.set(None);
+            speaker_names.write().clear();
+        }
     };
 
     rsx! {
@@ -1214,6 +1248,20 @@ fn MainApp() -> Element {
                         show_export_menu,
                         show_generate_menu,
                         find_open,
+                        timeline_open,
+                        timeline_has_audio: {
+                            let af = audio_files.read();
+                            af.me.is_some() || af.others.is_some() || !af.speakers.is_empty()
+                        },
+                        on_open_timeline: {
+                            let id2 = id.clone();
+                            let engine2 = engine.clone();
+                            move |_| {
+                                timeline_open.set(true);
+                                timeline_lanes.write().clear();
+                                let _ = engine2.db_tx.send(DbCmd::LoadTimeline(id2.clone()));
+                            }
+                        },
                     }
                 }
 
@@ -1312,11 +1360,63 @@ fn MainApp() -> Element {
                                     }
                                 }
                             } else {
-                                TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment, find_hits: find_hits_computed }
+                                // Live view: timeline panel is not shown for live sessions.
+                                TranscriptView { segments: live_segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment, find_hits: find_hits_computed, on_seek: None }
                             }
                         } else {
-                            TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment, find_hits: find_hits_computed }
+                            // Saved session: pass an on_seek handler when the timeline is open.
+                            {
+                                let on_seek_handler = if *timeline_open.read() {
+                                    let engine_seek = engine.clone();
+                                    let tl_open = *timeline_open.peek();
+                                    Some(EventHandler::new(move |ms: u64| {
+                                        if tl_open {
+                                            let _ = engine_seek.play_tx.send(PlayCmd::TimelinePlay {
+                                                paths: Vec::new(), // will be filled by panel; seek fires here
+                                                start_ms: ms,
+                                            });
+                                        }
+                                    }))
+                                } else {
+                                    None
+                                };
+                                rsx! {
+                                    TranscriptView { segments, speaker_names, highlight: highlight_seg, on_edit: on_edit_segment, audio: audio_files, me_speaker, playing: playing_seg, on_play: on_play_segment, find_hits: find_hits_computed, on_seek: on_seek_handler }
+                                }
+                            }
                         }
+                    }
+                }
+
+                // Phase 42c: session timeline panel — only for saved sessions.
+                {
+                    let tl_sid = match &*view.read() {
+                        View::Session(id) => Some(id.clone()),
+                        _ => None,
+                    };
+                    let tl_open = *timeline_open.read();
+                    if let (Some(sid), true) = (tl_sid, tl_open) {
+                        let engine_tl = engine.clone();
+                        rsx! {
+                            timeline::TimelinePanel {
+                                session_id: sid,
+                                lanes: timeline_lanes,
+                                pos: timeline_pos,
+                                lane_enabled,
+                                merged: timeline_merged,
+                                on_close: move |_| {
+                                    close_timeline(&engine_tl, timeline_open, timeline_lanes, timeline_pos);
+                                },
+                                audio: audio_files,
+                                speaker_names,
+                                me_speaker,
+                                segments,
+                                engine: engine.clone(),
+                                highlight: highlight_seg,
+                            }
+                        }
+                    } else {
+                        rsx! {}
                     }
                 }
 
@@ -1697,6 +1797,12 @@ fn SessionToolbar(
     show_export_menu: Signal<bool>,
     show_generate_menu: Signal<bool>,
     find_open: Signal<bool>,
+    /// Phase 42c: whether the timeline panel is open.
+    timeline_open: Signal<bool>,
+    /// Whether any audio files exist for timeline (controls enabling the button).
+    timeline_has_audio: bool,
+    /// Open the timeline panel (fires DbCmd::LoadTimeline).
+    on_open_timeline: EventHandler<MouseEvent>,
 ) -> Element {
     let sid = id.clone();
     let eng_sum = engine.clone();
@@ -1832,6 +1938,21 @@ fn SessionToolbar(
 
             // --- Output cluster (right) ---
             div { class: "export-spacer" }
+            // Phase 42c: timeline toggle button.
+            button {
+                class: if *timeline_open.read() { "tbtn find-active" } else { "tbtn" },
+                title: if timeline_has_audio { "Show session timeline" } else { "No audio files — keep audio to enable the timeline" },
+                disabled: !timeline_has_audio,
+                onclick: move |e| {
+                    if *timeline_open.peek() {
+                        timeline_open.set(false);
+                    } else {
+                        on_open_timeline.call(e);
+                    }
+                },
+                {icon("waveform")}
+                "Timeline"
+            }
             button {
                 class: if *find_open.read() { "tbtn find-active" } else { "tbtn" },
                 title: "Find in transcript (search within this session)",
@@ -3603,6 +3724,9 @@ fn TranscriptView(
     /// (reuses the scroll mechanism); this set drives the soft background on
     /// all other hits. Empty when the find bar is closed.
     find_hits: Signal<Vec<i64>>,
+    /// Phase 42c: when the timeline panel is open, clicking a timestamp seeks
+    /// playback to that line.  `None` = timeline closed, timestamp is plain.
+    on_seek: Option<EventHandler<u64>>,
 ) -> Element {
     let mut editing = use_signal(|| Option::<i64>::None);
     let mut buf = use_signal(String::new);
@@ -3610,6 +3734,7 @@ fn TranscriptView(
     let names = speaker_names.read();
     let hl = *highlight.read();
     let fhits = find_hits.read();
+    let timeline_active = on_seek.is_some();
     if segs.is_empty() {
         return rsx! { div { class: "empty", "Press Record, or pick a session." } };
     }
@@ -3658,7 +3783,25 @@ fn TranscriptView(
                         key: "{seg.source.as_str()}-{seg.t_start_ms}",
                         id: "{dom_id}",
                         class: "line {line_class_for(seg, *me_speaker.read())}{hit}",
-                        span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
+                        // Timestamp: plain when timeline is closed; clickable seek
+                        // when timeline is open (Phase 42c).
+                        if timeline_active {
+                            span {
+                                class: "ts tl-jump",
+                                title: "Seek timeline to this line",
+                                onclick: {
+                                    let handler = on_seek;
+                                    move |_| {
+                                        if let Some(ref h) = handler {
+                                            h.call(t0);
+                                        }
+                                    }
+                                },
+                                "{fmt_ts(t0)}"
+                            }
+                        } else {
+                            span { class: "ts", "{fmt_ts(seg.t_start_ms)}" }
+                        }
                         span { class: "who", "{who}" }
                         if is_editing {
                             input {
@@ -4570,6 +4713,22 @@ fn readable_fg(hex: &str) -> &'static str {
     } else {
         "#ffffff"
     }
+}
+
+/// Phase 42c: close the timeline panel, stop playback, and clear lane/pos state.
+/// Called when leaving a session or switching sessions.
+fn close_timeline(
+    engine: &Engine,
+    mut timeline_open: Signal<bool>,
+    mut timeline_lanes: Signal<Vec<TimelineLane>>,
+    mut timeline_pos: Signal<Option<u64>>,
+) {
+    if *timeline_open.peek() {
+        timeline_open.set(false);
+        let _ = engine.play_tx.send(PlayCmd::Stop);
+    }
+    timeline_lanes.write().clear();
+    timeline_pos.set(None);
 }
 
 /// Returns the db ids of transcript segments whose text contains `query`
