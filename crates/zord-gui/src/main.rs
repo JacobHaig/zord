@@ -428,6 +428,11 @@ fn MainApp() -> Element {
     let editing = use_signal(|| Option::<String>::None);
     let edit_text = use_signal(String::new);
     let confirm_delete = use_signal(|| Option::<String>::None);
+    // Phase 43f: multi-session selection state.
+    let mut selected_sessions = use_signal(std::collections::HashSet::<String>::new);
+    let select_anchor = use_signal(|| Option::<String>::None);
+    // Whether to show the batch-delete confirm dialog.
+    let confirm_bulk_delete = use_signal(|| false);
     // Session id awaiting Re-transcribe confirmation (Phase 25c).
     let confirm_retranscribe = use_signal(|| Option::<String>::None);
     // Seconds elapsed in the current recording (0 when idle).
@@ -539,7 +544,16 @@ fn MainApp() -> Element {
                     live_segments.write().push(seg);
                 }
                 Event::Level { .. } => {} // handled via coalescing
-                Event::Sessions(v) => sessions.set(v),
+                Event::Sessions(v) => {
+                    // Keep only ids that still exist in the new list (clear
+                    // anything that was deleted or is no longer visible).
+                    let existing: std::collections::HashSet<&str> =
+                        v.iter().map(|s| s.id.as_str()).collect();
+                    selected_sessions
+                        .write()
+                        .retain(|id| existing.contains(id.as_str()));
+                    sessions.set(v);
+                }
                 Event::SessionBadges(b) => session_badges.set(b),
                 Event::SearchResults(v) => search_results.set(v),
                 Event::Transcript { id, segments: v } => {
@@ -1170,6 +1184,9 @@ fn MainApp() -> Element {
                 editing,
                 edit_text,
                 confirm_delete,
+                selected_sessions,
+                select_anchor,
+                confirm_bulk_delete,
                 rec_secs,
                 recording,
                 discord_button,
@@ -1472,6 +1489,9 @@ fn MainApp() -> Element {
         // ---- Confirm-delete dialog ----
         ConfirmDeleteDialog { confirm_delete, view, segments, summary, compressed, engine: engine.clone() }
 
+        // ---- Confirm-bulk-delete dialog (Phase 43f) ----
+        ConfirmBulkDeleteDialog { confirm_bulk_delete, selected_sessions, view, segments, summary, compressed, engine: engine.clone() }
+
         // ---- Confirm-retranscribe dialog (Phase 25c) ----
         ConfirmRetranscribeDialog { confirm_retranscribe, settings, retranscribing, notice, engine: engine.clone() }
 
@@ -1581,6 +1601,10 @@ fn SessionsSidebar(
     mut editing: Signal<Option<String>>,
     mut edit_text: Signal<String>,
     mut confirm_delete: Signal<Option<String>>,
+    /// Phase 43f: multi-session selection.
+    mut selected_sessions: Signal<std::collections::HashSet<String>>,
+    mut select_anchor: Signal<Option<String>>,
+    mut confirm_bulk_delete: Signal<bool>,
     rec_secs: Signal<u64>,
     recording: bool,
     discord_button: bool,
@@ -1627,7 +1651,41 @@ fn SessionsSidebar(
                         class: "session-filter",
                         placeholder: "Filter by title…",
                         value: "{session_filter}",
-                        oninput: move |e| session_filter.set(e.value()),
+                        oninput: move |e| {
+                            session_filter.set(e.value());
+                            // Clear selection when filter changes.
+                            selected_sessions.write().clear();
+                            select_anchor.set(None);
+                        },
+                    }
+                }
+                // Phase 43f: action bar when rows are selected.
+                {
+                    let sel_count = selected_sessions.read().len();
+                    if sel_count > 0 {
+                        let engine_bulk = engine.clone();
+                        rsx! {
+                            div { class: "session-select-bar",
+                                span { "{sel_count} selected" }
+                                button {
+                                    class: "mbtn ghost",
+                                    onclick: move |_| confirm_bulk_delete.set(true),
+                                    {icon("trash")} "Delete"
+                                }
+                                button {
+                                    class: "mbtn ghost",
+                                    onclick: move |_| {
+                                        selected_sessions.write().clear();
+                                        select_anchor.set(None);
+                                    },
+                                    "Clear"
+                                }
+                                // Suppress unused-variable warning.
+                                { let _ = &engine_bulk; rsx!{} }
+                            }
+                        }
+                    } else {
+                        rsx! {}
                     }
                 }
                 div { class: "session-list",
@@ -1669,6 +1727,8 @@ fn SessionsSidebar(
                                 (hdr, s)
                             })
                             .collect();
+                        // Flat ordered id list for range selection.
+                        let ordered_ids: Vec<String> = items.iter().map(|(_, s)| s.id.clone()).collect();
                         let empty_msg = if sessions.read().is_empty() {
                             "No recordings yet."
                         } else {
@@ -1681,6 +1741,7 @@ fn SessionsSidebar(
                             for (group_hdr, s) in items {
                         {
                             let id = s.id.clone();
+                            let is_selected = selected_sessions.read().contains(&id);
                             let active = matches!(&*view.read(), View::Session(v) if *v == id);
                             let is_editing = editing.read().as_deref() == Some(id.as_str());
                             let title = session_title(&s);
@@ -1689,16 +1750,24 @@ fn SessionsSidebar(
                                 session_badges.read().get(&id).copied().unwrap_or((false, false, false));
                             let b_audio = s.audio_path.is_some();
                             let eng_save = engine.clone();
-                            let (id_open, id_edit, id_save, id_del) =
-                                (id.clone(), id.clone(), id.clone(), id.clone());
+                            let (id_edit, id_save, id_del) =
+                                (id.clone(), id.clone(), id.clone());
                             let title_edit = title.clone();
+                            let ordered_ids_row = ordered_ids.clone();
+                            let id_click = id.clone();
+                            let row_class = match (active, is_selected) {
+                                (true, true) => "session active selected",
+                                (true, false) => "session active",
+                                (false, true) => "session selected",
+                                (false, false) => "session",
+                            };
                             rsx! {
                                 div { key: "{s.id}", class: "session-wrap",
                                 if let Some(h) = group_hdr {
                                     div { class: "date-group", "{h}" }
                                 }
                                 div {
-                                    class: if active { "session active" } else { "session" },
+                                    class: row_class,
                                     if is_editing {
                                         input {
                                             class: "rename-input",
@@ -1719,7 +1788,40 @@ fn SessionsSidebar(
                                         }
                                     } else {
                                         div { class: "session-row",
-                                            onclick: move |_| on_open_session.call(id_open.clone()),
+                                            onclick: move |e: MouseEvent| {
+                                                let mods = e.modifiers();
+                                                use dioxus::html::input_data::keyboard_types::Modifiers;
+                                                if mods.contains(Modifiers::META) || mods.contains(Modifiers::CONTROL) {
+                                                    // Cmd/Ctrl-click: toggle membership.
+                                                    let already = selected_sessions.peek().contains(&id_click);
+                                                    if already {
+                                                        selected_sessions.write().remove(&id_click);
+                                                    } else {
+                                                        selected_sessions.write().insert(id_click.clone());
+                                                    }
+                                                    select_anchor.set(Some(id_click.clone()));
+                                                } else if mods.contains(Modifiers::SHIFT) {
+                                                    // Shift-click: extend range from anchor.
+                                                    let anchor = select_anchor.peek().clone();
+                                                    let range = if let Some(ref a) = anchor {
+                                                        range_ids(&ordered_ids_row, a, &id_click)
+                                                    } else {
+                                                        vec![id_click.clone()]
+                                                    };
+                                                    for rid in range {
+                                                        selected_sessions.write().insert(rid);
+                                                    }
+                                                    select_anchor.set(Some(id_click.clone()));
+                                                } else if !selected_sessions.peek().is_empty() {
+                                                    // Plain click with existing selection: clear and open.
+                                                    selected_sessions.write().clear();
+                                                    select_anchor.set(None);
+                                                    on_open_session.call(id_click.clone());
+                                                } else {
+                                                    // Plain click, no selection.
+                                                    on_open_session.call(id_click.clone());
+                                                }
+                                            },
                                             div { class: "session-title", "{title}" }
                                             div { class: "session-meta",
                                                 span { "{meta}" }
@@ -2421,6 +2523,65 @@ fn SpeakerLegend(
                                 }
                             }
                         }
+        }
+    }
+}
+
+/// Confirm-bulk-delete dialog for Phase 43f batch session delete.
+#[component]
+fn ConfirmBulkDeleteDialog(
+    confirm_bulk_delete: Signal<bool>,
+    mut selected_sessions: Signal<std::collections::HashSet<String>>,
+    view: Signal<View>,
+    segments: Signal<Vec<Segment>>,
+    summary: Signal<Option<String>>,
+    compressed: Signal<Option<String>>,
+    engine: Engine,
+) -> Element {
+    rsx! {
+        if *confirm_bulk_delete.read() {
+            {
+                let engine = engine.clone();
+                let count = selected_sessions.read().len();
+                let s = if count == 1 { "" } else { "s" };
+                rsx! {
+                    div { class: "overlay",
+                        div { class: "confirm-card",
+                            h2 { "Delete {count} session{s}?" }
+                            p { class: "field-note",
+                                "Delete {count} session{s} and their audio \u{2014} cannot be undone."
+                            }
+                            div { class: "confirm-actions",
+                                button {
+                                    class: "mbtn ghost",
+                                    onclick: move |_| confirm_bulk_delete.set(false),
+                                    "Cancel"
+                                }
+                                button {
+                                    class: "mbtn danger",
+                                    onclick: move |_| {
+                                        let ids: Vec<String> =
+                                            selected_sessions.peek().iter().cloned().collect();
+                                        // If the open session is in the batch, reset view.
+                                        if ids.iter().any(|id| {
+                                            matches!(&*view.peek(), View::Session(v) if v == id)
+                                        }) {
+                                            view.set(View::Live);
+                                            segments.write().clear();
+                                            summary.set(None);
+                                            compressed.set(None);
+                                        }
+                                        let _ = engine.db_tx.send(DbCmd::DeleteSessions(ids));
+                                        selected_sessions.write().clear();
+                                        confirm_bulk_delete.set(false);
+                                    },
+                                    "Delete"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -4806,6 +4967,56 @@ fn fmt_dur(secs: u64) -> String {
 
 fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
+}
+
+/// Compute the contiguous range of session ids between `anchor` and `clicked`
+/// in the given ordered slice.  Both endpoints are inclusive.  If either id is
+/// absent the result is empty.  Works regardless of which endpoint comes first
+/// in `items_in_order` (Shift-click in either direction).
+fn range_ids(items_in_order: &[String], anchor: &str, clicked: &str) -> Vec<String> {
+    let pos_a = items_in_order.iter().position(|id| id == anchor);
+    let pos_b = items_in_order.iter().position(|id| id == clicked);
+    match (pos_a, pos_b) {
+        (Some(a), Some(b)) => {
+            let lo = a.min(b);
+            let hi = a.max(b);
+            items_in_order[lo..=hi].to_vec()
+        }
+        _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod range_ids_tests {
+    use super::range_ids;
+
+    #[test]
+    fn range_ids_forward() {
+        let items: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let got = range_ids(&items, "a", "c");
+        assert_eq!(got, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn range_ids_reversed() {
+        let items: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let got = range_ids(&items, "c", "a");
+        assert_eq!(got, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn range_ids_same() {
+        let items: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let got = range_ids(&items, "b", "b");
+        assert_eq!(got, vec!["b"]);
+    }
+
+    #[test]
+    fn range_ids_anchor_missing() {
+        let items: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let got = range_ids(&items, "z", "b");
+        assert!(got.is_empty());
+    }
 }
 
 /// Black-or-white text for a `#rrggbb` background, by relative luminance —
