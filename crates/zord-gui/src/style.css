@@ -434,7 +434,11 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .overview-doc-editor { flex: 1; min-height: 0; width: 100%; resize: none; background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: var(--r-md); padding: 14px 16px; font: 13px/1.6 ui-monospace, monospace; outline: none; }
 
 /* Markdown document typography (.md-doc) */
-.md-doc { flex: 1; min-height: 0; overflow-y: auto; max-width: 72ch; line-height: 1.65; font-size: 14px; color: var(--text); }
+.md-doc { flex: 1; min-height: 0; overflow-y: auto; line-height: 1.65; font-size: 14px; color: var(--text); }
+/* The measure lives on the INNER wrapper so the scroller spans the window
+   and the scrollbar sits at the screen edge (it used to hug a 72ch box
+   dead-center on fullscreen). */
+.md-doc-inner { max-width: 88ch; margin: 0 auto; }
 .md-doc h1 { font-size: 20px; font-weight: 700; margin: 20px 0 10px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
 .md-doc h2 { font-size: 17px; font-weight: 700; margin: 18px 0 8px; color: var(--text); }
 .md-doc h3 { font-size: 14px; font-weight: 600; margin: 14px 0 6px; }

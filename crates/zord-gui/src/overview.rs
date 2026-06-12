@@ -328,8 +328,12 @@ pub fn OverviewDocView(
                     "Record a meeting — the overview writes itself. Or press Edit and start typing."
                 }
             } else {
-                // Rendered markdown.
-                div { class: "md-doc", dangerous_inner_html: "{html}" }
+                // Rendered markdown. The OUTER div scrolls at full width (so
+                // the scrollbar sits at the window edge, not mid-screen); the
+                // INNER div carries the readable measure, centered.
+                div { class: "md-doc",
+                    div { class: "md-doc-inner", dangerous_inner_html: "{html}" }
+                }
             }
         }
     }
