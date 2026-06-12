@@ -233,6 +233,16 @@ pub struct Settings {
     /// model; gains apply to multi-speaker (Discord) sessions.
     #[serde(default = "default_transcribe_workers")]
     pub transcribe_workers: u32,
+    /// Knowledge-base export directory (Phase 44): the folder that Zord mirrors
+    /// its knowledge into as plain Markdown (for Obsidian, Logseq, or any PKM).
+    /// Empty string = feature off. Setting a path enables it; clearing it
+    /// disables it — no separate toggle needed.
+    ///
+    /// **One-way mirror**: Zord is the source of truth. Any edits you make
+    /// inside this folder will be silently overwritten the next time Zord
+    /// updates a document.
+    #[serde(default)]
+    pub kb_export_dir: String,
 }
 
 fn default_transcribe_workers() -> u32 {
@@ -507,6 +517,7 @@ impl Default for Settings {
             voiceprints_match: default_voiceprints_match(),
             voiceprints_consented_at: 0,
             transcribe_workers: default_transcribe_workers(),
+            kb_export_dir: String::new(),
         }
     }
 }
@@ -959,6 +970,19 @@ mod tests {
             json.contains("\"retranscribe_model\""),
             "retranscribe_model must also be present (placement sanity)"
         );
+    }
+
+    #[test]
+    fn kb_export_dir_defaults_empty_and_roundtrips() {
+        // Default: feature off (empty path = no mirroring).
+        let s = Settings::default();
+        assert_eq!(s.kb_export_dir, "");
+        // Missing field in saved JSON → default (empty = off).
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.kb_export_dir, "");
+        // A saved path round-trips correctly.
+        let s: Settings = serde_json::from_str(r#"{"kb_export_dir": "/tmp/my-kb"}"#).unwrap();
+        assert_eq!(s.kb_export_dir, "/tmp/my-kb");
     }
 
     #[test]

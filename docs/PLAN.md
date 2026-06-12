@@ -1805,16 +1805,23 @@ The pre-release punch list (user-confirmed June 2026), in sub-phases:
   "All system audio" default); Settings entry retained for advanced use.
   Live verification pending (requires live audio hardware + running apps).
 
-### Phase 44 — Knowledge-base export (planned)
+### ✅ Phase 44 — Knowledge-base export (DONE)
 Mirror Zord's knowledge into a user-chosen folder as plain markdown, so
 Obsidian/Logseq/any-PKM picks it up for free. Setting `kb_export_dir`
-(blank = off) + toggle; the engine mirrors on change, debounced:
+(blank = off); the engine mirrors on change, debounced:
 `Overview.md` (the living document, on every save/fold/revert) and
-`sessions/<date>-<title>.md` (summary + condensed transcript + metadata
-header, on summarize/compress/re-transcribe). One-way export (Zord remains
-the source of truth — edits in the folder are overwritten; documented).
-Filenames sanitized + stable per session id; deletions mirror on session
-delete. Settings → Files block with a "Export everything now" button.
+`sessions/<YYYY-MM-DD>-<sanitized-title>-<short-id>.md` (metadata YAML
+front-matter + summary + condensed transcript or transcript, on
+summarize/compress/re-transcribe/rename). One-way export (Zord remains
+the source of truth). Filenames stable per trailing-8-char short-id;
+renames move the file; deletions remove it (single + batch delete).
+Settings → Files, Knowledge-base export block with path input and
+"Export everything now" button. All write sites inline (no db_tx available
+at summarize/compress/fold/retranscribe workers); `DbCmd::KbMirror` kept
+for future routing; `DbCmd::KbExportAll` for the button. Tests: sanitizer,
+short-id, session markdown renderer (golden), rename-moves-file,
+delete-removes-file. Gate: fmt + clippy + tests all pass. Live
+verification pending (requires a running app).
 
 ### Phase 45 — Semantic search (planned)
 Meaning-based search beside FTS: a local text-embedding model (small ONNX,

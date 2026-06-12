@@ -470,6 +470,20 @@ pub enum DbCmd {
     /// containing logs, a redacted config, and system info. Replies with
     /// [`Event::Exported`] (path) on success or [`Event::Notice`] on failure.
     ExportDiagnostics,
+    /// Knowledge-base mirror trigger (Phase 44): mirrors a session (`Some(id)`)
+    /// or the living Overview document (`None`) to the configured
+    /// `kb_export_dir`. No-op when the setting is empty. Silently no-ops on
+    /// unknown session ids (race with delete is benign).
+    /// Available for future call sites; all current write sites use inline
+    /// mirroring because they lack access to a db_tx sender.
+    #[allow(dead_code)]
+    KbMirror {
+        session_id: Option<String>,
+    },
+    /// Mirror every session and the Overview now (Phase 44 "Export everything
+    /// now" button). Job-registered ("kbexport", cancellable between sessions);
+    /// emits a count notice on completion.
+    KbExportAll,
 }
 
 /// Replay commands for the playback worker. The rodio output stream is `!Send`
@@ -976,6 +990,14 @@ fn compress_one(
             let _ = store.set_compressed(session_id, &text);
             let _ = ev.send(Event::Compressed(Some(text)));
             let _ = ev.send(Event::Notice("Compressed.".to_string()));
+            // Mirror session to KB export folder (inline: compress_one has only
+            // ev and db_path — no db_tx to route through).
+            {
+                let dir = zord_config::Settings::load().kb_export_dir;
+                if !dir.is_empty() && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok() {
+                    kb_mirror_session(&dir, &store, session_id);
+                }
+            }
             true
         }
         Err(e) => {
@@ -1124,6 +1146,17 @@ fn update_overview_doc(
 
         // Emit the updated document.
         let (markdown, updated_at) = load_overview_doc(&store);
+        // Mirror the updated overview to the KB export folder (inline: the fold
+        // worker only has `ev`, not a db_tx, so we do the small write here).
+        {
+            let dir = zord_config::Settings::load().kb_export_dir;
+            if !dir.is_empty()
+                && !markdown.is_empty()
+                && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok()
+            {
+                kb_mirror_overview(&dir, &markdown);
+            }
+        }
         let _ = ev.send(Event::OverviewDoc {
             markdown,
             updated_at,
@@ -1446,6 +1479,14 @@ fn summarize_one(
             }
             let _ = store.set_summary(session_id, &text);
             let _ = ev.send(Event::Summary(Some(text.clone())));
+            // Mirror session to KB export folder (inline: summarize_one has
+            // only ev and db_path — no db_tx).
+            {
+                let dir = zord_config::Settings::load().kb_export_dir;
+                if !dir.is_empty() && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok() {
+                    kb_mirror_session(&dir, &store, session_id);
+                }
+            }
 
             // Auto-title (best-effort): reuse the loaded model to title the
             // session, unless the user already named it or turned this off.
@@ -1462,6 +1503,13 @@ fn summarize_one(
                         if !title.is_empty() {
                             let _ = store.set_session_title(session_id, &title);
                             emit_sessions(&store, ev);
+                            // Re-mirror with the new title (renames the file if needed).
+                            let dir = zord_config::Settings::load().kb_export_dir;
+                            if !dir.is_empty()
+                                && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok()
+                            {
+                                kb_mirror_session(&dir, &store, session_id);
+                            }
                         }
                     }
                 }
@@ -1675,6 +1723,259 @@ fn overview_session_label(session: &Session) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 44 — knowledge-base export (one-way markdown mirror)
+// ---------------------------------------------------------------------------
+
+/// Sanitize a string for use as a filesystem path component: strip path
+/// separators and other illegal chars, collapse runs of whitespace into a
+/// single hyphen, and cap the result at 80 characters.
+pub fn kb_sanitize_filename(s: &str) -> String {
+    // Chars that are illegal or confusing in path components across macOS/Windows/Linux.
+    const ILLEGAL: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if ILLEGAL.contains(&c) || c.is_control() {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    // Collapse whitespace runs into a single hyphen.
+    let mut out = String::with_capacity(cleaned.len());
+    let mut prev_space = false;
+    for c in cleaned.chars() {
+        if c.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push('-');
+            }
+            prev_space = true;
+        } else {
+            prev_space = false;
+            out.push(c);
+        }
+    }
+    // Strip leading/trailing hyphens.
+    let out = out.trim_matches('-').to_string();
+    // Cap at 80 chars.
+    out.chars().take(80).collect()
+}
+
+/// Derive the stable short-id from a session id: take the last 8 characters.
+/// Session ids are UUIDs or timestamp-based strings; the tail is unique enough
+/// for glob-matching and collision-resistant at typical library sizes.
+pub fn kb_short_id(session_id: &str) -> &str {
+    let id = session_id.trim();
+    if id.len() <= 8 {
+        id
+    } else {
+        &id[id.len() - 8..]
+    }
+}
+
+/// Derive the session markdown filename from `started_at`, the current title,
+/// and the session id's short-id:
+/// `sessions/YYYY-MM-DD-<sanitized-title>-<short-id>.md`
+pub fn kb_session_filename(started_at: u64, title: Option<&str>, session_id: &str) -> String {
+    use chrono::TimeZone;
+    let date = chrono::Local
+        .timestamp_millis_opt(started_at as i64)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "0000-00-00".to_string());
+    let short = kb_short_id(session_id);
+    let title_part = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(kb_sanitize_filename)
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| short.to_string());
+    format!("sessions/{date}-{title_part}-{short}.md")
+}
+
+/// Render a session to Markdown: small metadata header + Summary section (if
+/// any) + Condensed transcript (if compressed) or Transcript (labeled lines).
+/// Returns `None` when the session has no segments and no summary or compressed
+/// text — nothing worth writing.
+pub fn kb_render_session_markdown(
+    session: &Session,
+    summary: Option<&str>,
+    compressed: Option<&str>,
+    segments: &[zord_core::Segment],
+    names: &std::collections::HashMap<i32, String>,
+) -> Option<String> {
+    let has_content = summary.map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || compressed.map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || !segments.is_empty();
+    if !has_content {
+        return None;
+    }
+
+    use chrono::TimeZone;
+    let date = chrono::Local
+        .timestamp_millis_opt(session.started_at as i64)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let title = session
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("Untitled");
+    let duration_note = match session.ended_at {
+        Some(end) if end > session.started_at => {
+            let secs = (end - session.started_at) / 1000;
+            let h = secs / 3600;
+            let m = (secs % 3600) / 60;
+            let s = secs % 60;
+            if h > 0 {
+                format!("{}h {}m {}s", h, m, s)
+            } else if m > 0 {
+                format!("{}m {}s", m, s)
+            } else {
+                format!("{}s", s)
+            }
+        }
+        _ => String::new(),
+    };
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&format!("title: \"{}\"\n", title.replace('"', "\\\"")));
+    out.push_str(&format!("date: {date}\n"));
+    if !duration_note.is_empty() {
+        out.push_str(&format!("duration: \"{duration_note}\"\n"));
+    }
+    out.push_str(&format!("session_id: \"{}\"\n", session.id));
+    out.push_str("---\n\n");
+    out.push_str(&format!("# {title}\n\n"));
+
+    if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
+        out.push_str("## Summary\n\n");
+        out.push_str(s.trim());
+        out.push_str("\n\n");
+    }
+
+    if let Some(c) = compressed.filter(|s| !s.trim().is_empty()) {
+        out.push_str("## Condensed transcript\n\n");
+        out.push_str(c.trim());
+        out.push_str("\n\n");
+    } else if !segments.is_empty() {
+        out.push_str("## Transcript\n\n");
+        for seg in segments {
+            let label = seg.speaker_label(names);
+            out.push_str(&format!("**{}**: {}\n\n", label, seg.text.trim()));
+        }
+    }
+
+    Some(out)
+}
+
+/// Mirror the overview document to `<dir>/Overview.md`. No-op when `dir` is
+/// empty or the new content matches the file already on disk.
+fn kb_mirror_overview(dir: &str, markdown: &str) {
+    if dir.is_empty() {
+        return;
+    }
+    let dest = std::path::Path::new(dir).join("Overview.md");
+    // Debounce: skip write if content unchanged.
+    if let Ok(existing) = std::fs::read_to_string(&dest) {
+        if existing == markdown {
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&dest, markdown) {
+        tracing::warn!("kb_mirror: failed to write Overview.md: {e}");
+    }
+}
+
+/// Mirror a session to `<dir>/sessions/<filename>.md`. Creates the `sessions/`
+/// subdirectory if needed. Renames any previous file for this session
+/// (identified by `<short-id>`) before writing so renames are stable.
+/// No-op when `dir` is empty or the rendered content matches disk.
+fn kb_mirror_session(dir: &str, store: &Store, session_id: &str) {
+    if dir.is_empty() {
+        return;
+    }
+    let session = match store.get_session(session_id) {
+        Ok(Some(s)) => s,
+        _ => return,
+    };
+    let summary = store.get_summary(session_id).ok().flatten();
+    let compressed = store.get_compressed(session_id).ok().flatten();
+    let segments = store.segments(session_id).unwrap_or_default();
+    let names = store.speaker_names(session_id).unwrap_or_default();
+
+    let markdown = match kb_render_session_markdown(
+        &session,
+        summary.as_deref(),
+        compressed.as_deref(),
+        &segments,
+        &names,
+    ) {
+        Some(m) => m,
+        None => return, // nothing to write
+    };
+
+    let sessions_dir = std::path::Path::new(dir).join("sessions");
+    if let Err(e) = std::fs::create_dir_all(&sessions_dir) {
+        tracing::warn!("kb_mirror: failed to create sessions dir: {e}");
+        return;
+    }
+
+    let filename = kb_session_filename(session.started_at, session.title.as_deref(), session_id);
+    // `filename` is `sessions/<name>.md` — take only the basename part.
+    let basename = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&filename);
+    let dest = sessions_dir.join(basename);
+
+    // If the title changed, rename any old file with the same short-id.
+    let short = kb_short_id(session_id).to_string();
+    if let Ok(rd) = std::fs::read_dir(&sessions_dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().into_string().unwrap_or_default();
+            if name.ends_with(&format!("-{short}.md")) && entry.path() != dest {
+                let _ = std::fs::rename(entry.path(), &dest);
+                break;
+            }
+        }
+    }
+
+    // Debounce: skip write if content unchanged.
+    if let Ok(existing) = std::fs::read_to_string(&dest) {
+        if existing == markdown {
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&dest, &markdown) {
+        tracing::warn!("kb_mirror: failed to write session {session_id}: {e}");
+    }
+}
+
+/// Remove the mirrored file for a deleted session (glob by short-id).
+/// No-op when `dir` is empty.
+fn kb_remove_session(dir: &str, session_id: &str) {
+    if dir.is_empty() {
+        return;
+    }
+    let short = kb_short_id(session_id).to_string();
+    let sessions_dir = std::path::Path::new(dir).join("sessions");
+    let Ok(rd) = std::fs::read_dir(&sessions_dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().into_string().unwrap_or_default();
+        if name.ends_with(&format!("-{short}.md")) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DB query thread
 // ---------------------------------------------------------------------------
 
@@ -1811,18 +2112,32 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             DbCmd::Rename { id, title } => {
                 let _ = store.set_session_title(&id, &title);
                 emit_sessions(&store, &ev);
+                // Mirror the renamed session (filename includes the title).
+                let dir = zord_config::Settings::load().kb_export_dir;
+                if !dir.is_empty() && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok() {
+                    kb_mirror_session(&dir, &store, &id);
+                }
             }
             DbCmd::SetNotes { id, notes } => {
                 let _ = store.set_notes(&id, &notes);
             }
             DbCmd::DeleteSession(id) => {
+                let dir = zord_config::Settings::load().kb_export_dir;
                 let _ = store.delete_session(&id);
                 emit_sessions(&store, &ev);
+                // Remove the mirrored file for this session.
+                if !dir.is_empty() {
+                    kb_remove_session(&dir, &id);
+                }
             }
             DbCmd::DeleteSessions(ids) => {
+                let dir = zord_config::Settings::load().kb_export_dir;
                 let count = ids.len();
                 for id in &ids {
                     let _ = store.delete_session(id);
+                    if !dir.is_empty() {
+                        kb_remove_session(&dir, id);
+                    }
                 }
                 emit_sessions(&store, &ev);
                 let _ = ev.send(Event::Notice(format!(
@@ -1907,9 +2222,17 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = store.set_meta(OVERVIEW_DOC_KEY, &doc);
                 let (markdown, updated_at) = load_overview_doc(&store);
                 let _ = ev.send(Event::OverviewDoc {
-                    markdown,
+                    markdown: markdown.clone(),
                     updated_at,
                 });
+                // Mirror the updated overview.
+                let dir = zord_config::Settings::load().kb_export_dir;
+                if !dir.is_empty()
+                    && !markdown.is_empty()
+                    && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok()
+                {
+                    kb_mirror_overview(&dir, &markdown);
+                }
             }
             DbCmd::RevertOverviewDoc => {
                 // Swap doc ↔ prev: the previous AI version becomes current again.
@@ -1929,9 +2252,17 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = store.set_meta(OVERVIEW_DOC_PREV_KEY, &current);
                 let (markdown, updated_at) = load_overview_doc(&store);
                 let _ = ev.send(Event::OverviewDoc {
-                    markdown,
+                    markdown: markdown.clone(),
                     updated_at,
                 });
+                // Mirror the reverted overview.
+                let dir = zord_config::Settings::load().kb_export_dir;
+                if !dir.is_empty()
+                    && !markdown.is_empty()
+                    && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok()
+                {
+                    kb_mirror_overview(&dir, &markdown);
+                }
             }
             DbCmd::Diarize { id, num_speakers } => {
                 // Remember the chosen count on the session for next time.
@@ -2112,6 +2443,113 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                         let _ = ev.send(Event::Notice(format!("diagnostic export failed: {e}")));
                     }
                 }
+            }
+
+            DbCmd::KbMirror { session_id } => {
+                // Tiny file write — synchronous on the db thread is fine.
+                let settings = zord_config::Settings::load();
+                let dir = &settings.kb_export_dir;
+                if dir.is_empty() {
+                    continue;
+                }
+                match session_id {
+                    None => {
+                        // Mirror the overview document.
+                        let (markdown, _) = load_overview_doc(&store);
+                        if !markdown.is_empty() {
+                            if let Err(e) = std::fs::create_dir_all(std::path::Path::new(dir)) {
+                                let _ = ev.send(Event::Notice(format!("kb export: {e}")));
+                                continue;
+                            }
+                            kb_mirror_overview(dir, &markdown);
+                        }
+                    }
+                    Some(id) => {
+                        if let Err(e) = std::fs::create_dir_all(std::path::Path::new(dir)) {
+                            let _ = ev.send(Event::Notice(format!("kb export: {e}")));
+                            continue;
+                        }
+                        kb_mirror_session(dir, &store, &id);
+                    }
+                }
+            }
+
+            DbCmd::KbExportAll => {
+                // Dedupe: only one export-all at a time.
+                let jid = "kbexport".to_string();
+                if jobs.is_running(&jid) {
+                    continue;
+                }
+                let settings = zord_config::Settings::load();
+                let dir = settings.kb_export_dir.clone();
+                if dir.is_empty() {
+                    let _ = ev.send(Event::Notice(
+                        "Set a knowledge-base folder first (Settings → Files).".to_string(),
+                    ));
+                    continue;
+                }
+                if let Err(e) = std::fs::create_dir_all(std::path::Path::new(&dir)) {
+                    let _ = ev.send(Event::Notice(format!("kb export: {e}")));
+                    continue;
+                }
+                let token = jobs.begin(&ev, &jid, "kbexport", "Exporting knowledge base");
+                let ev2 = ev.clone();
+                let db_path2 = db_path.clone();
+                let jobs2 = jobs.clone();
+                thread::spawn(move || {
+                    supervise("kbexport", &ev2, || {
+                        let store2 = match Store::open(&db_path2) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let _ = ev2.send(Event::Notice(format!("kb export db: {e}")));
+                                return;
+                            }
+                        };
+                        // Mirror overview first.
+                        let (overview_md, _) = load_overview_doc(&store2);
+                        if !overview_md.is_empty() {
+                            kb_mirror_overview(&dir, &overview_md);
+                        }
+                        // Mirror every session with content.
+                        let sessions = store2.list_sessions().unwrap_or_default();
+                        let mut count = 0usize;
+                        for session in &sessions {
+                            if cancelled(&token) {
+                                break;
+                            }
+                            let segs = store2.segments(&session.id).unwrap_or_default();
+                            let summary = store2.get_summary(&session.id).ok().flatten();
+                            let compressed = store2.get_compressed(&session.id).ok().flatten();
+                            let has = !segs.is_empty()
+                                || summary
+                                    .as_deref()
+                                    .map(|s| !s.trim().is_empty())
+                                    .unwrap_or(false)
+                                || compressed
+                                    .as_deref()
+                                    .map(|s| !s.trim().is_empty())
+                                    .unwrap_or(false);
+                            if !has {
+                                continue;
+                            }
+                            if let Err(e) =
+                                std::fs::create_dir_all(std::path::Path::new(&dir).join("sessions"))
+                            {
+                                let _ = ev2.send(Event::Notice(format!("kb export: {e}")));
+                                break;
+                            }
+                            kb_mirror_session(&dir, &store2, &session.id);
+                            count += 1;
+                        }
+                        if !cancelled(&token) {
+                            let _ = ev2.send(Event::Notice(format!(
+                                "Knowledge-base export complete — {count} session{} mirrored.",
+                                if count == 1 { "" } else { "s" }
+                            )));
+                        }
+                    });
+                    jobs2.end(&ev2, &jid);
+                });
             }
         }
     }
@@ -4744,6 +5182,14 @@ fn post_transcribe_inner(
         "Transcribed {total} segment(s) with {}.",
         model.name()
     )));
+    // Mirror the session to the KB export folder (inline: post_transcribe_inner
+    // has a store ref and ev but no db_tx).
+    {
+        let dir = zord_config::Settings::load().kb_export_dir;
+        if !dir.is_empty() && std::fs::create_dir_all(std::path::Path::new(&dir)).is_ok() {
+            kb_mirror_session(&dir, store, session_id);
+        }
+    }
     true
 }
 
@@ -5266,5 +5712,180 @@ mod tests {
             "large-v3-turbo-q5_0",
             "model must not be redacted"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 44: knowledge-base export tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kb_sanitize_filename_basic() {
+        // Path separators and illegal chars become hyphens.
+        assert_eq!(kb_sanitize_filename("hello/world"), "hello-world");
+        assert_eq!(kb_sanitize_filename("foo\\bar"), "foo-bar");
+        assert_eq!(kb_sanitize_filename("a:b*c?d\"e<f>g|h"), "a-b-c-d-e-f-g-h");
+        // Whitespace runs collapse.
+        assert_eq!(kb_sanitize_filename("hello   world"), "hello-world");
+        // Leading/trailing hyphens stripped.
+        assert_eq!(kb_sanitize_filename("  spaces  "), "spaces");
+        // Cap at 80 chars.
+        let long = "a".repeat(100);
+        assert_eq!(kb_sanitize_filename(&long).len(), 80);
+        // Empty string stays empty.
+        assert_eq!(kb_sanitize_filename(""), "");
+    }
+
+    #[test]
+    fn kb_short_id_is_last_8_chars() {
+        assert_eq!(kb_short_id("abcdefghij"), "cdefghij");
+        assert_eq!(kb_short_id("short"), "short");
+        assert_eq!(kb_short_id("12345678"), "12345678");
+        // UUIDs use the trailing hex segment.
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(kb_short_id(uuid), "55440000");
+    }
+
+    #[test]
+    fn kb_session_filename_format() {
+        // Fixed epoch: 2026-01-01 00:00:00 UTC → local may vary, but year is 2026.
+        let ts = 1_735_689_600_000u64; // 2026-01-01 00:00:00 UTC
+        let sid = "abcdefgh12345678";
+        let f = kb_session_filename(ts, Some("My Meeting"), sid);
+        // Must start with sessions/, end with the short-id + .md.
+        assert!(f.starts_with("sessions/"), "prefix: {f}");
+        assert!(f.ends_with("-12345678.md"), "short-id suffix: {f}");
+        assert!(f.contains("My-Meeting"), "title included: {f}");
+        // No title → short-id used as title part too.
+        let f2 = kb_session_filename(ts, None, sid);
+        assert!(f2.starts_with("sessions/"), "{f2}");
+        assert!(f2.ends_with("-12345678.md"), "{f2}");
+    }
+
+    #[test]
+    fn kb_render_session_markdown_golden() {
+        use zord_core::{Segment, Session, Source};
+        let session = Session {
+            id: "test-session-id".to_string(),
+            started_at: 1_735_689_600_000,
+            ended_at: Some(1_735_689_600_000 + 5 * 60 * 1000), // 5 min
+            title: Some("Test Meeting".to_string()),
+            audio_path: None,
+            model: "large-v3-turbo-q5_0".to_string(),
+            overview_folded_ms: None,
+        };
+        let seg = Segment {
+            id: None,
+            source: Source::Me,
+            t_start_ms: 0,
+            t_end_ms: 1000,
+            text: "Hello world.".to_string(),
+            words: Vec::new(),
+            speaker: None,
+        };
+        let names = std::collections::HashMap::new();
+
+        // With transcript only.
+        let md =
+            kb_render_session_markdown(&session, None, None, std::slice::from_ref(&seg), &names)
+                .unwrap();
+        assert!(md.contains("# Test Meeting"), "title header: {md}");
+        assert!(md.contains("## Transcript"), "transcript section: {md}");
+        assert!(md.contains("Hello world."), "segment text: {md}");
+        assert!(!md.contains("## Summary"), "no summary section: {md}");
+
+        // With summary and compressed — should use Condensed transcript, not Transcript.
+        let md2 = kb_render_session_markdown(
+            &session,
+            Some("Short summary."),
+            Some("Condensed text."),
+            std::slice::from_ref(&seg),
+            &names,
+        )
+        .unwrap();
+        assert!(md2.contains("## Summary"), "summary section: {md2}");
+        assert!(md2.contains("Short summary."), "summary text: {md2}");
+        assert!(
+            md2.contains("## Condensed transcript"),
+            "condensed section: {md2}"
+        );
+        assert!(
+            !md2.contains("## Transcript"),
+            "transcript section absent when condensed: {md2}"
+        );
+
+        // Empty → None.
+        let nothing = kb_render_session_markdown(&session, None, None, &[], &names);
+        assert!(nothing.is_none(), "empty session → None");
+    }
+
+    #[test]
+    fn kb_mirror_rename_moves_file() {
+        // A session is written, then its title changes — the old file should be
+        // renamed to the new path (not left as a stale orphan).
+        let dir = std::env::temp_dir().join(format!("zord-kb-rename-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        let store = zord_store::Store::open(&db).unwrap();
+
+        let sid = "00000000-0000-0000-0000-test11223344";
+        let mut session = make_session(sid, Some(1_735_689_600_000));
+        session.started_at = 1_735_689_600_000;
+        session.title = Some("Old Title".to_string());
+        store.create_session(&session).unwrap();
+        store.end_session(sid, 1_735_689_600_000 + 60_000).unwrap();
+        // Give the session some content so kb_render produces output.
+        store.set_summary(sid, "A brief summary.").unwrap();
+
+        let dir_str = dir.to_str().unwrap();
+        kb_mirror_session(dir_str, &store, sid);
+
+        // The sessions dir should contain exactly one file.
+        let entries: Vec<_> = std::fs::read_dir(dir.join("sessions"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(entries.len(), 1, "one session file written");
+        let old_name = entries[0].file_name().into_string().unwrap();
+        assert!(
+            old_name.contains("Old-Title"),
+            "title in filename: {old_name}"
+        );
+
+        // Rename the session and re-mirror.
+        store.set_session_title(sid, "New Title").unwrap();
+        kb_mirror_session(dir_str, &store, sid);
+
+        let entries2: Vec<_> = std::fs::read_dir(dir.join("sessions"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(entries2.len(), 1, "still exactly one file after rename");
+        let new_name = entries2[0].file_name().into_string().unwrap();
+        assert!(
+            new_name.contains("New-Title"),
+            "new title in filename: {new_name}"
+        );
+        assert!(!new_name.contains("Old-Title"), "old name gone: {new_name}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kb_remove_session_deletes_by_short_id() {
+        let dir = std::env::temp_dir().join(format!("zord-kb-del-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        let sid = "00000000-0000-0000-0000-aabbccddeeff";
+        let short = kb_short_id(sid);
+        // Create a fake mirrored file.
+        let fname = format!("2026-01-01-my-meeting-{short}.md");
+        let fpath = dir.join("sessions").join(&fname);
+        std::fs::write(&fpath, "# Hello").unwrap();
+        assert!(fpath.exists());
+
+        kb_remove_session(dir.to_str().unwrap(), sid);
+
+        assert!(!fpath.exists(), "file removed after kb_remove_session");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

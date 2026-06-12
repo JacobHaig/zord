@@ -4368,6 +4368,7 @@ fn FilesSettings(
     mut notice: Signal<Option<String>>,
     engine: Engine,
 ) -> Element {
+    let engine_kb = engine.clone();
     rsx! {
         section { class: "settings-section",
             h3 { "Files & folders" }
@@ -4441,6 +4442,49 @@ fn FilesSettings(
                         }
                     },
                     {icon("folder")} "Logs"
+                }
+            }
+
+            // --- Knowledge-base export (Phase 44) ---
+            div { class: "subhead", "Knowledge-base export" }
+            p { class: "field-note",
+                "One-way mirror: Zord overwrites files in this folder. \
+                 Point your notes app (Obsidian, Logseq) at it. \
+                 Edits inside the folder will be overwritten on the next update."
+            }
+            div { class: "settings-row",
+                label { class: "settings-label", "Knowledge-base folder" }
+                div { class: "settings-control",
+                    input {
+                        r#type: "text",
+                        class: "text-input",
+                        placeholder: "Folder path (empty = off)",
+                        value: settings.read().kb_export_dir.clone(),
+                        onchange: move |e: FormEvent| {
+                            let val = e.value().trim().to_string();
+                            let mut s = settings.peek().clone();
+                            s.kb_export_dir = val;
+                            let _ = s.save();
+                            settings.set(s);
+                        },
+                    }
+                    button {
+                        class: "mbtn",
+                        title: "Mirror all sessions and the overview to the configured folder now",
+                        onclick: move |_| {
+                            if settings.peek().kb_export_dir.trim().is_empty() {
+                                notice.set(Some(
+                                    "Set a knowledge-base folder path first.".to_string(),
+                                ));
+                            } else {
+                                let _ = engine_kb.db_tx.send(DbCmd::KbExportAll);
+                                notice.set(Some(
+                                    "Exporting knowledge base in the background — progress in the jobs panel.".to_string(),
+                                ));
+                            }
+                        },
+                        "Export everything now"
+                    }
                 }
             }
 
