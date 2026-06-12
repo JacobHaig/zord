@@ -27,9 +27,10 @@ pub struct VoiceprintInfo {
     pub samples: u32,
     /// When the last sample was enrolled, as Unix epoch seconds.
     pub updated_at: u64,
-    /// `(session_id, session_title)` pairs where this person was auto-identified,
-    /// ordered newest-first.
-    pub appearances: Vec<(String, String)>,
+    /// `(session_id, session_title, match_score)` triples where this person
+    /// was identified, ordered newest-first. `match_score` is `Some(score)` when
+    /// the name was set by the auto-match engine (NULL for manually-named rows).
+    pub appearances: Vec<(String, String, Option<f32>)>,
 }
 
 /// Process-wide database passphrase. Set once at startup (after unlocking);
@@ -896,14 +897,14 @@ impl Store {
             let (id, name, model, samples, updated_at) = row?;
             // Collect sessions where this voiceprint was identified, newest first.
             let mut app_stmt = self.conn.prepare(
-                "SELECT sn.session_id, COALESCE(s.title, '') \
+                "SELECT sn.session_id, COALESCE(s.title, ''), sn.match_score \
                  FROM speaker_names sn \
                  JOIN sessions s ON s.id = sn.session_id \
                  WHERE sn.voiceprint_id = ?1 \
                  ORDER BY s.started_at DESC",
             )?;
-            let appearances: Vec<(String, String)> = app_stmt
-                .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            let appearances: Vec<(String, String, Option<f32>)> = app_stmt
+                .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             infos.push(VoiceprintInfo {
                 id,
@@ -1116,18 +1117,44 @@ impl Store {
 
     /// Record that a diarized speaker slot belongs to a known voiceprint.
     /// The `speaker_names` row **must already exist** (call [`set_speaker_name`]
-    /// first); this method only updates the `voiceprint_id` column.
+    /// first); this method only updates the `voiceprint_id` and `match_score` columns.
+    /// Pass `match_score = None` for manual links (no auto-match score available).
     pub fn link_speaker_voiceprint(
         &self,
         session_id: &str,
         speaker: i32,
         voiceprint_id: i64,
+        match_score: Option<f32>,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE speaker_names SET voiceprint_id = ?3
+            "UPDATE speaker_names SET voiceprint_id = ?3, match_score = ?4
              WHERE session_id = ?1 AND speaker = ?2",
-            params![session_id, speaker, voiceprint_id],
+            params![session_id, speaker, voiceprint_id, match_score],
         )?;
+        Ok(())
+    }
+
+    /// Unlink a specific session from a voiceprint: clears the `voiceprint_id`
+    /// and name (resetting to "Speaker N") for every `speaker_names` row in
+    /// `session_id` that points to `voiceprint_id`, and deletes that session's
+    /// samples from `voiceprint_samples` so the bad enrollment no longer
+    /// pollutes the centroid.
+    pub fn unlink_voiceprint_session(&self, voiceprint_id: i64, session_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Clear name and voiceprint link for every speaker row in this session
+        // that was associated with this voiceprint.
+        tx.execute(
+            "UPDATE speaker_names SET voiceprint_id = NULL, name = '', match_score = NULL
+             WHERE voiceprint_id = ?1 AND session_id = ?2",
+            params![voiceprint_id, session_id],
+        )?;
+        // Remove samples contributed by this session so the centroid is clean.
+        tx.execute(
+            "DELETE FROM voiceprint_samples
+             WHERE voiceprint_id = ?1 AND session_id = ?2",
+            params![voiceprint_id, session_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -1156,6 +1183,8 @@ fn add_late_columns(conn: &Connection) {
         "ALTER TABLE speaker_names ADD COLUMN voiceprint_id INTEGER",
         [],
     );
+    // Phase 43d — cosine score from the auto-match engine (NULL = manually named).
+    let _ = conn.execute("ALTER TABLE speaker_names ADD COLUMN match_score REAL", []);
     // Unified integration tracks — which spk-N index is the app user themself
     // (every Discord participant records as a uniform speaker track; "me" is a
     // tag from the configured user ID, not a separate audio channel).
@@ -2038,13 +2067,66 @@ mod voiceprint_tests {
 
         // speaker_names row must pre-exist for link to work.
         s.set_speaker_name("s1", 0, "Jordan").unwrap();
-        s.link_speaker_voiceprint("s1", 0, vp_id).unwrap();
+        s.link_speaker_voiceprint("s1", 0, vp_id, Some(0.88))
+            .unwrap();
 
-        // Appearances should show up in voiceprint info.
+        // Appearances should show up in voiceprint info with match_score.
         let infos = s.voiceprints().unwrap();
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].appearances.len(), 1);
         assert_eq!(infos[0].appearances[0].0, "s1");
+        let score = infos[0].appearances[0].2;
+        assert!(
+            score.is_some_and(|v| (v - 0.88).abs() < 1e-4),
+            "expected match_score ≈ 0.88, got {score:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn unlink_voiceprint_session_clears_name_and_sample() {
+        let (s, db) = mk_store("unlink");
+        mk_session(&s, "s1");
+        mk_session(&s, "s2");
+        let vp_id = s
+            .enroll_voiceprint("Kim", "m", &[1.0, 0.0], Some("s1"))
+            .unwrap();
+        // Enroll a second sample from s2 so both sessions contribute.
+        s.enroll_voiceprint("Kim", "m", &[0.9, 0.1], Some("s2"))
+            .unwrap();
+
+        // Link both sessions.
+        s.set_speaker_name("s1", 0, "Kim").unwrap();
+        s.link_speaker_voiceprint("s1", 0, vp_id, Some(0.85))
+            .unwrap();
+        s.set_speaker_name("s2", 0, "Kim").unwrap();
+        s.link_speaker_voiceprint("s2", 0, vp_id, Some(0.90))
+            .unwrap();
+
+        // Before unlink: 2 appearances, 2 samples.
+        let infos = s.voiceprints().unwrap();
+        assert_eq!(infos[0].appearances.len(), 2);
+        assert_eq!(infos[0].samples, 2);
+
+        // Unlink s1.
+        s.unlink_voiceprint_session(vp_id, "s1").unwrap();
+
+        // s1's name row should be cleared; s2 untouched.
+        let names_s1 = s.speaker_names("s1").unwrap();
+        assert!(
+            names_s1.get(&0).map(|n| n.is_empty()).unwrap_or(true),
+            "s1 speaker name should be cleared after unlink"
+        );
+        let names_s2 = s.speaker_names("s2").unwrap();
+        assert_eq!(names_s2.get(&0).map(String::as_str), Some("Kim"));
+
+        // s1's sample removed; s2's sample intact.
+        let infos2 = s.voiceprints().unwrap();
+        assert_eq!(infos2[0].samples, 1, "s1 sample must be removed");
+        // Only s2 appears in appearances.
+        assert_eq!(infos2[0].appearances.len(), 1);
+        assert_eq!(infos2[0].appearances[0].0, "s2");
 
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }

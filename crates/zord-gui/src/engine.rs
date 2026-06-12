@@ -378,6 +378,9 @@ pub enum DbCmd {
         title: String,
     },
     DeleteSession(String),
+    /// Batch-delete multiple sessions (Phase 43f). Loops the single-delete logic
+    /// for each id, then emits one Sessions refresh and a count notice.
+    DeleteSessions(Vec<String>),
     /// Delete a session's stored AI summary (transcript is untouched).
     ClearSummary(String),
     /// Delete a session's stored dense-prose compression (transcript is untouched).
@@ -418,6 +421,15 @@ pub enum DbCmd {
     },
     #[allow(dead_code)]
     VoiceprintForgetAll,
+    /// Unlink a specific session from a voiceprint: clears the speaker name row(s)
+    /// in that session that were linked to this voiceprint, and removes the
+    /// session's sample(s) from `voiceprint_samples` so the bad enrollment no
+    /// longer pollutes the centroid (Phase 43d).
+    #[allow(dead_code)]
+    VoiceprintUnlink {
+        voiceprint_id: i64,
+        session_id: String,
+    },
     /// Save the host's free-form notes for a session (empty clears them).
     SetNotes {
         id: String,
@@ -1807,6 +1819,17 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 let _ = store.delete_session(&id);
                 emit_sessions(&store, &ev);
             }
+            DbCmd::DeleteSessions(ids) => {
+                let count = ids.len();
+                for id in &ids {
+                    let _ = store.delete_session(id);
+                }
+                emit_sessions(&store, &ev);
+                let _ = ev.send(Event::Notice(format!(
+                    "Deleted {count} session{}.",
+                    if count == 1 { "" } else { "s" }
+                )));
+            }
             DbCmd::ClearSummary(id) => {
                 let _ = store.clear_summary(&id);
                 let _ = ev.send(Event::Summary(None));
@@ -1832,7 +1855,8 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                             if let Ok(vid) =
                                 store.enroll_voiceprint(name.trim(), &model, &emb, Some(&id))
                             {
-                                let _ = store.link_speaker_voiceprint(&id, speaker, vid);
+                                // Manual rename → no auto-match score (None).
+                                let _ = store.link_speaker_voiceprint(&id, speaker, vid, None);
                                 let _ = ev.send(Event::Voiceprints(
                                     store.voiceprints().unwrap_or_default(),
                                 ));
@@ -1858,6 +1882,18 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
             DbCmd::VoiceprintForgetAll => {
                 let _ = store.forget_all_voiceprints();
                 let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
+            }
+            DbCmd::VoiceprintUnlink {
+                voiceprint_id,
+                session_id,
+            } => {
+                let _ = store.unlink_voiceprint_session(voiceprint_id, &session_id);
+                let _ = ev.send(Event::Voiceprints(store.voiceprints().unwrap_or_default()));
+                // Also refresh speakers for the affected session if it happens to be
+                // the open one — the GUI checks session_id equality before applying.
+                let _ = ev.send(Event::Speakers(
+                    store.speaker_names(&session_id).unwrap_or_default(),
+                ));
             }
             DbCmd::LoadOverviewDoc => {
                 let (markdown, updated_at) = load_overview_doc(&store);
@@ -2826,12 +2862,13 @@ fn apply_voiceprints(
     let threshold = zord_config::voiceprint_threshold(&settings.voiceprints_match);
     let mut recognized: Vec<String> = Vec::new();
     for (speaker, emb) in &clusters {
-        if let Some((vid, name, _score)) =
+        if let Some((vid, name, score)) =
             zord_store::best_voiceprint_match(&cands, emb, threshold, 0.05)
         {
             let _ = store.set_speaker_name(session_id, *speaker, &name);
-            let _ = store.link_speaker_voiceprint(session_id, *speaker, vid);
-            recognized.push(name);
+            let _ = store.link_speaker_voiceprint(session_id, *speaker, vid, Some(score));
+            let pct = (score * 100.0).round() as u32;
+            recognized.push(format!("{name} ({pct}% match)"));
         }
     }
     if !recognized.is_empty() {
@@ -4352,7 +4389,8 @@ fn enroll_integration_tracks(
         };
         let _ = store.set_session_speaker_embedding(session_id, speaker, model.name(), &emb);
         if let Ok(vid) = store.enroll_voiceprint(name, model.name(), &emb, Some(session_id)) {
-            let _ = store.link_speaker_voiceprint(session_id, speaker, vid);
+            // Discord auto-enrollment uses ground-truth names, no match score.
+            let _ = store.link_speaker_voiceprint(session_id, speaker, vid, None);
             enrolled += 1;
         }
     }

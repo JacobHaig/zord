@@ -176,14 +176,28 @@ pub fn SpeakersView(
                                 p { class: "field-note speakers-subtitle",
                                     "{items.len()} person(s) remembered. Click a name to rename; use Forget to remove a voice."
                                 }
-                                for info in items {
-                                    SpeakerCard {
-                                        key: "{info.id}",
-                                        info,
-                                        current_model: current_model.clone(),
-                                        engine: engine.clone(),
-                                        on_open_session,
-                                    }
+                                {
+                                    // Build the name list before consuming `items`.
+                                    let all_names: Vec<(i64, String)> = items
+                                        .iter()
+                                        .map(|i| (i.id, i.name.clone()))
+                                        .collect::<Vec<_>>();
+                                    let all_names_owned = all_names.clone();
+                                    items.into_iter().map(move |info| {
+                                        let an = all_names_owned.clone();
+                                        let cm = current_model.clone();
+                                        let eng = engine.clone();
+                                        rsx! {
+                                            SpeakerCard {
+                                                key: "{info.id}",
+                                                info,
+                                                all_names: an,
+                                                current_model: cm,
+                                                engine: eng,
+                                                on_open_session,
+                                            }
+                                        }
+                                    })
                                 }
                             }
                         }
@@ -203,6 +217,8 @@ pub fn SpeakersView(
 #[component]
 fn SpeakerCard(
     info: VoiceprintInfo,
+    /// All names in the library (for the Merge-into target select).
+    all_names: Vec<(i64, String)>,
     current_model: String,
     engine: Engine,
     on_open_session: EventHandler<String>,
@@ -211,6 +227,11 @@ fn SpeakerCard(
     let mut editing = use_signal(|| false);
     let mut edit_text = use_signal(|| info.name.clone());
     let mut confirm_forget = use_signal(|| false);
+    // Merge-into: None = picker closed; Some(name) = name chosen, confirm pending.
+    let mut merge_target: Signal<Option<String>> = use_signal(|| None);
+
+    // Unlink: Some((session_id, label)) = confirm pending.
+    let mut confirm_unlink: Signal<Option<(String, String)>> = use_signal(|| None);
 
     // Stale-model indicator: samples were built with a different embedding model.
     let model_mismatch = info.model != current_model;
@@ -244,6 +265,90 @@ fn SpeakerCard(
                                             confirm_forget.set(false);
                                         },
                                         "Forget voice"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Merge-into confirm dialog ──────────────────────────────────
+            if let Some(target) = merge_target.read().clone() {
+                {
+                    let engine = engine.clone();
+                    let source_name = info.name.clone();
+                    let target_name = target.clone();
+                    rsx! {
+                        div { class: "overlay",
+                            div { class: "confirm-card",
+                                h2 { "Combine voices?" }
+                                p { class: "field-note",
+                                    "Combine \"{source_name}\"'s voice samples into \"{target_name}\" — "
+                                    "\"{source_name}\" disappears from the library."
+                                }
+                                div { class: "confirm-actions",
+                                    button {
+                                        class: "mbtn ghost",
+                                        onclick: move |_| merge_target.set(None),
+                                        "Cancel"
+                                    }
+                                    button {
+                                        class: "mbtn",
+                                        onclick: move |_| {
+                                            // Rename-merge: the store merges when
+                                            // the target name already exists.
+                                            let _ = engine.db_tx.send(
+                                                DbCmd::VoiceprintRename {
+                                                    id,
+                                                    name: target_name.clone(),
+                                                },
+                                            );
+                                            merge_target.set(None);
+                                        },
+                                        "Combine"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Unlink-session confirm dialog ──────────────────────────────
+            if let Some((ref unlink_sid, ref unlink_label)) = *confirm_unlink.read() {
+                {
+                    let engine = engine.clone();
+                    let sid_c = unlink_sid.clone();
+                    let label_c = unlink_label.clone();
+                    let name = info.name.clone();
+                    rsx! {
+                        div { class: "overlay",
+                            div { class: "confirm-card",
+                                h2 { "Remove this session link?" }
+                                p { class: "field-note",
+                                    "Unlinks \"{label_c}\" from {name}. "
+                                    "The voice samples from that session will be removed so they no longer affect recognition. "
+                                    "The transcript label is reset to \"Speaker N\"."
+                                }
+                                div { class: "confirm-actions",
+                                    button {
+                                        class: "mbtn ghost",
+                                        onclick: move |_| confirm_unlink.set(None),
+                                        "Cancel"
+                                    }
+                                    button {
+                                        class: "mbtn danger",
+                                        onclick: move |_| {
+                                            let _ = engine.db_tx.send(
+                                                DbCmd::VoiceprintUnlink {
+                                                    voiceprint_id: id,
+                                                    session_id: sid_c.clone(),
+                                                },
+                                            );
+                                            confirm_unlink.set(None);
+                                        },
+                                        "Unlink session"
                                     }
                                 }
                             }
@@ -295,6 +400,33 @@ fn SpeakerCard(
                             {icon("pen")}
                         }
                     }
+                    // Merge-into: only shown when there are other people.
+                    if !*editing.read() && all_names.len() > 1 {
+                        {
+                            let other_names: Vec<String> = all_names
+                                .iter()
+                                .filter(|(oid, _)| *oid != id)
+                                .map(|(_, n)| n.clone())
+                                .collect();
+                            rsx! {
+                                select {
+                                    class: "merge-select",
+                                    title: "Merge into another person",
+                                    // A placeholder option that triggers no action.
+                                    onchange: move |e: FormEvent| {
+                                        let val = e.value();
+                                        if !val.is_empty() {
+                                            merge_target.set(Some(val));
+                                        }
+                                    },
+                                    option { value: "", "Merge into\u{2026}" }
+                                    for name in other_names {
+                                        option { value: "{name}", "{name}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     button {
                         class: "row-btn",
                         title: "Forget this voice",
@@ -316,20 +448,41 @@ fn SpeakerCard(
             if !info.appearances.is_empty() {
                 div { class: "speaker-appearances",
                     span { class: "speaker-appearances-label", "Seen in:" }
-                    for (sid, title) in info.appearances.iter().take(8).cloned() {
+                    for (sid, title, score) in info.appearances.iter().take(8).cloned() {
                         {
                             let label = if title.trim().is_empty() {
                                 "Recording".to_string()
                             } else {
-                                title
+                                title.clone()
                             };
+                            let chip_title = match score {
+                                Some(s) => format!("auto-matched at {}% \u{2014} click to open, \u{d7} to unlink", (s * 100.0).round() as u32),
+                                None => "named manually \u{2014} click to open, \u{d7} to unlink".to_string(),
+                            };
+                            let sid_open = sid.clone();
+                            let sid_unlink = sid.clone();
+                            let label_unlink = label.clone();
                             rsx! {
-                                button {
+                                span {
                                     key: "{sid}",
-                                    class: "speaker-chip",
-                                    title: "Open session",
-                                    onclick: move |_| on_open_session.call(sid.clone()),
-                                    "{label}"
+                                    class: "speaker-chip-wrap",
+                                    button {
+                                        class: "speaker-chip",
+                                        title: "{chip_title}",
+                                        onclick: move |_| on_open_session.call(sid_open.clone()),
+                                        "{label}"
+                                    }
+                                    button {
+                                        class: "speaker-chip-unlink",
+                                        title: "Wrong person — unlink this session",
+                                        onclick: move |_| {
+                                            confirm_unlink.set(Some((
+                                                sid_unlink.clone(),
+                                                label_unlink.clone(),
+                                            )));
+                                        },
+                                        "\u{d7}"
+                                    }
                                 }
                             }
                         }
