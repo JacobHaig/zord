@@ -1262,6 +1262,12 @@ fn MainApp() -> Element {
                                 let _ = engine2.db_tx.send(DbCmd::LoadTimeline(id2.clone()));
                             }
                         },
+                        on_close_timeline: {
+                            let engine3 = engine.clone();
+                            move |_| {
+                                close_timeline(&engine3, timeline_open, timeline_lanes, timeline_pos);
+                            }
+                        },
                     }
                 }
 
@@ -1368,14 +1374,13 @@ fn MainApp() -> Element {
                             {
                                 let on_seek_handler = if *timeline_open.read() {
                                     let engine_seek = engine.clone();
-                                    let tl_open = *timeline_open.peek();
+                                    // In-place seek: the play worker reuses the
+                                    // current mix's track set (no-op + notice when
+                                    // nothing is loaded yet).
                                     Some(EventHandler::new(move |ms: u64| {
-                                        if tl_open {
-                                            let _ = engine_seek.play_tx.send(PlayCmd::TimelinePlay {
-                                                paths: Vec::new(), // will be filled by panel; seek fires here
-                                                start_ms: ms,
-                                            });
-                                        }
+                                        let _ = engine_seek
+                                            .play_tx
+                                            .send(PlayCmd::TimelineSeek { start_ms: ms });
                                     }))
                                 } else {
                                     None
@@ -1803,6 +1808,9 @@ fn SessionToolbar(
     timeline_has_audio: bool,
     /// Open the timeline panel (fires DbCmd::LoadTimeline).
     on_open_timeline: EventHandler<MouseEvent>,
+    /// Close the timeline panel — routes through `close_timeline` in MainApp
+    /// so playback stops and lane/pos state clears (same path as the panel's ×).
+    on_close_timeline: EventHandler<()>,
 ) -> Element {
     let sid = id.clone();
     let eng_sum = engine.clone();
@@ -1945,7 +1953,8 @@ fn SessionToolbar(
                 disabled: !timeline_has_audio,
                 onclick: move |e| {
                     if *timeline_open.peek() {
-                        timeline_open.set(false);
+                        // Same close path as the panel's × — stops playback too.
+                        on_close_timeline.call(());
                     } else {
                         on_open_timeline.call(e);
                     }

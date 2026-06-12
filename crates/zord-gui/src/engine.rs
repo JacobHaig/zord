@@ -463,6 +463,11 @@ pub enum PlayCmd {
     /// Resume a paused timeline playback. Call sites wired in Phase 42c.
     #[allow(dead_code)]
     TimelineResume,
+    /// Seek the CURRENT timeline playback in place: restart the mix at
+    /// `start_ms` with the same track set (Phase 42c — per-line timestamp
+    /// jumps, where the GUI doesn't need to re-derive the lane paths). No-op
+    /// with a notice when no timeline playback is loaded.
+    TimelineSeek { start_ms: u64 },
 }
 
 /// Model-management commands (download/delete can take minutes, so they run on
@@ -2115,6 +2120,9 @@ fn build_timeline(
 /// State for an active timeline playback session (Phase 42b).
 struct TimelineState {
     reader: zord_audio::MixReader,
+    /// The tracks feeding the reader — kept so [`PlayCmd::TimelineSeek`] can
+    /// restart the mix at a new offset without the GUI resending them.
+    paths: Vec<PathBuf>,
     /// ms offset when playback started / was last resumed.
     start_ms: u64,
     /// Wall-clock instant when playback started / was last resumed.
@@ -2168,6 +2176,23 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 Ok(c) => Some(c),
                 Err(_) => return,
             }
+        };
+        // An in-place seek is a TimelinePlay reusing the current mix's tracks —
+        // translate it here so the restart logic below stays single-sourced.
+        let cmd = match cmd {
+            Some(PlayCmd::TimelineSeek { start_ms }) => match tl.as_ref() {
+                Some(state) => Some(PlayCmd::TimelinePlay {
+                    paths: state.paths.clone(),
+                    start_ms,
+                }),
+                None => {
+                    let _ = ev.send(Event::Notice(
+                        "Timeline isn't playing — press Play on the timeline first.".to_string(),
+                    ));
+                    continue;
+                }
+            },
+            other => other,
         };
         match cmd {
             Some(PlayCmd::Play {
@@ -2272,6 +2297,7 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                         sink = Some(player);
                         tl = Some(TimelineState {
                             reader,
+                            paths,
                             start_ms,
                             resumed_at: now,
                             elapsed_before_resume: 0,
@@ -2308,6 +2334,9 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                     }
                 }
             }
+
+            // Translated into TimelinePlay (or consumed with a notice) above.
+            Some(PlayCmd::TimelineSeek { .. }) => unreachable!("TimelineSeek translated above"),
 
             // Poll tick — feed the sink and check for completion.
             None => {

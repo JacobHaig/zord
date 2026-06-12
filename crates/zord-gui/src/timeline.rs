@@ -307,6 +307,9 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
     let mut paused = use_signal(|| false);
     // Drag-scrub: set while the mouse button is held on the graph area.
     let mut dragging = use_signal(|| false);
+    // Measured CSS-pixel width of the graph container (set onmounted) — the
+    // divisor that turns a click's element x into a 0..1 seek fraction.
+    let mut container_w = use_signal(|| 1500.0_f64);
 
     // Sync `playing` / `paused` from the pos tick: if pos becomes None while
     // we thought we were playing, the track ended.
@@ -470,8 +473,9 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                                                 let cur = *le.get(track_cb.as_str()).unwrap_or(&true);
                                                 le.insert(track_cb.clone(), !cur);
                                             }
-                                            // If currently playing, restart with updated lane set.
-                                            if is_playing {
+                                            // If currently playing, restart with the updated lane
+                                            // set. Read the live state — not a render-time snapshot.
+                                            if *playing.peek() {
                                                 let paths = collect_enabled_paths(
                                                     &lanes_chip,
                                                     &af_chip,
@@ -530,24 +534,21 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
             // ── waveform area ────────────────────────────────────────────────
             div {
                 class: "tl-graphs",
+                // Measure the graph container once on mount so click/drag x
+                // (CSS pixels) maps to an accurate 0..1 fraction. Known
+                // limitation: a window resize while the panel stays open isn't
+                // re-measured until the panel is reopened.
+                onmounted: move |data: Event<MountedData>| async move {
+                    if let Ok(rect) = data.get_client_rect().await {
+                        container_w.set(rect.size.width.max(1.0));
+                    }
+                },
                 onmousedown: {
                     let mut seek = on_seek.clone();
                     move |e: MouseEvent| {
                         dragging.set(true);
-                        // Use element_coordinates().x as a fraction of 1500
-                        // (the SVG viewBox width).  This is an approximation
-                        // since element_coordinates is in CSS pixels, not SVG
-                        // units.  For accuracy we rely on the fact that the SVG
-                        // has preserveAspectRatio=none and fills its container,
-                        // so the CSS pixel offset maps linearly to [0..1].
-                        // We obtain the container width via a JS eval:
-                        let _ = document::eval(
-                            "window.__tl_w=(document.querySelector('.tl-graphs')||{}).offsetWidth||1500;"
-                        );
                         let x = e.element_coordinates().x;
-                        // Fallback: assume SVG container is ~1500px wide if JS
-                        // hasn't run yet. Accurate seek fires via on_click on mouseup.
-                        seek(x / 1500.0);
+                        seek(x / *container_w.peek());
                     }
                 },
                 onmousemove: {
@@ -555,7 +556,7 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                     move |e: MouseEvent| {
                         if *dragging.peek() {
                             let x = e.element_coordinates().x;
-                            seek2(x / 1500.0);
+                            seek2(x / *container_w.peek());
                         }
                     }
                 },
