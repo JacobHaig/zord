@@ -25,3 +25,4 @@
 - [Platform integrations](platform-integrations.md) — Phases 27–30: per-participant Discord capture (songbird/DAVE); unified spk-N tracks, "me" is a session tag not a channel
 - [Productionization](productionization.md) — Phases 32–35 + v0.3.0 release learnings: FEATURES vs CLI_FEATURES split, re-tag-on-workflow-fix, develop-only CI, asset names are an API
 - [Voiceprints](voiceprints.md) — Phase 38 cross-session speaker identity: tables, matcher params (0.72/0.05/3s/30s/cap 8), implicit enrollment paths, kill-switch, legal memo, storage subtlety
+- [Business direction](business-direction.md) — proprietary license, private-repo move (updater decision pending), planned free/premium split; design with the seam in mind

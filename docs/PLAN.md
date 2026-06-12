@@ -1804,6 +1804,36 @@ The pre-release punch list (user-confirmed June 2026), in sub-phases:
   Record control when the capture mode includes system audio, listing running
   apps; "All system audio" default).
 
+### Phase 44 — Knowledge-base export (planned)
+Mirror Zord's knowledge into a user-chosen folder as plain markdown, so
+Obsidian/Logseq/any-PKM picks it up for free. Setting `kb_export_dir`
+(blank = off) + toggle; the engine mirrors on change, debounced:
+`Overview.md` (the living document, on every save/fold/revert) and
+`sessions/<date>-<title>.md` (summary + condensed transcript + metadata
+header, on summarize/compress/re-transcribe). One-way export (Zord remains
+the source of truth — edits in the folder are overwritten; documented).
+Filenames sanitized + stable per session id; deletions mirror on session
+delete. Settings → Files block with a "Export everything now" button.
+
+### Phase 45 — Semantic search (planned)
+Meaning-based search beside FTS: a local text-embedding model (small ONNX,
+e.g. bge-small/MiniLM class — downloaded on demand like other models)
+embeds transcript chunks (per ~segment-group) into a `segment_embeddings`
+table (blob vectors, same pattern as voiceprints); brute-force cosine is
+plenty at this scale. Search view gains a "Semantic" toggle: query →
+embed → top-K chunks → results grouped by session with jump-to-line; the
+cross-meeting chat's grounding can reuse the same retrieval as a follow-up.
+Embeddings computed post-transcription (job, cancellable, backfill button).
+Likely behind a `semantic` Cargo feature (ONNX text-embedding runtime dep).
+
+### Business split — strategic direction (recorded June 2026)
+The app will eventually fork into a **premium / business-user tier**
+(proprietary license already in place). Premium candidates: platform
+integrations beyond Discord (Teams/Zoom identity), semantic search,
+knowledge-base export, voiceprints at team scale, policy/admin controls,
+store distribution. Design new features with a clean free/premium seam in
+mind (Cargo features + license gating later); no gating implemented yet.
+
 ---
 
 ## 10. Open questions to revisit during build
