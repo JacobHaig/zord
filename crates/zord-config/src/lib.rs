@@ -164,6 +164,11 @@ pub struct Settings {
     /// Display name of the per-app capture target (for the picker UI only).
     #[serde(default)]
     pub capture_app_name: String,
+    /// The capture mode in effect just before the user switched into "app"
+    /// mode (Phase 43g follow-up). Restored when they pick "All system audio"
+    /// again, so a "system"-only user isn't silently flipped to "both".
+    #[serde(default = "default_capture_mode")]
+    pub capture_mode_before_app: String,
     /// Voiceprints (Phase 38): match speakers against the local library and
     /// auto-name them. Requires the one-time consent flow; off by default.
     #[serde(default)]
@@ -485,6 +490,7 @@ impl Default for Settings {
             compress_quality: default_compress_quality(),
             capture_app_id: String::new(),
             capture_app_name: String::new(),
+            capture_mode_before_app: default_capture_mode(),
             badge_tint: false,
             theme_accent: String::new(),
             theme_me: String::new(),
@@ -881,6 +887,19 @@ mod tests {
         assert_eq!(s.capture_mode, "mic");
         // The new button toggle defaults on.
         assert!(s.discord_record_button);
+    }
+
+    #[test]
+    fn capture_mode_before_app_defaults_to_both() {
+        // New field (Phase 43g follow-up): older configs without it must
+        // deserialize with "both", matching Default.
+        let s: Settings = serde_json::from_str(r#"{ "capture_mode": "system" }"#).unwrap();
+        assert_eq!(s.capture_mode_before_app, "both");
+        assert_eq!(Settings::default().capture_mode_before_app, "both");
+        // And it round-trips when set.
+        let s: Settings =
+            serde_json::from_str(r#"{ "capture_mode_before_app": "system" }"#).unwrap();
+        assert_eq!(s.capture_mode_before_app, "system");
     }
 
     #[test]

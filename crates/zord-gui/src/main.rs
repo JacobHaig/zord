@@ -1883,10 +1883,11 @@ fn SessionsSidebar(
                                         // "All system audio" choice.
                                         s.capture_app_id = String::new();
                                         s.capture_app_name = String::new();
-                                        // Return to the default combined mode when
-                                        // the user explicitly picks "All system audio".
+                                        // Restore the mode the user had before
+                                        // switching into app capture ("system"-only
+                                        // users must not be flipped to "both").
                                         if s.capture_mode == "app" {
-                                            s.capture_mode = "both".to_string();
+                                            s.capture_mode = s.capture_mode_before_app.clone();
                                         }
                                     } else {
                                         s.capture_app_id = val.clone();
@@ -1896,6 +1897,11 @@ fn SessionsSidebar(
                                             .find(|(id, _)| *id == val)
                                             .map(|(_, name)| name.clone())
                                             .unwrap_or_default();
+                                        // Remember the prior mode so "All system
+                                        // audio" can restore it later.
+                                        if s.capture_mode != "app" {
+                                            s.capture_mode_before_app = s.capture_mode.clone();
+                                        }
                                         s.capture_mode = "app".to_string();
                                     }
                                     let _ = s.save();
@@ -4677,6 +4683,11 @@ fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> E
                 select {
                     onchange: move |e: FormEvent| {
                         let mut s = settings.peek().clone();
+                        // Entering "app" mode: remember the prior mode so the
+                        // sidebar's "All system audio" choice can restore it.
+                        if e.value() == "app" && s.capture_mode != "app" {
+                            s.capture_mode_before_app = s.capture_mode.clone();
+                        }
                         s.capture_mode = e.value();
                         let _ = s.save();
                         settings.set(s);

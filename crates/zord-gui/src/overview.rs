@@ -25,113 +25,54 @@ use crate::{
     fmt_date, icon,
 };
 
-/// Toggle the Nth task-list checkbox (`- [ ]` / `- [x]`, case-insensitive x,
-/// also `*`- or `+`-bulleted) in markdown source order.
-///
-/// Returns `None` when `n` is out of range (doc changed under us — caller
-/// drops the click).  Code fences (triple-backtick) are skipped so that
-/// example task lists inside fences are never counted.
-///
-/// Parse rule (mirrors pulldown-cmark TASKLISTS):
-/// - Line whose *trimmed* start is `[-*+]` then a space, then `[` then
-///   space-or-x/X then `]` then a space (or end-of-content).
-/// - Source order == rendered order — that's the index contract.
-pub fn toggle_nth_task(md: &str, n: usize) -> Option<String> {
-    let mut result = String::with_capacity(md.len());
-    let mut count = 0usize;
-    let mut in_fence = false;
-    let mut found = false;
-
-    for line in md.split_inclusive('\n') {
-        // Track fenced code blocks so we don't count task items inside them.
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            result.push_str(line);
-            continue;
-        }
-
-        if !in_fence && !found {
-            if let Some((pre, rest)) = parse_task_marker(line) {
-                if count == n {
-                    // Flip the checkbox state.
-                    let toggled = if let Some(tail) = rest.strip_prefix("[ ]") {
-                        format!("{pre}[x]{tail}")
-                    } else {
-                        // Checked: [x] or [X] — rest.strip_prefix("[x]") / "[X]"
-                        let tail = rest.get(3..).unwrap_or("");
-                        format!("{pre}[ ]{tail}")
-                    };
-                    result.push_str(&toggled);
-                    found = true;
-                    continue;
-                }
-                count += 1;
-            }
-        }
-        result.push_str(line);
-    }
-
-    if found {
-        Some(result)
-    } else {
-        None // n was out of range
-    }
+/// The pulldown-cmark options shared by [`md_to_html`] and
+/// [`toggle_nth_task`].  They MUST stay identical: the toggle's checkbox
+/// indexing contract is "the Nth `TaskListMarker` event equals the Nth
+/// rendered `<input>`", which only holds when both sides parse with the same
+/// options.
+fn md_options() -> pulldown_cmark::Options {
+    use pulldown_cmark::Options;
+    Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH
 }
 
-/// Parse a task-list marker from a line.
+/// Toggle the Nth task-list checkbox in markdown source order.
 ///
-/// Returns `(prefix_including_bracket_open, rest_starting_at_bracket)`
-/// where `rest` is `"[ ] …"` or `"[x] …"` (bracket pair + trailing content).
+/// Returns `None` when `n` is out of range (doc changed under us — caller
+/// drops the click).
 ///
-/// The prefix includes the leading whitespace, bullet, space, and `[`.
-fn parse_task_marker(line: &str) -> Option<(&str, &str)> {
-    // Find the byte offset where the trimmed content starts.
-    let indent_len = line.len() - line.trim_start().len();
-    let after_indent = &line[indent_len..];
+/// Uses pulldown-cmark itself (`into_offset_iter`) to locate the Nth
+/// `Event::TaskListMarker`, so agreement with the renderer is by
+/// construction: ordered-list tasks (`1. [ ]`), blockquoted tasks,
+/// multi-space bullets, etc. all count exactly when they render as
+/// checkboxes, and fenced/indented code blocks never do.  The marker's byte
+/// `Range` spans the `[x]`-style marker in the SOURCE; the state char sits
+/// right after the `[` within it, and ` `/`x`/`X` are all 1 byte, so the
+/// flip preserves every other byte exactly.
+pub fn toggle_nth_task(md: &str, n: usize) -> Option<String> {
+    use pulldown_cmark::{Event, Parser};
 
-    // Must start with a list bullet.
-    let bullet = after_indent.chars().next()?;
-    if !matches!(bullet, '-' | '*' | '+') {
-        return None;
-    }
-    let bullet_len = bullet.len_utf8();
+    // Nth task-list marker in source order (same order pulldown renders).
+    let range = Parser::new_ext(md, md_options())
+        .into_offset_iter()
+        .filter_map(|(ev, r)| matches!(ev, Event::TaskListMarker(_)).then_some(r))
+        .nth(n)?;
 
-    // Must be followed by a single space.
-    let after_bullet = after_indent.get(bullet_len..)?;
-    if !after_bullet.starts_with(' ') {
-        return None;
-    }
-    let after_space = &after_bullet[1..];
+    // The range covers the `[ ]`/`[x]`/`[X]` marker. Locate the `[` within it
+    // (robust even if a pulldown version widens the span) and flip the state
+    // char that follows.
+    let bracket = md[range.clone()].find('[')? + range.start;
+    let state_pos = bracket + 1;
+    let flipped = match md.as_bytes().get(state_pos)? {
+        b' ' => "x",
+        b'x' | b'X' => " ",
+        _ => return None,
+    };
 
-    // Must be followed by `[` then space/x/X then `]` then space (or eol).
-    if !after_space.starts_with('[') {
-        return None;
-    }
-    let inner = after_space.get(1..)?;
-    let marker_char = inner.chars().next()?;
-    if !matches!(marker_char, ' ' | 'x' | 'X') {
-        return None;
-    }
-    let after_marker = inner.get(marker_char.len_utf8()..)?;
-    if !after_marker.starts_with(']') {
-        return None;
-    }
-    // The character after `]` must be a space, `\n`, `\r`, or end-of-string.
-    let after_close = &after_marker[1..];
-    if !after_close.is_empty()
-        && !after_close.starts_with(' ')
-        && !after_close.starts_with('\n')
-        && !after_close.starts_with('\r')
-    {
-        return None;
-    }
-
-    // prefix = everything up to (but not including) the `[` char.
-    let bracket_offset = indent_len + bullet_len + 1 /* space */;
-    let prefix = &line[..bracket_offset];
-    let rest = &line[bracket_offset..]; // starts with `[`
-    Some((prefix, rest))
+    let mut out = String::with_capacity(md.len());
+    out.push_str(&md[..state_pos]);
+    out.push_str(flipped);
+    out.push_str(&md[state_pos + 1..]);
+    Some(out)
 }
 
 /// Render the markdown string `md` to HTML using pulldown-cmark.
@@ -142,9 +83,8 @@ fn parse_task_marker(line: &str) -> Option<(&str, &str)> {
 /// `<script>`/`<img onerror>` would execute in the webview. Mapping those
 /// events to `Event::Text` makes push_html escape them instead.
 fn md_to_html(md: &str) -> String {
-    use pulldown_cmark::{html, Event, Options, Parser};
-    let opts = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
-    let parser = Parser::new_ext(md, opts).map(|e| match e {
+    use pulldown_cmark::{html, Event, Parser};
+    let parser = Parser::new_ext(md, md_options()).map(|e| match e {
         Event::Html(h) | Event::InlineHtml(h) => Event::Text(h),
         other => other,
     });
@@ -529,5 +469,109 @@ mod tests {
         assert!(toggle_nth_task(md, 1).unwrap().contains("- [ ] item 1\n"));
         assert!(toggle_nth_task(md, 2).unwrap().contains("- [x] item 2\n"));
         assert!(toggle_nth_task(md, 3).is_none());
+    }
+
+    #[test]
+    fn toggle_ordered_list_tasks() {
+        // Numbered task lists render as checkboxes too (AI output uses these
+        // constantly) — they must count.
+        let md = "1. [ ] first\n2. [x] second\n";
+        let out0 = toggle_nth_task(md, 0).expect("ordered task 0");
+        assert!(out0.contains("1. [x] first\n"), "got: {out0}");
+        let out1 = toggle_nth_task(md, 1).expect("ordered task 1");
+        assert!(out1.contains("2. [ ] second\n"), "got: {out1}");
+        assert!(toggle_nth_task(md, 2).is_none());
+    }
+
+    #[test]
+    fn toggle_blockquoted_and_multispace_tasks() {
+        let md = "> - [ ] quoted task\n\n-   [x] multi-space bullet\n";
+        let out0 = toggle_nth_task(md, 0).expect("blockquoted task");
+        assert!(out0.contains("> - [x] quoted task\n"), "got: {out0}");
+        let out1 = toggle_nth_task(md, 1).expect("multi-space bullet task");
+        assert!(out1.contains("-   [ ] multi-space bullet\n"), "got: {out1}");
+    }
+
+    #[test]
+    fn toggle_skips_indented_code_blocks() {
+        // 4-space-indented code is NOT rendered as a task by pulldown — it
+        // must not count either.
+        let md = "- [ ] real\n\n        - [ ] inside indented code\n";
+        let out = toggle_nth_task(md, 0).expect("real task");
+        assert!(out.contains("- [x] real\n"), "got: {out}");
+        assert!(
+            out.contains("        - [ ] inside indented code"),
+            "indented code must be untouched, got: {out}"
+        );
+        assert!(toggle_nth_task(md, 1).is_none());
+    }
+
+    /// Extract the checked state of every rendered `<input>` in `html`,
+    /// in document order.
+    fn checked_states(html: &str) -> Vec<bool> {
+        html.match_indices("<input")
+            .map(|(i, _)| {
+                let end = i + html[i..].find('>').expect("unclosed <input tag");
+                html[i..end].contains("checked")
+            })
+            .collect()
+    }
+
+    /// Renderer-equivalence: for a gnarly document, the toggle's index space
+    /// must equal the rendered checkbox index space — same count, and
+    /// toggling index k flips exactly the k-th rendered checkbox.
+    #[test]
+    fn toggle_matches_rendered_checkboxes() {
+        use pulldown_cmark::{Event, Parser};
+
+        let md = concat!(
+            "# Gnarly\n\n",
+            "- [ ] plain task\n",
+            "- plain non-task\n\n",
+            "1. [x] numbered task\n",
+            "2. [ ] another numbered\n\n",
+            "> - [ ] blockquoted task\n\n",
+            "-   [X] multi-space bullet\n\n",
+            "```\n- [ ] fenced — not a task\n```\n\n",
+            "    - [ ] indented code — not a task\n\n",
+            "- [ ]no space after bracket — not a task\n",
+            "- [ ] tail task\n",
+        );
+
+        // Count TaskListMarker events with the SAME options as the renderer.
+        let marker_count = Parser::new_ext(md, super::md_options())
+            .into_offset_iter()
+            .filter(|(ev, _)| matches!(ev, Event::TaskListMarker(_)))
+            .count();
+        assert!(marker_count >= 6, "expected the gnarly tasks to all parse");
+
+        // Same count as rendered <input> elements.
+        let base_html = md_to_html(md);
+        let base = checked_states(&base_html);
+        assert_eq!(
+            marker_count,
+            base.len(),
+            "marker count must equal rendered <input> count; html: {base_html}"
+        );
+
+        // Toggling index k flips exactly the k-th rendered checkbox.
+        for k in 0..marker_count {
+            let toggled = toggle_nth_task(md, k).expect("index in range");
+            let states = checked_states(&md_to_html(&toggled));
+            assert_eq!(states.len(), base.len(), "toggle must not add/remove tasks");
+            for (j, (before, after)) in base.iter().zip(states.iter()).enumerate() {
+                if j == k {
+                    assert_ne!(before, after, "checkbox {k} must flip");
+                } else {
+                    assert_eq!(
+                        before, after,
+                        "checkbox {j} must not change when toggling {k}"
+                    );
+                }
+            }
+        }
+
+        // One past the end is out of range.
+        assert!(toggle_nth_task(md, marker_count).is_none());
     }
 }
