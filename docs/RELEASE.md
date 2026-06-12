@@ -73,10 +73,11 @@ All artifacts follow one scheme — `Zord-<version>-<os>-<arch>[-<kind>].<ext>`:
 shipped — use the installer.)
 
 Both are built with the `FEATURES` set at the top of the workflow
-(`diarization,llm-local,llm-remote,parakeet,discord`). `encryption` is
-intentionally excluded from CI because its vendored OpenSSL needs Perl + NASM
-on the Windows runner — build locally with `--features encryption` if you need
-it. To change what ships, edit the single `FEATURES` env value.
+(`diarization,voiceprints,llm-local,llm-remote,parakeet,discord,encryption`).
+The `encryption` feature vendors OpenSSL — macOS builds it fine with the
+existing toolchain; the Windows runner installs NASM explicitly (Strawberry
+Perl ships on `windows-latest`). To change what ships, edit the single
+`FEATURES` env value.
 
 > ⚠ **Asset names are an API.** The in-app updater downloads
 > `Zord-<ver>-windows-x64-gui.exe` by exact name — renaming the artifacts
@@ -134,16 +135,16 @@ installer (NSIS `-setup.exe`, or `.msi` depending on the dx bundler) plus the
 portable GUI/CLI EXEs on a `windows-latest` runner for every tag. Runtime
 testing on a real Windows machine is still pending (no Windows host in the dev
 environment) — that includes the per-app capture path and the in-place
-self-update swap. Authenticode signing is not yet wired up — add a signing
-step analogous to the macOS one when you have a code-signing certificate.
+self-update swap. Authenticode signing is wired in CI (Phase 43b) and activates
+automatically when the `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD` secrets
+are set — see `docs/SIGNING.md` for the full runbook.
 
 ## Not yet covered
 
 - **macOS notarization automation** — wired in CI but gated on your Apple
   Developer secrets (see §4).
 - **SQLCipher** at-rest encryption — implemented (PLAN Phase 11) behind
-  `--features encryption`; the default release build omits it (avoids the
-  OpenSSL/perl build).
+  `--features encryption`; now included in release builds (Phase 43a).
 - **App icon** — done (PLAN Phase 12): `crates/zord-gui/icons/` + `Dioxus.toml`
   `[bundle] icon`. Regenerate with `swift tools/make_icon.swift out.png`.
 - **Store publishing** — channel *builds* exist (see Distribution channels

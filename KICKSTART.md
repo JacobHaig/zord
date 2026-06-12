@@ -82,8 +82,8 @@ opt-in Cargo features so you compile only what you use — combine freely with
 
 ```bash
 # What official releases ship (plus self-update on the GitHub channel):
-cargo build --release -p zord-gui --features parakeet,diarization,voiceprints,llm-local,llm-remote,discord
-cargo build --release -p zord-app --features parakeet,diarization,llm-local,llm-remote
+cargo build --release -p zord-gui --features parakeet,diarization,voiceprints,llm-local,llm-remote,discord,encryption
+cargo build --release -p zord-app --features parakeet,diarization,llm-local,llm-remote,encryption
 ```
 
 AI models are **never** compiled in — they download on first use (with

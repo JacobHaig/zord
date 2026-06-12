@@ -112,8 +112,8 @@ transcripts in a browser. Both are local-only.
 Grab the latest build from the
 [releases page](https://github.com/JacobHaig/zord/releases): a `.dmg`
 (macOS, Apple Silicon) or a `-setup.exe` / portable `-gui.exe` / `.zip`
-(Windows x64). Releases ship every optional engine (Parakeet, diarization, voiceprints,
-local + remote AI, Discord).
+(Windows x64). Releases ship every optional engine (Parakeet, diarization,
+voiceprints, local + remote AI, Discord, at-rest encryption).
 
 **The builds are currently unsigned**, so the OS warns on first launch:
 
@@ -178,6 +178,7 @@ A Cargo workspace of focused crates:
 | [`docs/PLAN.md`](docs/PLAN.md) | the design, every decision, and the full phase-by-phase history |
 | [`docs/discord-integration.md`](docs/discord-integration.md) | the Discord integration: user flow + how it works under the hood |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | cutting releases, signing/notarization, distribution channels |
+| [`docs/SIGNING.md`](docs/SIGNING.md) | code-signing runbook: what to buy, secret names, how to verify, private-repo updater |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | threat model, security review, and posture |
 | [`docs/model-licensing.md`](docs/model-licensing.md) | the commercial-licensing audit of every model offered in-app |
 | [`docs/diagrams/integrations.md`](docs/diagrams/integrations.md) | ASCII architecture diagrams for the integrations work |

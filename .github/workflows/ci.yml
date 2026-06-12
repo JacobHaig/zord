@@ -20,13 +20,16 @@ on:
 env:
   # macOS 13 deployment target for the ScreenCaptureKit Swift bridge.
   MACOSX_DEPLOYMENT_TARGET: "13.0"
+  # Bridge for third-party actions still pinned to Node 20 (GitHub kills Node 20
+  # runtime June 16 2026). Remove once those actions ship Node 24 releases.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   test:
     name: Lint + test (macOS, default features)
     runs-on: macos-15 # Xcode 26 SDK for the screencapturekit Swift bridge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -57,7 +60,7 @@ jobs:
     name: Windows compile check
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -79,11 +82,12 @@ jobs:
       fail-fast: false
       matrix:
         # Mirrors release.yml's FEATURES, checked one at a time so a break
-        # names its feature. (encryption stays out, as in release.yml.)
+        # names its feature. (encryption is checked here but its vendored
+        # OpenSSL is macOS-fine; Windows needs NASM — handled in release.yml.)
         # voiceprints requires diarization, so checked together.
-        feature: [diarization, "diarization,voiceprints", llm-local, llm-remote, parakeet]
+        feature: [diarization, "diarization,voiceprints", llm-local, llm-remote, parakeet, encryption]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1

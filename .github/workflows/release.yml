@@ -24,13 +24,17 @@ permissions:
   contents: write
 
 env:
-  # Optional engines bundled into the released GUI app. (encryption is
-  # intentionally omitted — its vendored OpenSSL would need Perl + NASM on the
-  # Windows runner.) The channel step appends self-update for github builds.
-  FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord"
+  # Bridge for third-party actions still pinned to Node 20 (GitHub kills Node 20
+  # runtime June 16 2026). Remove once those actions ship Node 24 releases.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Optional engines bundled into the released GUI app. encryption is now
+  # included; it requires vendored OpenSSL (macOS: fine with existing toolchain;
+  # Windows: Strawberry Perl ships on windows-latest, NASM installed explicitly).
+  # The channel step appends self-update for github builds.
+  FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord,encryption"
   # The CLI (zord-app) only declares a subset — voiceprints/discord/self-update
   # are GUI/integration features it doesn't have; passing them fails the build.
-  CLI_FEATURES: "diarization,llm-local,llm-remote,parakeet"
+  CLI_FEATURES: "diarization,llm-local,llm-remote,parakeet,encryption"
   CHANNEL: ${{ inputs.channel || 'github' }}
 
 jobs:
@@ -45,7 +49,7 @@ jobs:
       # True only when signing secrets are configured; gates the sign/notarize steps.
       HAS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && secrets.MACOS_SIGNING_IDENTITY != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The screencapturekit Swift bridge (apple-metal/apple-cf) runs `swift
       # build` at compile time; pin a recent stable Xcode so its toolchain
@@ -155,7 +159,7 @@ jobs:
 
       - name: Upload artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: zord-macos-arm64
           path: dist/*
@@ -176,14 +180,21 @@ jobs:
       # freed across the two CRT heaps corrupts the heap and the process vanishes
       # instantly (every Summarize/Compress, no panic, no log). Force it static too.
       LLAMA_STATIC_CRT: "1"
+      # True only when Windows signing secrets are configured; gates the Authenticode step.
+      HAS_WIN_SIGNING: ${{ secrets.WINDOWS_CERT_PFX != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      # The encryption feature vendors OpenSSL, which requires NASM on Windows
+      # (Strawberry Perl is already present on windows-latest runners).
+      - name: Install NASM (for vendored OpenSSL / encryption feature)
+        run: choco install nasm -y
 
       - name: Install dioxus-cli
         run: cargo install dioxus-cli --version 0.7.9 --locked
@@ -203,6 +214,52 @@ jobs:
 
       - name: Build CLI
         run: cargo build --release --package zord-app --features "${{ env.CLI_FEATURES }}"
+
+      # ---- Optional: Authenticode sign (only if secrets are set) ----
+      - name: Sign EXEs with Authenticode
+        if: env.HAS_WIN_SIGNING == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          # Decode the base64-encoded PFX certificate.
+          $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_CERT_PFX)
+          [IO.File]::WriteAllBytes("cert.pfx", $pfxBytes)
+
+          # Locate signtool.exe via vswhere (present on windows-latest).
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.Windows10SDK -property installationPath
+          $signtool = Get-ChildItem -Recurse -Path "$vsPath\Windows Kits" -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+                      Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if (-not $signtool) {
+            # Fallback: search the common SDK install location.
+            $signtool = Get-ChildItem -Recurse -Path "C:\Program Files (x86)\Windows Kits" -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          }
+          if (-not $signtool) { throw "signtool.exe not found" }
+          $st = $signtool.FullName
+          Write-Host "Using signtool: $st"
+
+          $pw = $env:WINDOWS_CERT_PASSWORD
+          $tsUrl = "http://timestamp.digicert.com"
+
+          # Sign every EXE produced by the build (bundle GUI, portable GUI, CLI,
+          # and the NSIS installer if it exists at this point).
+          $targets = @(
+            (Get-ChildItem -Recurse target -Path "*bundle*" -Filter "*.exe" -ErrorAction SilentlyContinue),
+            (Get-ChildItem -Recurse target -Path "*bundle*" -Filter "*.msi" -ErrorAction SilentlyContinue),
+            (Get-Item "target\release\zord.exe" -ErrorAction SilentlyContinue)
+          ) | ForEach-Object { $_ } | Where-Object { $_ -ne $null } | Select-Object -ExpandProperty FullName -Unique
+
+          foreach ($exe in $targets) {
+            Write-Host "Signing: $exe"
+            & $st sign /fd SHA256 /tr $tsUrl /td SHA256 /f cert.pfx /p $pw "$exe"
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed for $exe" }
+          }
+
+          # Clean up the PFX — never leave it in the workspace.
+          Remove-Item cert.pfx -Force
 
       - name: Collect artifacts
         shell: bash
@@ -243,7 +300,7 @@ jobs:
 
       - name: Upload artifact (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: zord-windows-x64
           path: dist/*
@@ -258,7 +315,7 @@ jobs:
     needs: [macos, windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Write curated notes
