@@ -1797,16 +1797,14 @@ pub fn kb_sanitize_filename(s: &str) -> String {
     out.chars().take(80).collect()
 }
 
-/// Derive the stable short-id from a session id: take the last 8 characters.
-/// Session ids are UUIDs or timestamp-based strings; the tail is unique enough
-/// for glob-matching and collision-resistant at typical library sizes.
-pub fn kb_short_id(session_id: &str) -> &str {
-    let id = session_id.trim();
-    if id.len() <= 8 {
-        id
-    } else {
-        &id[id.len() - 8..]
-    }
+/// The stable, glob-safe file tag for a session: the FULL sanitized session
+/// id. Session ids here are `sess-<epoch-ms>` (CLI: `file-<epoch-ms>`) — a
+/// truncated tail is NOT collision-safe (the last 8 digits of a millisecond
+/// timestamp repeat every ~27.8 hours, and the remove/rename globs match by
+/// this tag, so a collision would delete or rename the WRONG session's note).
+/// Full ids are short and already filename-safe after sanitizing.
+pub fn kb_short_id(session_id: &str) -> String {
+    kb_sanitize_filename(session_id.trim())
 }
 
 /// Derive the session markdown filename from `started_at`, the current title,
@@ -1969,7 +1967,7 @@ fn kb_mirror_session(dir: &str, store: &Store, session_id: &str) {
     let dest = sessions_dir.join(basename);
 
     // If the title changed, rename any old file with the same short-id.
-    let short = kb_short_id(session_id).to_string();
+    let short = kb_short_id(session_id);
     if let Ok(rd) = std::fs::read_dir(&sessions_dir) {
         for entry in rd.flatten() {
             let name = entry.file_name().into_string().unwrap_or_default();
@@ -1997,7 +1995,7 @@ fn kb_remove_session(dir: &str, session_id: &str) {
     if dir.is_empty() {
         return;
     }
-    let short = kb_short_id(session_id).to_string();
+    let short = kb_short_id(session_id);
     let sessions_dir = std::path::Path::new(dir).join("sessions");
     let Ok(rd) = std::fs::read_dir(&sessions_dir) else {
         return;
@@ -6143,29 +6141,33 @@ mod tests {
     }
 
     #[test]
-    fn kb_short_id_is_last_8_chars() {
-        assert_eq!(kb_short_id("abcdefghij"), "cdefghij");
-        assert_eq!(kb_short_id("short"), "short");
-        assert_eq!(kb_short_id("12345678"), "12345678");
-        // UUIDs use the trailing hex segment.
-        let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        assert_eq!(kb_short_id(uuid), "55440000");
+    fn kb_short_id_is_full_sanitized_id() {
+        // Production ids are `sess-<epoch-ms>`; the tag is the FULL id so two
+        // sessions started exactly ~27.8 h apart (same trailing 8 digits of
+        // the ms timestamp) can never collide in the remove/rename globs.
+        assert_eq!(kb_short_id("sess-1749718800123"), "sess-1749718800123");
+        assert_ne!(
+            kb_short_id("sess-1749718800123"),
+            kb_short_id("sess-1749818800123")
+        );
+        // Sanitized: separators and illegal chars can't escape the folder.
+        assert!(!kb_short_id("we/ird\\id").contains(['/', '\\']));
     }
 
     #[test]
     fn kb_session_filename_format() {
         // Fixed epoch: 2026-01-01 00:00:00 UTC → local may vary, but year is 2026.
         let ts = 1_735_689_600_000u64; // 2026-01-01 00:00:00 UTC
-        let sid = "abcdefgh12345678";
+        let sid = "sess-1735689600000";
         let f = kb_session_filename(ts, Some("My Meeting"), sid);
-        // Must start with sessions/, end with the short-id + .md.
+        // Must start with sessions/, end with the FULL id tag + .md.
         assert!(f.starts_with("sessions/"), "prefix: {f}");
-        assert!(f.ends_with("-12345678.md"), "short-id suffix: {f}");
+        assert!(f.ends_with("-sess-1735689600000.md"), "id suffix: {f}");
         assert!(f.contains("My-Meeting"), "title included: {f}");
-        // No title → short-id used as title part too.
+        // No title → the id tag is used as the title part too.
         let f2 = kb_session_filename(ts, None, sid);
         assert!(f2.starts_with("sessions/"), "{f2}");
-        assert!(f2.ends_with("-12345678.md"), "{f2}");
+        assert!(f2.ends_with("-sess-1735689600000.md"), "{f2}");
     }
 
     #[test]

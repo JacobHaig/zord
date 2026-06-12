@@ -4545,7 +4545,9 @@ fn FilesSettings(
             p { class: "field-note",
                 "One-way mirror: Zord overwrites files in this folder. \
                  Point your notes app (Obsidian, Logseq) at it. \
-                 Edits inside the folder will be overwritten on the next update."
+                 Edits inside the folder will be overwritten on the next update. \
+                 Exported files contain your full meeting transcripts — choose \
+                 a location you trust."
             }
             div { class: "settings-row",
                 label { class: "settings-label", "Knowledge-base folder" }
