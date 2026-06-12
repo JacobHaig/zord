@@ -2011,12 +2011,17 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 end_ms,
             } => {
                 // Mixing + writing is I/O heavy — run off the db thread.
+                // Dedupe + register on the db thread (same race-free pattern
+                // as LoadTimeline): a double-click must not spawn two writers.
+                let jid = format!("exportclip:{id}");
+                if jobs.is_running(&jid) {
+                    continue;
+                }
+                let _token = jobs.begin(&ev, &jid, "export", "Exporting clip");
                 let ev = ev.clone();
                 let db_path = db_path.clone();
                 let jobs = jobs.clone();
                 thread::spawn(move || {
-                    let jid = format!("exportclip:{id}");
-                    let _token = jobs.begin(&ev, &jid, "export", "Exporting clip");
                     supervise("export clip", &ev, || {
                         match export_clip(&db_path, &id, &paths, start_ms, end_ms) {
                             Ok(path) => {
@@ -2037,12 +2042,18 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                 end_ms,
             } => {
                 // Heavy (model load + inference on slice) — own thread + Store.
+                // Dedupe + register on the db thread: a double-click would
+                // otherwise run two delete-then-insert passes over the same
+                // range and interleave/duplicate the replacement segments.
+                let jid = format!("retranscribe-range:{id}");
+                if jobs.is_running(&jid) {
+                    continue;
+                }
+                let token = jobs.begin(&ev, &jid, "retranscribe", "Re-transcribing selection");
                 let ev = ev.clone();
                 let db_path = db_path.clone();
                 let jobs = jobs.clone();
                 thread::spawn(move || {
-                    let jid = format!("retranscribe-range:{id}");
-                    let token = jobs.begin(&ev, &jid, "retranscribe", "Re-transcribing selection");
                     supervise("retranscribe range", &ev, || {
                         retranscribe_range_ondemand(&db_path, &id, start_ms, end_ms, &ev, &token)
                     });
@@ -2364,8 +2375,9 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                 if current.take().is_some() {
                     let _ = ev.send(Event::Playing(None));
                 }
-                // Stop old timeline session if any.
-                tl = None;
+                // Stop the old timeline session, but carry its speed over —
+                // a seek/lane-toggle restart must not silently reset 2× → 1×.
+                let speed = tl.take().map(|s| s.speed).unwrap_or(1.0);
 
                 if output.is_none() {
                     output = rodio::DeviceSinkBuilder::open_default_sink().ok();
@@ -2384,8 +2396,6 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                     }
                     Ok(reader) => {
                         let now = std::time::Instant::now();
-                        // Preserve current speed across seeks/restarts.
-                        let speed = tl.as_ref().map(|s| s.speed).unwrap_or(1.0);
                         let player = rodio::Player::connect_new(device.mixer());
                         if (speed - 1.0).abs() > 1e-3 {
                             player.set_speed(speed);
