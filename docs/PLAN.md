@@ -1772,6 +1772,38 @@ What shipped (Phases 42a–42d):
 Deferred stretch items: per-lane solo, per-lane gain in the mix, loop-a-selection.
 Live verification pending (headless test environment cannot exercise audio I/O).
 
+### Phase 43 — Production readiness + workflow depth (planned)
+The pre-release punch list (user-confirmed June 2026), in sub-phases:
+- **43a — release hygiene.** Proprietary `LICENSE` (all rights reserved; the
+  repo is moving private) + `Cargo.toml` `license-file`; bump Node-20-deprecated
+  GitHub Actions (checkout v4→v5 etc. — deadline June 16 2026); ship the
+  `encryption` feature in releases (Windows runner needs Perl+NASM for the
+  vendored OpenSSL; add to FEATURES + CLI_FEATURES). ⚠ Going private breaks
+  the self-updater's unauthenticated GitHub Releases check — document the
+  choice: public releases-only repo (recommended) vs authenticated updater.
+- **43b — signing, wired + documented (no certs yet).** Windows Authenticode
+  CI step gated on secrets (mirroring the macOS HAS_SIGNING pattern) +
+  `docs/SIGNING.md` runbook: exact cert purchases, secret names, activation.
+- **43c — "Report a problem" bundle.** Settings → About: export a diagnostic
+  zip (logs, config with secrets REDACTED — bot token, API keys, passphrase
+  fields — system info, recent session metadata sans transcripts) to exports.
+- **43d — voiceprint management depth.** Speakers view: **Merge into…**
+  (reuses the store's rename-merge), per-session **"wrong person" unlink** on
+  appearance chips, and match-confidence surfaced (score in the "Recognized"
+  notice + chip tooltip).
+- **43e — Overview checkboxes clickable in rendered view.** Task-list inputs
+  toggle the nth `- [ ]`/`- [x]` in the markdown source and save (eval-bridge
+  from the rendered HTML back to Rust — the one risky item; degrade to
+  edit-mode-only if the bridge proves unreliable).
+- **43f — batch session selection.** Cmd/Ctrl-click toggles, Shift-click
+  range-selects from the anchor; selected rows styled; an action bar ("N
+  selected — Delete / Clear") with one confirm; `DbCmd::DeleteSessions(Vec)`
+  batch delete (one list refresh at the end).
+- **43g — per-app capture surfaced.** Phase 31's app picker exists but is
+  buried in Settings; surface it in the recording flow (app select near the
+  Record control when the capture mode includes system audio, listing running
+  apps; "All system audio" default).
+
 ---
 
 ## 10. Open questions to revisit during build
