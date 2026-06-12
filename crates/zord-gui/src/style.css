@@ -433,7 +433,9 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .md-doc ul, .md-doc ol { padding-left: 22px; margin: 0 0 10px; }
 .md-doc li { margin-bottom: 4px; }
 .md-doc ul li.task-list-item { list-style: none; margin-left: -18px; padding-left: 0; }
-.md-doc li.task-list-item input[type="checkbox"] { pointer-events: none; accent-color: var(--accent); margin-right: 6px; }
+/* pointer-events starts as none (JS bridge enables it after attaching click
+   handlers — see overview.rs Phase 43e eval bridge). */
+.md-doc li.task-list-item input[type="checkbox"] { pointer-events: none; accent-color: var(--accent); margin-right: 6px; cursor: pointer; }
 .md-doc code { font: 12px/1.5 ui-monospace, monospace; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 5px; }
 .md-doc pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; overflow-x: auto; margin: 0 0 12px; }
 .md-doc pre code { background: none; border: none; padding: 0; }
