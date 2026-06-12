@@ -29,4 +29,13 @@ device's native rate since Phase 25d; models derive 16 kHz on the fly) are
 wall-clock aligned (silence-padded at that rate), so a segment's `t_start_ms`
 maps 1:1 to sample offset (`ms × rate/1000`) — per-line replay and
 re-transcription stay exact at any rate.
+
+**Timeline subsystem (Phase 42, done):** `crates/zord-gui/src/timeline.rs` —
+collapsible bottom panel; `TimelineLane { peaks, speech, … }` computed by
+`zord_audio::compute_track_peaks` (streaming, 1500-bucket peaks + per-bucket
+RMS speech flags); `MixReader` streams N-track 48 kHz mix for scrub/play;
+diagnostics: `untranscribed_buckets` + `clipping_buckets` pure fns;
+speed (`PlayCmd::TimelineSpeed`), silence-skip (GUI-driven `use_effect`),
+range selection with export-clip + re-transcribe (`DbCmd::ExportClip` /
+`DbCmd::RetranscribeRange`); `store.delete_segments_in_range` for range rewrite.
 Related: [[capture-design]], [[dx-bundling-gotchas]].

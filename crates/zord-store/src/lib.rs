@@ -524,6 +524,28 @@ impl Store {
         Ok(())
     }
 
+    /// Delete segments whose `t_start_ms` falls within `[start_ms, end_ms)` for
+    /// a session (Phase 42d range re-transcription). Only segments that *start*
+    /// inside the window are deleted — any segment that straddles the boundary
+    /// is left intact on the safe side. FTS stays consistent because the DELETE
+    /// trigger on `segments` keeps `segments_fts` in sync.
+    ///
+    /// This is a focused "honest" delete: it removes what the new transcription
+    /// will replace (segments originating in the range) without touching
+    /// anything outside. Returns the number of rows deleted.
+    pub fn delete_segments_in_range(
+        &self,
+        session_id: &str,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM segments WHERE session_id = ?1 AND t_start_ms >= ?2 AND t_start_ms < ?3",
+            params![session_id, i64v(start_ms), i64v(end_ms)],
+        )?;
+        Ok(n)
+    }
+
     /// Rename a session.
     pub fn set_session_title(&self, id: &str, title: &str) -> Result<()> {
         self.conn.execute(
@@ -2024,6 +2046,90 @@ mod voiceprint_tests {
         let infos = s.voiceprints().unwrap();
         assert_eq!(infos[0].samples, 1, "model switch should clear old samples");
         assert_eq!(infos[0].model, "model_b");
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod range_delete_tests {
+    use super::*;
+    use zord_core::{Segment, Source};
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zord-rd-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    fn mk_seg(t0: u64, t1: u64) -> Segment {
+        Segment {
+            id: None,
+            source: Source::Me,
+            t_start_ms: t0,
+            t_end_ms: t1,
+            text: "test".into(),
+            words: vec![],
+            speaker: None,
+        }
+    }
+
+    /// Segments that start inside [start_ms, end_ms) are deleted;
+    /// those that start before or at end_ms are kept.
+    #[test]
+    fn delete_segments_in_range_basic() {
+        let db = tmp_db("basic");
+        let s = Store::open(&db).unwrap();
+        s.create_session(&Session {
+            id: "s1".into(),
+            started_at: 0,
+            ended_at: None,
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+            overview_folded_ms: None,
+        })
+        .unwrap();
+
+        // Insert 5 segments.
+        s.insert_segment("s1", &mk_seg(0, 5_000)).unwrap(); // before → kept
+        s.insert_segment("s1", &mk_seg(5_000, 8_000)).unwrap(); // at start → deleted
+        s.insert_segment("s1", &mk_seg(7_000, 9_000)).unwrap(); // inside → deleted
+        s.insert_segment("s1", &mk_seg(10_000, 12_000)).unwrap(); // at end → kept
+        s.insert_segment("s1", &mk_seg(11_000, 14_000)).unwrap(); // after → kept
+
+        let deleted = s.delete_segments_in_range("s1", 5_000, 10_000).unwrap();
+        assert_eq!(deleted, 2, "expected 2 segments deleted, got {deleted}");
+
+        let remaining = s.segments("s1").unwrap();
+        assert_eq!(remaining.len(), 3, "expected 3 segments remaining");
+        // Verify the times: 0, 10_000, 11_000 should survive.
+        assert!(remaining.iter().any(|s| s.t_start_ms == 0));
+        assert!(remaining.iter().any(|s| s.t_start_ms == 10_000));
+        assert!(remaining.iter().any(|s| s.t_start_ms == 11_000));
+
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// Empty range (start == end) deletes nothing.
+    #[test]
+    fn delete_segments_empty_range() {
+        let db = tmp_db("empty");
+        let s = Store::open(&db).unwrap();
+        s.create_session(&Session {
+            id: "s2".into(),
+            started_at: 0,
+            ended_at: None,
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+            overview_folded_ms: None,
+        })
+        .unwrap();
+        s.insert_segment("s2", &mk_seg(5_000, 8_000)).unwrap();
+        let deleted = s.delete_segments_in_range("s2", 5_000, 5_000).unwrap();
+        assert_eq!(deleted, 0);
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

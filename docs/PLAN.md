@@ -1724,51 +1724,53 @@ backends (`WhisperBackend` via `WhisperInnerContext`; `ParakeetBackend` via
 crates, so no additional unsafe code was needed. Settings UI in
 Transcription → "Parallel transcription workers" select (1–4).
 
-### Phase 42 — Session timeline: multi-track audio reconstructor (planned)
-A collapsible **timeline panel at the bottom of the session view** (toggled
-from the toolbar — not a standing panel) that puts a session's audio back
-together and makes it scrubbable. Born as a debugging tool: "sometimes the
-transcriptions aren't pulling the audio through correctly — clipping or
-missing vocals" — replaying the real tracks against the transcript answers
-whether the audio or the transcription dropped the words.
-- **One lane per track** (`me`, `others`, Discord `spk-N`), each with a
-  checkbox to include/exclude it from playback and labeled with the
-  speaker's name (speaker_names / me_speaker tag) in their lane color
-  (theme `--me`/`--others` + the spk palette).
-- **Amplitude graph per lane** under the scrubber: peak/RMS buckets
-  (~1–2k per session) computed by a streaming engine worker through the
-  existing wav/opus readers (hour-long files never slurped whole), cached
-  per session. For Discord sessions each lane is naturally one person, so
-  activity reads smoothly per speaker; for mic/desktop sessions the
-  **Others lane is colored by diarized speaker spans** (segment
-  t_start/t_end + speaker index) — the graph shows *who* is talking, not
-  just that the channel had energy.
-- **Scrub + play from anywhere**: click/drag a playhead; playback mixes
-  the enabled lanes from that offset (extends the per-line rodio replay
-  into a small N-track mixer using `read_audio_slice_ms`-style streaming);
-  pause/resume; the playhead tracks during playback.
-- **Transcript sync**: the transcript auto-scrolls/highlights the line
-  under the playhead (reuse the scroll-to-segment mechanism), and a
-  per-line "jump to timeline" affordance seeks the playhead to that line —
-  the round-trip that makes clip-vs-transcription triage one click.
-- **Merged/overlay mode** (toggle, beside stacked lanes): one combined
-  lane with all speakers' waveforms alpha-blended in their colors —
-  conversation shape at a glance, and **talk-over regions** (2+ speakers
-  simultaneously) become visually obvious, which is exactly where
-  transcription tends to drop words.
-- **Diagnostics (core — the reason this phase exists):**
-  - *Untranscribed-speech markers*: regions with speech energy (VAD) but
-    no transcript segment covering them get flagged on the lane — every
-    dropped word becomes visible without listening.
-  - *Clipping indicators*: buckets pinned near full-scale marked red.
-  - *Re-transcribe selection*: drag-select a range → re-run transcription
-    for just that window (slice readers + segment offsets already exist).
-- **Likely included:** silence-skip playback (jump gaps > ~2 s) + 1.5×/2×
-  speed (rodio `set_speed`); drag-select → export the slice as a clip.
-- **Stretch (DAW flavor):** per-lane solo, per-lane gain in the mix,
-  loop-a-selection.
-- Works on aged sessions (`.opus`) and legacy flat layouts via
-  `resolve_track`; lanes with no surviving audio render disabled.
+### Phase 42 — Session timeline: multi-track audio reconstructor ✅ DONE (June 2026)
+Shipped a collapsible **timeline panel at the bottom of the session view**
+(toggled from the toolbar) that reconstructs a session's audio and makes it
+scrubbable — the diagnostic tool that lets you see every dropped word without
+listening.
+
+What shipped (Phases 42a–42d):
+- **One lane per track** (`me`, `others`, Discord `spk-N`) with checkboxes,
+  speaker-name labels, and per-lane colors (`--me`/`--others` + spk palette).
+- **Amplitude graph per lane**: 1 500-bucket peaks computed streaming via
+  `zord_audio::compute_track_peaks` (WAV + Opus); results cached per session.
+  Others lane colored by diarized speaker spans (`bucket_speakers`).
+- **Stacked and merged/overlay modes** — talk-over regions visible in merged.
+- **Scrub + play**: click/drag playhead; `MixReader` streams the N-track 48 kHz
+  mix from any offset; pause/resume; transcript auto-highlights under playhead.
+- **Diagnostics**:
+  - *Speech flags*: per-bucket RMS ≥ relative floor (`speech: Vec<bool>` in
+    `TimelineLane`; computed alongside peaks in the same streaming pass).
+  - *Untranscribed-speech markers*: `untranscribed_buckets()` pure fn —
+    speech-active runs of ≥ 2 buckets (~5 s) not covered by a transcript
+    segment draw thin red ticks at the lane top (`tl-gap`). Source-aware:
+    `me` lane checks `Source::Me`, `others` any `Source::Others`, `spk-N`
+    checks the matching speaker index.
+  - *Clipping indicators*: buckets with peak ≥ 0.985 draw a red triangle at
+    the lane bottom (`tl-clip`). Both marker types trigger a header legend line.
+- **Speed**: `PlayCmd::TimelineSpeed(f32)` → `sink.set_speed(speed)`; 1×/1.5×/2×
+  cycle button. Position ticks scale elapsed wall-time by speed; each speed
+  change or pause flushes the accumulator so the scrubber stays accurate.
+  NOTE: rodio `set_speed` affects pitch — accepted for 1.5×/2× preview use.
+- **Silence skip** (GUI-driven): toggle button; `use_effect` on `timeline_pos`
+  calls `silence_skip_target()` and fires `TimelineSeek` when the playhead is
+  in a silent run > 2 s. Loop guard: only fires when the new target is > 500 ms
+  ahead and hasn't been fired yet; clears on playback stop.
+- **Range selection**: Shift-drag on the graph creates a selection (start/end
+  ms signals; translucent overlay rect). Action chip row: **Export clip** /
+  **Re-transcribe** / dismiss.
+  - *Export clip*: `DbCmd::ExportClip` — `MixReader` streams [start, end),
+    writes a 16-bit 48 kHz mono WAV to exports as `<id>-clip-<s>-<e>.wav`.
+  - *Re-transcribe selection*: `DbCmd::RetranscribeRange` — for each track:
+    `read_audio_slice_ms`, resample to 16 kHz, `transcriber.transcribe(&samples,
+    source, start_ms)` (raw slice without extra VAD pre-pass — a few minutes of
+    audio is fine; timestamps are session-absolute via `base_offset_ms`).
+    `store.delete_segments_in_range(session_id, start, end)` deletes segments
+    whose `t_start_ms` ∈ [start, end); new segments inserted, transcript refreshed.
+
+Deferred stretch items: per-lane solo, per-lane gain in the mix, loop-a-selection.
+Live verification pending (headless test environment cannot exercise audio I/O).
 
 ---
 

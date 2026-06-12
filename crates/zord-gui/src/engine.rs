@@ -205,7 +205,7 @@ pub enum Event {
     },
 }
 
-/// One audio track's amplitude profile for the session timeline (Phase 42a).
+/// One audio track's amplitude profile for the session timeline (Phase 42a/42d).
 /// The GUI resolves display names from `speaker_names` / `me_speaker`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineLane {
@@ -219,6 +219,9 @@ pub struct TimelineLane {
     /// Normalized 0..=1 peak per bucket
     /// ([`zord_audio::PEAK_BUCKETS`] buckets covering the full track).
     pub peaks: Vec<f32>,
+    /// Per-bucket speech-activity flag (Phase 42d): bucket RMS ≥ floor,
+    /// mirroring `gather_speech`'s relative-floor logic. Same length as `peaks`.
+    pub speech: Vec<bool>,
 }
 
 /// Which conversation a chat turn belongs to (Phase 23d): a single meeting, or
@@ -433,6 +436,24 @@ pub enum DbCmd {
     /// Call sites wired in Phase 42c (panel UI).
     #[allow(dead_code)]
     LoadTimeline(String),
+    /// Export an audio clip for a time range (Phase 42d): mix the enabled track
+    /// paths from `start_ms` to `end_ms` and write a 16-bit 48 kHz mono WAV to
+    /// the exports directory. Replies with [`Event::Exported`].
+    ExportClip {
+        id: String,
+        paths: Vec<PathBuf>,
+        start_ms: u64,
+        end_ms: u64,
+    },
+    /// Re-transcribe a time range of a session (Phase 42d): for each retained
+    /// track, slice the audio in [start_ms, end_ms), re-run the transcription
+    /// model on the slice, delete existing segments in the range, and insert the
+    /// new ones. Replies with a refreshed [`Event::Transcript`] + a notice.
+    RetranscribeRange {
+        id: String,
+        start_ms: u64,
+        end_ms: u64,
+    },
 }
 
 /// Replay commands for the playback worker. The rodio output stream is `!Send`
@@ -468,6 +489,12 @@ pub enum PlayCmd {
     /// jumps, where the GUI doesn't need to re-derive the lane paths). No-op
     /// with a notice when no timeline playback is loaded.
     TimelineSeek { start_ms: u64 },
+    /// Change playback speed (Phase 42d). Calls `sink.set_speed(speed)`.
+    /// NOTE: rodio 0.22 `set_speed` adjusts pitch as well — this is accepted
+    /// for the 1×/1.5×/2× affordance (resampling without pitch correction is
+    /// out of scope). Position-tick math accumulates elapsed time scaled by the
+    /// speed factor so the scrubber stays accurate across speed changes.
+    TimelineSpeed(f32),
 }
 
 /// Model-management commands (download/delete can take minutes, so they run on
@@ -1976,6 +2003,52 @@ fn db_loop(rx: mpsc::Receiver<DbCmd>, ev: UnboundedSender<Event>, db_path: PathB
                     jobs2.end(&ev2, &jid);
                 });
             }
+
+            DbCmd::ExportClip {
+                id,
+                paths,
+                start_ms,
+                end_ms,
+            } => {
+                // Mixing + writing is I/O heavy — run off the db thread.
+                let ev = ev.clone();
+                let db_path = db_path.clone();
+                let jobs = jobs.clone();
+                thread::spawn(move || {
+                    let jid = format!("exportclip:{id}");
+                    let _token = jobs.begin(&ev, &jid, "export", "Exporting clip");
+                    supervise("export clip", &ev, || {
+                        match export_clip(&db_path, &id, &paths, start_ms, end_ms) {
+                            Ok(path) => {
+                                let _ = ev.send(Event::Exported(path));
+                            }
+                            Err(e) => {
+                                let _ = ev.send(Event::Notice(format!("export clip failed: {e}")));
+                            }
+                        }
+                    });
+                    jobs.end(&ev, &jid);
+                });
+            }
+
+            DbCmd::RetranscribeRange {
+                id,
+                start_ms,
+                end_ms,
+            } => {
+                // Heavy (model load + inference on slice) — own thread + Store.
+                let ev = ev.clone();
+                let db_path = db_path.clone();
+                let jobs = jobs.clone();
+                thread::spawn(move || {
+                    let jid = format!("retranscribe-range:{id}");
+                    let token = jobs.begin(&ev, &jid, "retranscribe", "Re-transcribing selection");
+                    supervise("retranscribe range", &ev, || {
+                        retranscribe_range_ondemand(&db_path, &id, start_ms, end_ms, &ev, &token)
+                    });
+                    jobs.end(&ev, &jid);
+                });
+            }
         }
     }
 }
@@ -2081,7 +2154,7 @@ fn build_timeline(
             return; // aborted between tracks
         }
         match zord_audio::compute_track_peaks(path) {
-            Ok((peaks, duration_ms)) => {
+            Ok((peaks, speech, duration_ms)) => {
                 let speaker = suffix
                     .strip_prefix("spk-")
                     .and_then(|s| s.parse::<i32>().ok());
@@ -2090,6 +2163,7 @@ fn build_timeline(
                     speaker,
                     duration_ms,
                     peaks,
+                    speech,
                 });
             }
             Err(e) => {
@@ -2117,7 +2191,7 @@ fn build_timeline(
     });
 }
 
-/// State for an active timeline playback session (Phase 42b).
+/// State for an active timeline playback session (Phase 42b/42d).
 struct TimelineState {
     reader: zord_audio::MixReader,
     /// The tracks feeding the reader — kept so [`PlayCmd::TimelineSeek`] can
@@ -2127,7 +2201,9 @@ struct TimelineState {
     start_ms: u64,
     /// Wall-clock instant when playback started / was last resumed.
     resumed_at: std::time::Instant,
-    /// Accumulated played-time before the current resume (for pause support).
+    /// Accumulated played-time (in ms, already speed-scaled) before the current
+    /// resume. Updated on pause and on speed changes so position arithmetic is
+    /// consistent across transitions.
     elapsed_before_resume: u64,
     paused: bool,
     /// Wall-clock instant of the last position-tick event.
@@ -2135,17 +2211,32 @@ struct TimelineState {
     /// The `MixReader` returned `None` — every track is fully read; we're only
     /// waiting for the sink to drain. Don't re-poll the reader.
     exhausted: bool,
+    /// Current playback speed multiplier (default 1.0). Position ticks multiply
+    /// wall-clock elapsed time by this so the scrubber advances at the right
+    /// rate.
+    speed: f32,
 }
 
 impl TimelineState {
-    /// Current playhead position in ms.
+    /// Current playhead position in ms (speed-scaled wall-clock).
     fn position_ms(&self) -> u64 {
         if self.paused {
             self.start_ms + self.elapsed_before_resume
         } else {
             self.start_ms
                 + self.elapsed_before_resume
-                + self.resumed_at.elapsed().as_millis() as u64
+                + (self.resumed_at.elapsed().as_millis() as f64 * self.speed as f64) as u64
+        }
+    }
+
+    /// Snapshot elapsed time into `elapsed_before_resume` so a subsequent
+    /// speed change or resume uses a fresh baseline. Call before mutating
+    /// `speed` or flipping `paused` to true.
+    fn flush_elapsed(&mut self) {
+        if !self.paused {
+            self.elapsed_before_resume +=
+                (self.resumed_at.elapsed().as_millis() as f64 * self.speed as f64) as u64;
+            self.resumed_at = std::time::Instant::now();
         }
     }
 }
@@ -2293,7 +2384,12 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                     }
                     Ok(reader) => {
                         let now = std::time::Instant::now();
+                        // Preserve current speed across seeks/restarts.
+                        let speed = tl.as_ref().map(|s| s.speed).unwrap_or(1.0);
                         let player = rodio::Player::connect_new(device.mixer());
+                        if (speed - 1.0).abs() > 1e-3 {
+                            player.set_speed(speed);
+                        }
                         sink = Some(player);
                         tl = Some(TimelineState {
                             reader,
@@ -2304,6 +2400,7 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
                             paused: false,
                             last_tick: now,
                             exhausted: false,
+                            speed,
                         });
                         let _ = ev.send(Event::TimelinePos { ms: Some(start_ms) });
                     }
@@ -2313,8 +2410,7 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
             Some(PlayCmd::TimelinePause) => {
                 if let Some(ref mut state) = tl {
                     if !state.paused {
-                        state.elapsed_before_resume +=
-                            state.resumed_at.elapsed().as_millis() as u64;
+                        state.flush_elapsed();
                         state.paused = true;
                         if let Some(ref s) = sink {
                             s.pause();
@@ -2337,6 +2433,19 @@ fn play_loop(rx: mpsc::Receiver<PlayCmd>, ev: UnboundedSender<Event>) {
 
             // Translated into TimelinePlay (or consumed with a notice) above.
             Some(PlayCmd::TimelineSeek { .. }) => unreachable!("TimelineSeek translated above"),
+
+            Some(PlayCmd::TimelineSpeed(speed)) => {
+                let speed = speed.clamp(0.1, 4.0);
+                if let Some(ref mut state) = tl {
+                    // Flush elapsed before speed change so position stays accurate.
+                    state.flush_elapsed();
+                    state.speed = speed;
+                    if let Some(ref s) = sink {
+                        s.set_speed(speed);
+                    }
+                }
+                // When not playing, just remember the speed for next play.
+            }
 
             // Poll tick — feed the sink and check for completion.
             None => {
@@ -2861,6 +2970,211 @@ fn export_merged_audio(db_path: &PathBuf, id: &str) -> anyhow::Result<String> {
     let out = exports_dir()?.join(format!("{id}.merged.wav"));
     zord_audio::mix_tracks(&paths, &out)?;
     Ok(out.display().to_string())
+}
+
+/// Export a time-ranged audio clip (Phase 42d): read and mix `paths` from
+/// `start_ms` to `end_ms`, writing a 16-bit 48 kHz mono WAV to the exports
+/// directory as `<id>-clip-<start_ms>-<end_ms>.wav`. Streaming via
+/// `MixReader` — never loads whole files.
+fn export_clip(
+    _db_path: &Path,
+    id: &str,
+    paths: &[PathBuf],
+    start_ms: u64,
+    end_ms: u64,
+) -> anyhow::Result<String> {
+    use zord_audio::MixReader;
+
+    anyhow::ensure!(!paths.is_empty(), "no audio tracks for clip export");
+    anyhow::ensure!(end_ms > start_ms, "clip end must be after start");
+
+    let out_path = exports_dir()?.join(format!("{id}-clip-{start_ms}-{end_ms}.wav"));
+    let mut writer = zord_audio::WavWriter::create(&out_path, MixReader::OUT_RATE)?;
+
+    let mut reader = MixReader::open(paths, start_ms)?;
+    let want_samples = (end_ms - start_ms) * MixReader::OUT_RATE as u64 / 1000;
+    let mut collected: u64 = 0;
+    while collected < want_samples {
+        let Some(block) = reader.next_block()? else {
+            break;
+        };
+        let remaining = (want_samples - collected) as usize;
+        let chunk = if block.len() <= remaining {
+            &block[..]
+        } else {
+            &block[..remaining]
+        };
+        writer.write(chunk)?;
+        collected += chunk.len() as u64;
+    }
+    writer.finalize()?;
+    Ok(out_path.display().to_string())
+}
+
+/// Re-transcribe a time range of a session (Phase 42d): for each retained
+/// track, slice the audio in [start_ms, end_ms), resample to 16 kHz, run the
+/// configured re-transcription model with `base_offset_ms = start_ms` so
+/// output timestamps are session-absolute, then delete segments in the range
+/// and insert the new ones.
+///
+/// VAD note: the transcriber's samples-level API (`transcriber.transcribe`)
+/// takes raw 16 kHz samples directly. A short slice (≤ a few minutes) is
+/// fine to transcribe without a VAD pre-pass — the transcriber's internal
+/// chunking handles it, matching the live-capture path.
+fn retranscribe_range_ondemand(
+    db_path: &Path,
+    session_id: &str,
+    start_ms: u64,
+    end_ms: u64,
+    ev: &UnboundedSender<Event>,
+    token: &Arc<AtomicBool>,
+) {
+    let store = match Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("db: {e}")));
+            return;
+        }
+    };
+    let prefix = store
+        .get_session(session_id)
+        .ok()
+        .flatten()
+        .and_then(|s| s.audio_path);
+    let Some(prefix) = prefix else {
+        let _ = ev.send(Event::Notice(
+            "This session has no kept audio to re-transcribe.".to_string(),
+        ));
+        return;
+    };
+
+    // Resolve model (same selection logic as post_transcribe_inner).
+    let settings = zord_config::Settings::load();
+    let model = ModelId::parse(&settings.retranscribe_model).unwrap_or(ModelId::LargeV3TurboQ5);
+    let _ = ev.send(Event::Notice(format!(
+        "Re-transcribing selection with {}…",
+        model.name()
+    )));
+    let model_path = {
+        let ev2 = ev.clone();
+        match ensure_model(model, &mut |done, total| {
+            if let Some(total) = total.filter(|t| *t > 0) {
+                let _ = ev2.send(Event::ModelProgress {
+                    name: model.name().to_string(),
+                    pct: (done * 100 / total) as u8,
+                });
+            }
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("transcription model: {e}")));
+                return;
+            }
+        }
+    };
+    let transcriber = match Transcriber::load(model, &model_path) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = ev.send(Event::Notice(format!("transcriber: {e}")));
+            return;
+        }
+    };
+
+    // Discover tracks (same as post_transcribe_inner).
+    let tracks = discover_session_tracks(&prefix);
+    if tracks.is_empty() {
+        let _ = ev.send(Event::Notice("No audio tracks found.".to_string()));
+        return;
+    }
+
+    let mut new_segments: Vec<(Source, Option<i32>, Segment)> = Vec::new();
+    for (suffix, path) in &tracks {
+        if cancelled(token) {
+            break;
+        }
+        let source = if suffix == "me" {
+            Source::Me
+        } else {
+            Source::Others
+        };
+        let speaker = suffix
+            .strip_prefix("spk-")
+            .and_then(|s| s.parse::<i32>().ok());
+
+        // Slice the audio at the native rate, then resample to 16 kHz for the
+        // transcriber. `read_audio_slice_ms` returns (samples_native, rate).
+        let (native_samples, native_rate) =
+            match zord_audio::read_audio_slice_ms(path, start_ms, end_ms) {
+                Ok(p) if !p.0.is_empty() => p,
+                Ok(_) => continue, // track silent or too short in this range
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!("reading {suffix}: {e}")));
+                    continue;
+                }
+            };
+
+        // Resample to 16 kHz mono if needed (the transcriber always wants 16k).
+        let samples_16k = if native_rate == 16_000 {
+            native_samples
+        } else {
+            match zord_audio::MonoResampler::new(native_rate, 1)
+                .and_then(|mut r| r.process(&native_samples))
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = ev.send(Event::Notice(format!("resample {suffix}: {e}")));
+                    continue;
+                }
+            }
+        };
+
+        // Transcribe the raw 16 kHz slice; `base_offset_ms = start_ms` stamps
+        // absolute session timestamps on output segments.
+        match transcriber.transcribe(&samples_16k, source, start_ms) {
+            Ok(segs) => {
+                for mut seg in segs {
+                    if speaker.is_some() {
+                        seg.speaker = speaker;
+                    }
+                    new_segments.push((source, speaker, seg));
+                }
+            }
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("transcribing {suffix}: {e}")));
+            }
+        }
+
+        if cancelled(token) {
+            break;
+        }
+    }
+
+    if cancelled(token) {
+        let _ = ev.send(Event::Notice("Re-transcription cancelled.".to_string()));
+        return;
+    }
+
+    // Delete existing segments in [start_ms, end_ms) and insert the new ones.
+    let deleted = store
+        .delete_segments_in_range(session_id, start_ms, end_ms)
+        .unwrap_or(0);
+    let mut inserted = 0usize;
+    for (_source, _speaker, seg) in &new_segments {
+        if store.insert_segment(session_id, seg).is_ok() {
+            inserted += 1;
+        }
+    }
+
+    // Emit refreshed transcript + notice.
+    if let Ok(v) = store.segments(session_id) {
+        let _ = ev.send(Event::Transcript {
+            id: session_id.to_string(),
+            segments: v,
+        });
+    }
+    let _ = ev.send(Event::Notice(format!(
+        "Selection re-transcribed: removed {deleted} segment(s), added {inserted}."
+    )));
 }
 
 /// Turn free-text into a safe FTS5 MATCH expression: each whitespace token

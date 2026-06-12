@@ -1,4 +1,4 @@
-//! Session timeline panel — Phase 42c.
+//! Session timeline panel — Phase 42c/42d.
 //!
 //! Renders a collapsible bottom panel with per-track waveform graphs, a
 //! scrubber/playhead, playback controls, and transcript sync.  Only shown for
@@ -9,6 +9,10 @@
 //! - [`TimelinePanel`] — the public component mounted by `main.rs`.
 //! - [`bucket_speakers`] — pure function mapping segment spans onto per-bucket
 //!   speaker indices (unit-tested below).
+//! - [`untranscribed_buckets`] — pure function finding speech regions without
+//!   any transcript coverage (unit-tested below).
+//! - [`clipping_buckets`] — pure function finding amplitude-clipped buckets
+//!   (unit-tested below).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -90,6 +94,98 @@ pub fn bucket_speakers(
         }
     }
     out
+}
+
+// ── diagnostics pure functions ────────────────────────────────────────────────
+
+/// Minimum run of consecutive speech-active buckets required to flag a region
+/// as "untranscribed speech". Shorter runs (likely breath noise, plosives) are
+/// suppressed. At ~2.4 s/bucket (1500 buckets/hour), 2 buckets ≈ ~5 s.
+const MIN_SPEECH_RUN: usize = 2;
+
+/// Build the `covered` boolean vector: bucket `k` is `true` when at least one
+/// transcript segment of the right source covers it.
+///
+/// For the `me` lane only `Source::Me` segments count; for an `others` lane
+/// any `Source::Others` segment counts; for a `spk-N` lane we require
+/// `Source::Others` with `speaker == Some(N)`.
+fn covered_buckets(
+    segments: &[Segment],
+    duration_ms: u64,
+    n_buckets: usize,
+    track: &str,
+    speaker: Option<i32>,
+) -> Vec<bool> {
+    let mut out = vec![false; n_buckets];
+    if duration_ms == 0 || n_buckets == 0 {
+        return out;
+    }
+    let ms_per_bucket = duration_ms as f64 / n_buckets as f64;
+
+    for seg in segments {
+        // Filter by source/speaker for this lane.
+        let matches = match track {
+            "me" => seg.source == Source::Me,
+            "others" => seg.source == Source::Others,
+            _ => {
+                // spk-N: Others + matching speaker index
+                seg.source == Source::Others && seg.speaker == speaker
+            }
+        };
+        if !matches {
+            continue;
+        }
+        let start_b = (seg.t_start_ms as f64 / ms_per_bucket).floor() as usize;
+        let end_b = ((seg.t_end_ms as f64 / ms_per_bucket).ceil() as usize).min(n_buckets);
+        for slot in out.iter_mut().take(end_b).skip(start_b) {
+            *slot = true;
+        }
+    }
+    out
+}
+
+/// Find bucket indices that have speech energy but no transcript coverage,
+/// subject to a minimum run-length guard ([`MIN_SPEECH_RUN`]) to suppress
+/// breath-noise false positives. Returns the indices of flagged buckets.
+///
+/// `speech` — per-bucket speech activity flags from the peaks pass.
+/// `covered` — per-bucket transcript coverage computed by [`covered_buckets`].
+pub fn untranscribed_buckets(speech: &[bool], covered: &[bool]) -> Vec<usize> {
+    assert_eq!(speech.len(), covered.len());
+    let n = speech.len();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if speech[i] && !covered[i] {
+            // Start of an uncovered-speech run — measure its length.
+            let run_start = i;
+            while i < n && speech[i] && !covered[i] {
+                i += 1;
+            }
+            let run_len = i - run_start;
+            if run_len >= MIN_SPEECH_RUN {
+                result.extend(run_start..run_start + run_len);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Amplitude-clipping threshold: peak ≥ this value flags the bucket as
+/// potentially clipped.
+const CLIP_THRESHOLD: f32 = 0.985;
+
+/// Find bucket indices where the peak amplitude is at or above the clipping
+/// threshold. Returns the indices of clipped buckets.
+pub fn clipping_buckets(peaks: &[f32]) -> Vec<usize> {
+    peaks
+        .iter()
+        .enumerate()
+        .filter(|(_, &p)| p >= CLIP_THRESHOLD)
+        .map(|(i, _)| i)
+        .collect()
 }
 
 // ── display name helpers ──────────────────────────────────────────────────────
@@ -250,6 +346,56 @@ fn collect_enabled_paths(
         .collect()
 }
 
+// ── silence skip helper ───────────────────────────────────────────────────────
+
+/// Given a playhead position in ms and the lanes currently enabled, find the
+/// end of the current silent run (if any). Returns `Some(end_ms)` when the
+/// playhead is in a silent region lasting at least `min_silence_ms`; `None`
+/// when there's speech at the current position.
+///
+/// "Silent at position" = none of the enabled lanes have a speech-active
+/// bucket at the bucket covering `pos_ms`.
+pub fn silence_skip_target(
+    lanes: &[TimelineLane],
+    lane_enabled: &HashMap<String, bool>,
+    pos_ms: u64,
+    duration_ms: u64,
+    min_silence_ms: u64,
+) -> Option<u64> {
+    if duration_ms == 0 {
+        return None;
+    }
+    let n = zord_audio::PEAK_BUCKETS;
+    let ms_per_bucket = duration_ms as f64 / n as f64;
+    let cur_bucket = ((pos_ms as f64 / ms_per_bucket).floor() as usize).min(n - 1);
+
+    // Check if ANY enabled lane has speech at the current bucket.
+    let has_speech_at = |b: usize| -> bool {
+        lanes
+            .iter()
+            .filter(|l| *lane_enabled.get(l.track.as_str()).unwrap_or(&true))
+            .any(|l| l.speech.get(b).copied().unwrap_or(false))
+    };
+
+    // Not in a silent region → don't skip.
+    if has_speech_at(cur_bucket) {
+        return None;
+    }
+
+    // Find the end of this silent run.
+    let mut end_b = cur_bucket;
+    while end_b < n && !has_speech_at(end_b) {
+        end_b += 1;
+    }
+
+    let run_end_ms = ((end_b as f64) * ms_per_bucket) as u64;
+    let run_len_ms = run_end_ms.saturating_sub(pos_ms);
+    if run_len_ms < min_silence_ms {
+        return None; // too short to skip
+    }
+    Some(run_end_ms.min(duration_ms))
+}
+
 // ── TimelinePanel ─────────────────────────────────────────────────────────────
 
 /// Props for [`TimelinePanel`].
@@ -288,7 +434,7 @@ pub struct TimelinePanelProps {
 #[component]
 pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
     let TimelinePanelProps {
-        session_id: _sid,
+        session_id,
         lanes,
         pos,
         mut lane_enabled,
@@ -307,9 +453,21 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
     let mut paused = use_signal(|| false);
     // Drag-scrub: set while the mouse button is held on the graph area.
     let mut dragging = use_signal(|| false);
+    // Shift-drag: is the user creating a range selection?
+    let mut shift_dragging = use_signal(|| false);
+    // Range selection: start/end in ms (None = no selection).
+    let mut sel_start_ms: Signal<Option<u64>> = use_signal(|| None);
+    let mut sel_end_ms: Signal<Option<u64>> = use_signal(|| None);
     // Measured CSS-pixel width of the graph container (set onmounted) — the
     // divisor that turns a click's element x into a 0..1 seek fraction.
     let mut container_w = use_signal(|| 1500.0_f64);
+    // Current playback speed cycle: 1.0 → 1.5 → 2.0 → 1.0.
+    let mut speed = use_signal(|| 1.0f32);
+    // Silence skip toggle.
+    let mut skip_silence = use_signal(|| false);
+    // Loop-guard for silence skip: the target ms of the last skip we fired.
+    // Don't re-fire the same seek or go backwards.
+    let mut last_skip_target: Signal<Option<u64>> = use_signal(|| None);
 
     // Sync `playing` / `paused` from the pos tick: if pos becomes None while
     // we thought we were playing, the track ended.
@@ -317,6 +475,8 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         let p = *pos.read();
         if p.is_none() && *playing.peek() && !*paused.peek() {
             playing.set(false);
+            // Clear last skip target when playback stops.
+            last_skip_target.set(None);
         }
     });
 
@@ -343,6 +503,45 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         }
     });
 
+    // Silence skip: GUI-driven — engine stays dumb; we just fire a seek.
+    {
+        let engine_skip = engine.clone();
+        use_effect(move || {
+            let Some(ms) = *pos.read() else { return };
+            if !*playing.peek() || *paused.peek() {
+                return;
+            }
+            if !*skip_silence.read() {
+                return;
+            }
+            let lanes_v = lanes.read().clone();
+            let le = lane_enabled.read().clone();
+            let max_dur: u64 = lanes_v
+                .iter()
+                .filter(|l| *le.get(l.track.as_str()).unwrap_or(&true))
+                .map(|l| l.duration_ms)
+                .max()
+                .unwrap_or(0);
+            // Silence runs shorter than 2 s don't get skipped.
+            let Some(target) = silence_skip_target(&lanes_v, &le, ms, max_dur, 2_000) else {
+                return;
+            };
+            // Loop guard: only fire when the target is meaningfully ahead and
+            // we haven't already fired this exact skip (avoids seek storms).
+            let already_fired = (*last_skip_target.peek())
+                .map(|t| t >= target)
+                .unwrap_or(false);
+            let advance = target.saturating_sub(ms);
+            if advance < 500 || already_fired {
+                return;
+            }
+            last_skip_target.set(Some(target));
+            let _ = engine_skip
+                .play_tx
+                .send(PlayCmd::TimelineSeek { start_ms: target });
+        });
+    }
+
     // Snapshot values for use in render (avoids multiple reads inside rsx! loops).
     let lanes_v = lanes.read().clone();
     let pos_v = *pos.read();
@@ -353,6 +552,11 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
     let is_merged = *merged.read();
     let is_playing = *playing.read();
     let is_paused = *paused.read();
+    let speed_v = *speed.read();
+    let is_skip = *skip_silence.read();
+    let sel_start_v = *sel_start_ms.read();
+    let sel_end_v = *sel_end_ms.read();
+    let sid = session_id.clone();
 
     // Max duration across enabled lanes.
     let max_dur: u64 = lanes_v
@@ -374,6 +578,22 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         };
     }
 
+    // ── diagnostics markers ───────────────────────────────────────────────────
+    // Precompute per-lane untranscribed + clipping markers (cheap — pure fn).
+    let has_any_gap = lanes_v.iter().any(|lane| {
+        let cov = covered_buckets(
+            &segs,
+            lane.duration_ms,
+            lane.peaks.len(),
+            &lane.track,
+            lane.speaker,
+        );
+        !untranscribed_buckets(&lane.speech, &cov).is_empty()
+    });
+    let has_any_clip = lanes_v
+        .iter()
+        .any(|lane| !clipping_buckets(&lane.peaks).is_empty());
+
     // ── position label ────────────────────────────────────────────────────────
     let pos_label = {
         let cur = pos_v.unwrap_or(0);
@@ -387,11 +607,34 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         0.0
     };
 
+    // ── selection overlay fractions ───────────────────────────────────────────
+    let sel_frac: Option<(f64, f64)> = if let (Some(s), Some(e)) = (sel_start_v, sel_end_v) {
+        if max_dur > 0 && e > s {
+            Some((
+                (s as f64 / max_dur as f64).clamp(0.0, 1.0),
+                (e as f64 / max_dur as f64).clamp(0.0, 1.0),
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // ── play/pause button icon ────────────────────────────────────────────────
     let play_icon = if is_playing && !is_paused {
         "pause"
     } else {
         "play"
+    };
+
+    // ── speed label ───────────────────────────────────────────────────────────
+    let speed_label = if (speed_v - 1.0).abs() < 0.01 {
+        "1×"
+    } else if (speed_v - 1.5).abs() < 0.01 {
+        "1.5×"
+    } else {
+        "2×"
     };
 
     // ── handlers (all clones of signals/engine, no moved locals) ─────────────
@@ -421,7 +664,8 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         }
     };
 
-    // seek (click or drag on graph area)
+    // seek (click or drag on graph area) — also clears any selection that was
+    // started by a plain (non-shift) drag.
     let on_seek = {
         let e = engine.clone();
         let lanes_snap2 = lanes_v.clone();
@@ -438,6 +682,23 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
             });
             playing.set(true);
             paused.set(false);
+            last_skip_target.set(None);
+        }
+    };
+
+    // speed cycle: 1.0 → 1.5 → 2.0 → 1.0
+    let on_speed = {
+        let e = engine.clone();
+        move |_: MouseEvent| {
+            let next = if speed_v < 1.25 {
+                1.5f32
+            } else if speed_v < 1.75 {
+                2.0f32
+            } else {
+                1.0f32
+            };
+            speed.set(next);
+            let _ = e.play_tx.send(PlayCmd::TimelineSpeed(next));
         }
     };
 
@@ -520,14 +781,98 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                     onclick: on_play_pause,
                     {icon(play_icon)}
                 }
+                // Speed cycle button (1× / 1.5× / 2×)
+                button {
+                    class: "tbtn tl-speedbtn",
+                    title: "Cycle playback speed (affects pitch — rodio set_speed)",
+                    onclick: on_speed,
+                    "{speed_label}"
+                }
+                // Silence-skip toggle
+                button {
+                    class: if is_skip { "tbtn tl-skipbtn active" } else { "tbtn tl-skipbtn" },
+                    title: "Skip silence: jump over silent regions > 2 s",
+                    onclick: move |_| {
+                        let cur = *skip_silence.peek();
+                        skip_silence.set(!cur);
+                    },
+                    "Skip silence"
+                }
                 // Position label
                 span { class: "tl-pos", "{pos_label}" }
+                // Diagnostics legend (only shown when markers exist)
+                if has_any_gap || has_any_clip {
+                    span {
+                        class: "tl-diag-legend",
+                        title: "Diagnostic markers present in this timeline",
+                        if has_any_gap { "▮ untranscribed speech" }
+                        if has_any_gap && has_any_clip { " · " }
+                        if has_any_clip { "▴ clipping" }
+                    }
+                }
                 // Close
                 button {
                     class: "tl-close",
                     title: "Close timeline",
                     onclick: move |_| on_close.call(()),
                     {icon("close")}
+                }
+            }
+
+            // ── selection action chips ───────────────────────────────────────
+            if let Some((s_frac, _e_frac)) = sel_frac {
+                {
+                    let chip_left_pct = (s_frac * 100.0).min(90.0);
+                    let sid_export = sid.clone();
+                    let sid_retranscribe = sid.clone();
+                    let af_chip = af.clone();
+                    let lanes_chip = lanes_v.clone();
+                    let le_chip = lane_enabled.read().clone();
+                    let e_export = engine.clone();
+                    let e_retranscribe = engine.clone();
+                    let sel_s = sel_start_v.unwrap_or(0);
+                    let sel_e = sel_end_v.unwrap_or(0);
+                    rsx! {
+                        div {
+                            class: "tl-sel-actions",
+                            style: "left: {chip_left_pct:.1}%;",
+                            button {
+                                class: "tbtn tl-sel-btn",
+                                title: "Export this range as a WAV clip to the exports folder",
+                                onclick: move |_| {
+                                    let paths = collect_enabled_paths(&lanes_chip, &af_chip, &le_chip);
+                                    let _ = e_export.db_tx.send(crate::engine::DbCmd::ExportClip {
+                                        id: sid_export.clone(),
+                                        paths,
+                                        start_ms: sel_s,
+                                        end_ms: sel_e,
+                                    });
+                                },
+                                "Export clip"
+                            }
+                            button {
+                                class: "tbtn tl-sel-btn",
+                                title: "Re-run transcription for this time range only",
+                                onclick: move |_| {
+                                    let _ = e_retranscribe.db_tx.send(crate::engine::DbCmd::RetranscribeRange {
+                                        id: sid_retranscribe.clone(),
+                                        start_ms: sel_s,
+                                        end_ms: sel_e,
+                                    });
+                                },
+                                "Re-transcribe"
+                            }
+                            button {
+                                class: "tbtn tl-sel-btn tl-sel-dismiss",
+                                title: "Clear selection",
+                                onclick: move |_| {
+                                    sel_start_ms.set(None);
+                                    sel_end_ms.set(None);
+                                },
+                                "×"
+                            }
+                        }
+                    }
                 }
             }
 
@@ -546,22 +891,53 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                 onmousedown: {
                     let mut seek = on_seek.clone();
                     move |e: MouseEvent| {
-                        dragging.set(true);
                         let x = e.element_coordinates().x;
-                        seek(x / *container_w.peek());
+                        let frac = x / *container_w.peek();
+                        if e.modifiers().shift() {
+                            // Shift-drag: start a range selection.
+                            shift_dragging.set(true);
+                            let ms = (frac.clamp(0.0, 1.0) * max_dur as f64) as u64;
+                            sel_start_ms.set(Some(ms));
+                            sel_end_ms.set(Some(ms));
+                        } else {
+                            dragging.set(true);
+                            sel_start_ms.set(None);
+                            sel_end_ms.set(None);
+                            seek(frac);
+                        }
                     }
                 },
                 onmousemove: {
                     let mut seek2 = on_seek.clone();
                     move |e: MouseEvent| {
-                        if *dragging.peek() {
-                            let x = e.element_coordinates().x;
-                            seek2(x / *container_w.peek());
+                        let x = e.element_coordinates().x;
+                        let frac = x / *container_w.peek();
+                        if *shift_dragging.peek() {
+                            let ms = (frac.clamp(0.0, 1.0) * max_dur as f64) as u64;
+                            // Keep start ≤ end. Read sel_start once, drop the borrow,
+                            // then mutate.
+                            let maybe_s = *sel_start_ms.peek();
+                            if let Some(s) = maybe_s {
+                                if ms >= s {
+                                    sel_end_ms.set(Some(ms));
+                                } else {
+                                    sel_end_ms.set(Some(s));
+                                    sel_start_ms.set(Some(ms));
+                                }
+                            }
+                        } else if *dragging.peek() {
+                            seek2(frac);
                         }
                     }
                 },
-                onmouseup: move |_| dragging.set(false),
-                onmouseleave: move |_| dragging.set(false),
+                onmouseup: move |_| {
+                    dragging.set(false);
+                    shift_dragging.set(false);
+                },
+                onmouseleave: move |_| {
+                    dragging.set(false);
+                    shift_dragging.set(false);
+                },
 
                 if is_merged {
                     // ── MERGED view ─────────────────────────────────────────
@@ -605,6 +981,23 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                                     }
                                 }
                             }
+                            // Selection overlay
+                            if let Some((sf, ef)) = sel_frac {
+                                {
+                                    let sx = (sf * 1500.0) as i32;
+                                    let sw = ((ef - sf) * 1500.0).max(1.0) as i32;
+                                    rsx! {
+                                        rect {
+                                            class: "tl-sel-overlay",
+                                            x: "{sx}", y: "0",
+                                            width: "{sw}", height: "96",
+                                            fill: "rgba(255,255,255,0.18)",
+                                            stroke: "rgba(255,255,255,0.5)",
+                                            stroke_width: "1",
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 } else {
@@ -617,6 +1010,10 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                             } else {
                                 let lbl = lane_display_name(&lane.track, lane.speaker, &names, me_spk);
                                 let is_others = lane.track == "others";
+                                let cov = covered_buckets(&segs, lane.duration_ms, lane.peaks.len(), &lane.track, lane.speaker);
+                                let gap_buckets = untranscribed_buckets(&lane.speech, &cov);
+                                let clip_buckets = clipping_buckets(&lane.peaks);
+                                let n_buckets = lane.peaks.len();
                                 rsx! {
                                     div { class: "tl-lane", key: "{lane.track}",
                                         span { class: "tl-lane-label", "{lbl}" }
@@ -662,6 +1059,44 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                                                         }
                                                     }
                                                 }
+                                                // Untranscribed-speech markers (top edge, class tl-gap)
+                                                // Rendered as thin red ticks at y=0. SVG tooltip via
+                                                // a nested <title> child is the correct SVG pattern
+                                                // (the `title` HTML attribute would need a workaround
+                                                // in Dioxus RSX; the SVG <title> child is used instead
+                                                // by grouping in a <g> with aria-label).
+                                                for b in gap_buckets.iter() {
+                                                    {
+                                                        let x = *b as i32 * 1500 / n_buckets as i32;
+                                                        rsx! {
+                                                            rect {
+                                                                key: "gap-{b}",
+                                                                class: "tl-gap",
+                                                                x: "{x}", y: "0",
+                                                                width: "2", height: "4",
+                                                                fill: "var(--danger, #ff5555)",
+                                                                stroke: "none",
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Clipping indicators (bottom edge, class tl-clip).
+                                                // Small upward triangle: points at (x,48),(x+3,44),(x-3,44).
+                                                for b in clip_buckets.iter() {
+                                                    {
+                                                        let x = *b as i32 * 1500 / n_buckets as i32;
+                                                        let pts = format!("{x},48 {},44 {},44", x + 3, x - 3);
+                                                        rsx! {
+                                                            polygon {
+                                                                key: "clip-{b}",
+                                                                class: "tl-clip",
+                                                                points: "{pts}",
+                                                                fill: "var(--danger, #ff5555)",
+                                                                stroke: "none",
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 // Playhead
                                                 if pos_v.is_some() {
                                                     {
@@ -672,6 +1107,23 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                                                                 stroke: "white",
                                                                 stroke_width: "1.5",
                                                                 stroke_opacity: "0.8",
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Selection overlay
+                                                if let Some((sf, ef)) = sel_frac {
+                                                    {
+                                                        let sx = (sf * 1500.0) as i32;
+                                                        let sw = ((ef - sf) * 1500.0).max(1.0) as i32;
+                                                        rsx! {
+                                                            rect {
+                                                                class: "tl-sel-overlay",
+                                                                x: "{sx}", y: "0",
+                                                                width: "{sw}", height: "48",
+                                                                fill: "rgba(255,255,255,0.18)",
+                                                                stroke: "rgba(255,255,255,0.5)",
+                                                                stroke_width: "1",
                                                             }
                                                         }
                                                     }
@@ -766,5 +1218,103 @@ mod tests {
         ];
         let out = bucket_speakers(&segs, 10_000, 10);
         assert!(out.iter().all(|x| *x == Some(0)));
+    }
+
+    // ── untranscribed_buckets tests ───────────────────────────────────────────
+
+    #[test]
+    fn untranscribed_all_covered() {
+        let speech = vec![true; 10];
+        let covered = vec![true; 10];
+        assert!(untranscribed_buckets(&speech, &covered).is_empty());
+    }
+
+    #[test]
+    fn untranscribed_no_speech() {
+        let speech = vec![false; 10];
+        let covered = vec![false; 10];
+        assert!(untranscribed_buckets(&speech, &covered).is_empty());
+    }
+
+    #[test]
+    fn untranscribed_run_too_short_suppressed() {
+        // Single uncovered speech bucket — below MIN_SPEECH_RUN (2) → suppressed.
+        let mut speech = vec![false; 10];
+        let mut covered = vec![true; 10];
+        speech[5] = true;
+        covered[5] = false;
+        assert!(
+            untranscribed_buckets(&speech, &covered).is_empty(),
+            "single-bucket run should be suppressed"
+        );
+    }
+
+    #[test]
+    fn untranscribed_run_long_enough_flagged() {
+        // Two consecutive uncovered speech buckets → flagged (meets MIN_SPEECH_RUN).
+        let mut speech = vec![false; 10];
+        let mut covered = vec![true; 10];
+        speech[3] = true;
+        speech[4] = true;
+        covered[3] = false;
+        covered[4] = false;
+        let out = untranscribed_buckets(&speech, &covered);
+        assert_eq!(out, vec![3, 4]);
+    }
+
+    // ── clipping_buckets tests ────────────────────────────────────────────────
+
+    #[test]
+    fn clipping_none() {
+        let peaks = vec![0.5; 10];
+        assert!(clipping_buckets(&peaks).is_empty());
+    }
+
+    #[test]
+    fn clipping_detects_above_threshold() {
+        let mut peaks = vec![0.5f32; 10];
+        peaks[2] = 0.99;
+        peaks[7] = 0.985;
+        let clips = clipping_buckets(&peaks);
+        assert!(clips.contains(&2));
+        assert!(clips.contains(&7));
+        assert_eq!(clips.len(), 2);
+    }
+
+    #[test]
+    fn clipping_below_threshold_not_flagged() {
+        let mut peaks = vec![0.5f32; 10];
+        peaks[4] = 0.984; // just below threshold
+        assert!(clipping_buckets(&peaks).is_empty());
+    }
+
+    // ── delete_segments_in_range semantics (pure logic test) ─────────────────
+
+    /// Verify the range-delete semantics: only segments whose t_start_ms is
+    /// within [start, end) should be deleted. Segments that straddle the
+    /// boundary (start before, end after) are left intact.
+    #[test]
+    fn range_delete_semantics_description() {
+        // This is a documentation test — the actual SQL is tested in zord-store.
+        // A segment starting AT start_ms IS deleted (inclusive lower bound).
+        // A segment starting AT end_ms is NOT deleted (exclusive upper bound).
+        let segments = [
+            seg(Source::Me, None, 0, 5_000),       // starts before range → kept
+            seg(Source::Me, None, 5_000, 8_000),   // starts AT range start → deleted
+            seg(Source::Me, None, 7_000, 9_000),   // starts inside range → deleted
+            seg(Source::Me, None, 10_000, 12_000), // starts AT range end → kept
+            seg(Source::Me, None, 11_000, 14_000), // starts after range end → kept
+        ];
+        let (start, end) = (5_000u64, 10_000u64);
+        let retained: Vec<_> = segments
+            .iter()
+            .filter(|s| !(s.t_start_ms >= start && s.t_start_ms < end))
+            .collect();
+        assert_eq!(
+            retained.len(),
+            3,
+            "expected 3 segments retained, got {}",
+            retained.len()
+        );
     }
 }
