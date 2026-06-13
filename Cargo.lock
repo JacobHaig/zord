@@ -9973,7 +9973,7 @@ dependencies = [
 
 [[package]]
 name = "zord-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -9996,7 +9996,7 @@ dependencies = [
 
 [[package]]
 name = "zord-audio"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "hound",
@@ -10009,7 +10009,7 @@ dependencies = [
 
 [[package]]
 name = "zord-capture"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "cpal 0.18.1",
@@ -10022,7 +10022,7 @@ dependencies = [
 
 [[package]]
 name = "zord-config"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10035,7 +10035,7 @@ dependencies = [
 
 [[package]]
 name = "zord-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -10044,7 +10044,7 @@ dependencies = [
 
 [[package]]
 name = "zord-diarize"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bzip2 0.6.1",
@@ -10058,7 +10058,7 @@ dependencies = [
 
 [[package]]
 name = "zord-export"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -10067,7 +10067,7 @@ dependencies = [
 
 [[package]]
 name = "zord-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -10102,7 +10102,7 @@ dependencies = [
 
 [[package]]
 name = "zord-integrations"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "dashmap 6.2.1",
@@ -10117,7 +10117,7 @@ dependencies = [
 
 [[package]]
 name = "zord-net"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -10128,7 +10128,7 @@ dependencies = [
 
 [[package]]
 name = "zord-overview"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "zord-config",
@@ -10139,7 +10139,7 @@ dependencies = [
 
 [[package]]
 name = "zord-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -10150,7 +10150,7 @@ dependencies = [
 
 [[package]]
 name = "zord-summarize"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -10163,7 +10163,7 @@ dependencies = [
 
 [[package]]
 name = "zord-transcribe"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bzip2 0.6.1",
@@ -10180,7 +10180,7 @@ dependencies = [
 
 [[package]]
 name = "zord-web"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
