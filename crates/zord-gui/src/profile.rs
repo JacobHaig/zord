@@ -47,8 +47,9 @@ pub struct ProfileData {
 /// - A line is considered a task-list item when it matches the pattern
 ///   `^ *- \[ \] ` (an unchecked box; leading spaces allowed).
 /// - Checked boxes (`- [x]` / `- [X]`) are **excluded**.
-/// - The marker prefix is stripped; only the task text is returned.
-/// - The name match is a simple case-insensitive substring check.
+/// - The marker prefix is stripped and the task text is trimmed.
+/// - The name match is case-insensitive and word-boundary anchored, so a
+///   short name like "Al" does not match "Alice"/"Malcolm".
 /// - At most 20 items are returned (document order, first match wins).
 /// - No special handling for fenced code blocks is performed — the caller
 ///   controls what document text is passed in, and keeping the scan simple
@@ -61,9 +62,11 @@ pub fn overview_items_for(doc: &str, name: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in doc.lines() {
         let trimmed = line.trim_start();
-        // Match unchecked task-list markers only.
-        if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-            if rest.to_lowercase().contains(&name_lower) {
+        // Match unchecked task-list markers only. The bullet may be followed
+        // by extra spaces (`- [ ]  text`), so trim the captured task text.
+        if let Some(rest) = trimmed.strip_prefix("- [ ]") {
+            let rest = rest.trim();
+            if contains_word(&rest.to_lowercase(), &name_lower) {
                 out.push(rest.to_string());
                 if out.len() >= 20 {
                     break;
@@ -74,14 +77,43 @@ pub fn overview_items_for(doc: &str, name: &str) -> Vec<String> {
     out
 }
 
+/// Case-insensitive, word-boundary-anchored containment: `needle` must be
+/// flanked by non-alphanumeric chars (or the string ends). Both args should
+/// already be lowercased. Prevents "al" from matching "Alice". Char-aware so
+/// non-ASCII names (e.g. unicode display names) behave correctly.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_alnum = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric());
+        let after_alnum = haystack[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric());
+        if !before_alnum && !after_alnum {
+            return true;
+        }
+        // Advance one char past this occurrence and keep searching.
+        from = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
 /// Built-in English stopword list (~50 common words) used by TF-IDF.
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was",
     "one", "our", "out", "day", "get", "has", "him", "his", "how", "its", "let", "may", "now",
-    "old", "see", "two", "way", "who", "did", "yes", "yet", "use", "via", "was", "per", "due",
-    "set", "get", "got", "isn", "don", "don", "won", "isn", "been", "from", "that", "this", "they",
-    "them", "then", "than", "with", "will", "what", "when", "have", "just", "like", "into", "some",
-    "more", "also", "very", "each",
+    "old", "see", "two", "way", "who", "did", "yes", "yet", "use", "via", "per", "due", "set",
+    "got", "isn", "don", "won", "been", "from", "that", "this", "they", "them", "then", "than",
+    "with", "will", "what", "when", "have", "just", "like", "into", "some", "more", "also", "very",
+    "each",
 ];
 
 /// Tokenize text into lowercase alphanumeric words of length ≥ 3, excluding
@@ -212,6 +244,22 @@ mod tests {
     #[test]
     fn overview_items_empty_doc() {
         assert!(overview_items_for("", "Alice").is_empty());
+    }
+
+    /// Word-boundary anchored: a short name must not match a longer word,
+    /// but a real occurrence (flanked by punctuation/space) must. Also trims
+    /// extra spaces after the marker.
+    #[test]
+    fn overview_items_word_boundary_and_trim() {
+        let doc = "- [ ] Malcolm reviews the PR\n- [ ]  Ask Al, then ship\n";
+        // "Al" is a substring of "Malcolm" but only a real word in line 2.
+        let items = overview_items_for(doc, "Al");
+        assert_eq!(items, vec!["Ask Al, then ship".to_string()]);
+        // Full-name match still works and the double-space is trimmed.
+        assert_eq!(
+            overview_items_for("- [ ]  Malcolm owns infra\n", "malcolm"),
+            vec!["Malcolm owns infra".to_string()]
+        );
     }
 
     /// At most 20 items returned.
