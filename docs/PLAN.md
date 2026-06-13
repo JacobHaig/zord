@@ -1844,6 +1844,66 @@ knowledge-base export, voiceprints at team scale, policy/admin controls,
 store distribution. Design new features with a clean free/premium seam in
 mind (Cargo features + license gating later); no gating implemented yet.
 
+### Phase 46 — Conversation analytics: "Meeting DNA" (planned)
+Real numbers from data only Zord has (per-speaker audio + cross-session
+identity, all local):
+- **Per-session stats**, computed post-transcription into a cached
+  `session_stats` store (job, recomputed on re-transcribe/re-diarize):
+  talk-time share per speaker (diarized spans / integration track speech
+  flags), interruption & talk-over counts (the timeline's overlap data),
+  longest monologue, words-per-minute per speaker, question density
+  (`?`-terminated lines), silence ratio, meeting length vs speech length.
+- **Surfaces:** a "Stats" card for the session (toolbar-toggled panel like
+  the timeline — not standing), each metric with a one-line plain-English
+  read ("You spoke 68% of this meeting"); speaker names/colors from the
+  existing identity surfaces.
+- **Cross-session trends per person** (voiceprint-linked): talk-time and
+  interruption trends over the last N meetings — feeds Phase 48 person
+  profiles. Pure-fn metric computation, unit-tested; no LLM required.
+
+### Phase 47 — Voice bookmarks: "mark that" (planned)
+Say a trigger phrase while recording → a bookmark drops at that moment.
+- **v1 trigger = live-transcript matching** (no new model): while live
+  transcription runs, watch finalized segments for any configured phrase
+  (case/punct-insensitive containment). Honest constraint: requires live
+  transcription on; documented in the settings panel. KWS (sherpa-onnx
+  keyword spotting, works without live transcription) recorded as stretch.
+- **Configurable, MULTIPLE phrases**: Settings → Recording gains a
+  "Bookmark phrases" editor (list add/remove; defaults "mark that",
+  "bookmark this"); stored as `bookmark_phrases: Vec<String>`.
+- **Storage/UI**: `bookmarks (session_id, t_ms, phrase)` table; a marker
+  lane in the timeline panel (click → seek) + a small bookmark list in the
+  session view (click → scroll transcript); a manual "drop bookmark"
+  button while recording for mouse-first moments. The trigger segment
+  itself is bookmarked at its start time (you say it right after the thing
+  worth marking — small configurable back-offset, default ~10 s).
+
+### Phase 48 — Person profiles (planned; premium-tier candidate)
+The Speakers view grows person pages: click a voiceprint → their profile —
+every meeting they appeared in (links), talk-time/interruption trend
+(Phase 46 stats), their open `- [ ]` items scraped from the living
+Overview by owner name, topics they own (nearest-neighbor clusters over
+the Phase 45 chunk embeddings, labeled by the local LLM), last heard.
+Read-only composition of existing data — no new collection.
+
+### Phase 49 — Sentiment "moments" (design pending — user reviewing)
+The continuous energy-arc idea was set aside (hard to track accurately and
+to read clearly). Options on the table for review:
+- **(a) High-confidence moment markers only**: the LLM flags discrete
+  moments (decision reached, tension spike, blocker raised) ONLY at high
+  confidence; rendered as sparse ticks on the timeline + a list. No
+  continuous signal to mistrust.
+- **(b) Mood as words, not graphics**: a one-line "temperature" sentence
+  per summary section ("calm until the deadline discussion; tense after").
+- **(c) Drop sentiment entirely** until a clearly reliable approach exists.
+Pick (a)/(b)/(c) at plan review before any build.
+
+**Declined (June 2026): pre-meeting briefing** — composing context for a
+10-person meeting whose attendees each carry separate meeting histories
+exceeds practical context windows; the digest would lose the thread.
+Revisit only if a per-person retrieval design (Phase 48 + semantic
+retrieval) proves itself first.
+
 ---
 
 ## 10. Open questions to revisit during build
