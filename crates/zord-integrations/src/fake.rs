@@ -203,6 +203,7 @@ mod tests {
         match e {
             IntegrationEvent::ParticipantJoined { .. } => "joined",
             IntegrationEvent::ParticipantRenamed { .. } => "renamed",
+            IntegrationEvent::Notice(_) => "notice",
             IntegrationEvent::Ended { .. } => "ended",
         }
     }

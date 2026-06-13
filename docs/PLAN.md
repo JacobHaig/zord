@@ -1992,7 +1992,7 @@ retrieval) proves itself first.
 - Dioxus releases (0.7.x current): https://github.com/dioxuslabs/dioxus/releases · https://docs.rs/crate/dioxus/latest
 - Whisper large-v3-turbo accuracy/speed: https://huggingface.co/openai/whisper-large-v3-turbo · https://whispernotes.app/blog/introducing-whisper-large-v3-turbo
 
-### Phase 50 — Discord late-joiner capture (planned → building)
+### Phase 50 — Discord late-joiner capture ✅ DONE (live multi-person verification pending)
 **Root cause (5-agent investigation, June 2026):** a participant who joins a
 DAVE-E2EE voice channel AFTER the bot connected is never captured — songbird
 0.6.0 silently fails to add them to the MLS decrypt group (ClientsConnect vs
@@ -2011,3 +2011,40 @@ VoiceReceiver handlers on the new call; the bot's own leave() must NOT be read
 as "followed user left." Debounce (one rejoin per quiet window; floor between
 rejoins). Surface a "someone joined — re-syncing audio…" notice. File an
 upstream songbird issue. Live verification required (multi-person DAVE call).
+
+**Implemented (June 2026):**
+- ✅ `discord.rs`: `voice_state_update` now handles ANY user (not just the
+  followed user). After the unchanged followed-user start/end logic, a join
+  *into our channel* by another user schedules a debounced re-key. The bot's
+  own user id is filtered (its leave/join during a re-key must not loop).
+- ✅ Pure, unit-tested helpers: `is_channel_join(old, new, ours)`
+  (join-into-ours vs. in-channel mute/deafen vs. unrelated/leave; unknown
+  `old` treated as a join) and `may_rejoin(since_last)` (the FLOOR). 7 tests.
+- ✅ **Debounce**: `REJOIN_FLOOR` (8 s) min spacing between re-keys + a
+  `REJOIN_QUIET_WINDOW` (3 s) generation-counter quiet window so a burst of
+  joiners collapses to ONE rejoin after they stop arriving.
+- ✅ **Rejoin**: extracted `join_call(rejoin: bool)` shared by the first join
+  and the re-key. On re-key it `remove_all_global_events()` then re-registers
+  a FRESH `VoiceReceiver` (×3 handlers) on the same Call and re-joins — so the
+  handlers are live post-rejoin and the same `ev_tx` keeps feeding the session.
+  `rejoin()` sends NO `Ended` (a failed re-key keeps the working call intact)
+  and the followed-user-left path is untouched.
+- ✅ **Notice**: new `IntegrationEvent::Notice(String)` + an `on_notice`
+  callback on `drive_session`; the engine maps it to `Event::Notice`. Message:
+  "Someone joined — re-syncing Discord audio…".
+- ✅ `engine.rs` (data-integrity crux): per-idx `track_inputs` registry. First
+  announce of an idx creates a persistent `mpsc::Sender`, spawns the proc
+  reading the receiver, and bridges the provider stream into it via a forwarder
+  thread. A RE-announce of the same idx (post-rejoin) spawns ONLY a forwarder
+  into the existing sender — no second `spawn_proc`, so spk-N.wav is never
+  re-created/truncated. Forwarders tracked + joined at session end.
+- ✅ `spawn_proc` wall-clock padding (`pad_to_wallclock`, keyed to
+  `session_start`, caps at 5 min/buffer) bridges the rejoin gap: when the
+  forwarder resumes, the next buffer is silence-padded to real elapsed time, so
+  spk-N.wav stays time-aligned across the gap. Confirmed by reading the fn.
+- ✅ Gate: fmt + clippy (workspace default + zord-gui all-features +
+  zord-integrations discord all-targets) + all workspace tests green.
+- ⚠️ **Live verification pending**: a real multi-person DAVE call is required
+  to confirm the late joiner actually becomes decryptable after the re-key and
+  that the gap/forwarding behaves on real audio (cannot be exercised in CI).
+  Upstream songbird issue still to be filed.

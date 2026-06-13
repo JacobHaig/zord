@@ -52,6 +52,12 @@ pub enum IntegrationEvent {
     /// (keyed by [`Participant::key`]). Lets identity-by-name catch up after
     /// identity-by-stream has already started (the Phase 27 mapping gap).
     ParticipantRenamed { key: String, name: String },
+    /// A transient, user-facing status message from the provider (the engine
+    /// maps it to `Event::Notice`). Used for things the user should see but that
+    /// aren't a session end — e.g. the Discord late-joiner re-sync (Phase 50)
+    /// surfacing the brief audio gap while the bot leaves and rejoins to re-key
+    /// the DAVE group. Purely informational; does not affect the track layout.
+    Notice(String),
     /// The session ended on the provider's side — the followed user left, the bot
     /// was disconnected, etc. The engine finalizes the recording. `error` marks
     /// ends the user must act on (join refused, bad token, gateway failure) so

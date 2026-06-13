@@ -13,15 +13,15 @@
 //!
 //! Runtime-verified by the user (a live DAVE call); compile-verified in CI.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use dashmap::DashMap;
-use serenity::all::{GatewayIntents, GuildId, UserId, VoiceState};
+use serenity::all::{ChannelId, GatewayIntents, GuildId, UserId, VoiceState};
 use serenity::async_trait;
 use serenity::client::{Client, Context, EventHandler};
 use serenity::http::Http;
@@ -137,14 +137,23 @@ async fn run_client(
         .scheduler(Scheduler::new(SchedulerConfig::default()));
     let intents = GatewayIntents::non_privileged(); // GUILDS + GUILD_VOICE_STATES
 
-    let joined_guild: Arc<std::sync::Mutex<Option<GuildId>>> =
+    // Records the guild+channel the bot joined: the shutdown watchdog reads the
+    // guild to *leave* before killing the gateway, and the Phase 50 late-joiner
+    // logic reads the channel to tell "someone joined OUR channel" from voice
+    // activity elsewhere in the guild.
+    let joined_chan: Arc<std::sync::Mutex<Option<(GuildId, ChannelId)>>> =
         Arc::new(std::sync::Mutex::new(None));
     let bot = Bot {
         follow,
         announce,
         ev_tx: ev_tx.clone(),
         joined: Arc::new(AtomicBool::new(false)),
-        joined_guild: joined_guild.clone(),
+        joined_chan: joined_chan.clone(),
+        // Start "long ago" so the very first late-joiner isn't debounced away.
+        last_rejoin: Arc::new(std::sync::Mutex::new(
+            Instant::now() - Duration::from_secs(3600),
+        )),
+        rejoin_gen: Arc::new(AtomicU64::new(0)),
     };
 
     let mut client = match Client::builder(&token, intents)
@@ -177,7 +186,10 @@ async fn run_client(
         while !shutdown.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        let guild = joined_guild.lock().map(|g| *g).unwrap_or(None);
+        let guild = joined_chan
+            .lock()
+            .map(|g| g.map(|(g, _)| g))
+            .unwrap_or(None);
         if let (Some(voice), Some(guild)) = (voice, guild) {
             let _ = tokio::time::timeout(Duration::from_secs(5), voice.remove(guild)).await;
         }
@@ -206,34 +218,143 @@ struct Bot {
     announce: Option<String>,
     ev_tx: Sender<IntegrationEvent>,
     joined: Arc<AtomicBool>,
-    /// Which guild's voice the bot joined — read by the shutdown watchdog so
-    /// it can *leave* before killing the gateway (a voice state that's never
-    /// left lingers server-side and can time out the NEXT session's join).
-    joined_guild: Arc<std::sync::Mutex<Option<GuildId>>>,
+    /// Which guild+channel the bot joined. The guild is read by the shutdown
+    /// watchdog so it can *leave* before killing the gateway (a voice state
+    /// that's never left lingers server-side and can time out the NEXT
+    /// session's join). The channel is read by the Phase 50 late-joiner logic
+    /// to recognise a join *into our channel* vs. activity elsewhere.
+    joined_chan: Arc<std::sync::Mutex<Option<(GuildId, ChannelId)>>>,
+    /// When the last DAVE re-key (leave+rejoin) finished — the debounce floor
+    /// (Phase 50): a join within `REJOIN_FLOOR` of the last rejoin is ignored
+    /// because that recent rejoin already re-keyed to include everyone present.
+    last_rejoin: Arc<std::sync::Mutex<Instant>>,
+    /// Monotonic counter that collapses a *burst* of joiners into ONE rejoin:
+    /// every qualifying join bumps it and schedules a delayed rejoin tagged
+    /// with the bumped value; the rejoin only fires if the counter is still
+    /// unchanged after the quiet window (i.e. nobody else joined meanwhile).
+    rejoin_gen: Arc<AtomicU64>,
+}
+
+/// Phase 50 debounce tuning. `REJOIN_FLOOR` is the minimum spacing between two
+/// re-keys: a fresh rejoin already includes everyone present, so joiners that
+/// arrive right after one need no further action. `REJOIN_QUIET_WINDOW` is how
+/// long we wait after the *last* joiner in a burst before rejoining once for
+/// all of them (people trickling into a meeting must cost one rejoin, not ten).
+const REJOIN_FLOOR: Duration = Duration::from_secs(8);
+const REJOIN_QUIET_WINDOW: Duration = Duration::from_secs(3);
+
+/// Does this `voice_state_update` represent a user *entering* our channel
+/// (a fresh join or a move-in from elsewhere), as opposed to an in-channel
+/// state change (mute/deafen/video toggle) that also fires `voice_state_update`?
+///
+/// `new_channel` is where the user is now; `old_channel` is where they were
+/// (from serenity's cache, `None` if the cache had no prior state). `our`
+/// is the channel the bot is recording.
+///
+/// Pure (no I/O) so it can be unit-tested — the live event just feeds it.
+fn is_channel_join(
+    old_channel: Option<ChannelId>,
+    new_channel: Option<ChannelId>,
+    our: ChannelId,
+) -> bool {
+    // Must be in OUR channel now…
+    if new_channel != Some(our) {
+        return false;
+    }
+    // …and NOT already have been (else it's a mute/deafen update in-channel).
+    // If the cache gave us no prior state we can't distinguish, so we treat it
+    // as a join — over-triggering here only costs at most one extra (debounced)
+    // rejoin, whereas under-triggering would silently lose a late joiner.
+    old_channel != Some(our)
+}
+
+/// Debounce floor decision (Phase 50): may we start a NEW rejoin now, given how
+/// long ago the previous one finished? Pure for unit-testing.
+fn may_rejoin(since_last_rejoin: Duration) -> bool {
+    since_last_rejoin >= REJOIN_FLOOR
 }
 
 impl Bot {
-    async fn try_join(&self, ctx: &Context, guild: GuildId, channel: serenity::all::ChannelId) {
+    /// First connection to the followed user's channel. Guarded so it runs once;
+    /// re-keys after this go through [`Bot::rejoin`].
+    async fn try_join(&self, ctx: &Context, guild: GuildId, channel: ChannelId) {
         if self.joined.swap(true, Ordering::SeqCst) {
             return;
         }
+        match self.join_call(ctx, guild, channel, false).await {
+            Ok(()) => {
+                if let Ok(mut g) = self.joined_chan.lock() {
+                    *g = Some((guild, channel));
+                }
+                tracing::info!("discord: joined voice + receiving");
+                // Consent/transparency: post in the voice channel's text chat
+                // (30e). Best-effort — a missing Send-Messages permission must
+                // not break the recording.
+                if let Some(msg) = self.announce.clone() {
+                    let http = ctx.http.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = channel.say(&http, msg).await {
+                            tracing::warn!("discord: recording announcement failed: {e}");
+                        }
+                    });
+                }
+            }
+            Err(JoinError::Timeout) => {
+                let _ = self.ev_tx.send(IntegrationEvent::Ended {
+                    reason: "joining the voice channel timed out — try recording again".into(),
+                    error: true,
+                });
+            }
+            Err(JoinError::Failed(e)) => {
+                let _ = self.ev_tx.send(IntegrationEvent::Ended {
+                    reason: format!("join failed: {e} (bot needs Connect permission)"),
+                    error: true,
+                });
+            }
+            Err(JoinError::NoSongbird) => {
+                let _ = self.ev_tx.send(IntegrationEvent::Ended {
+                    reason: "songbird not initialised".into(),
+                    error: true,
+                });
+            }
+        }
+    }
+
+    /// The shared join sequence used by both the first join and a Phase 50
+    /// re-key. Registers the voice handlers BEFORE joining: Discord delivers the
+    /// Speaking events that carry the SSRC→user mapping in the first moments of
+    /// the connection. Registering after `join` returned (the old order) raced
+    /// them — and a lost mapping was a session that captured nothing (live-test
+    /// finding). Mirrors Songbird::join, with the handlers added between
+    /// `get_or_insert` and `Call::join`.
+    ///
+    /// `rejoin` selects behaviour that must differ between the two callers:
+    /// this method ALWAYS builds and registers a FRESH [`VoiceReceiver`] on the
+    /// call so the handlers are live on the new connection after a re-key — its
+    /// empty SSRC/name/pending maps are correct, because post-rejoin every
+    /// participant re-announces under their stable user-id key and the engine
+    /// maps those back to the existing tracks (Change 2). The same `ev_tx` is
+    /// reused so ParticipantJoined events keep flowing to the same session.
+    async fn join_call(
+        &self,
+        ctx: &Context,
+        guild: GuildId,
+        channel: ChannelId,
+        rejoin: bool,
+    ) -> Result<(), JoinError> {
         let Some(manager) = songbird::get(ctx).await else {
-            let _ = self.ev_tx.send(IntegrationEvent::Ended {
-                reason: "songbird not initialised".into(),
-                error: true,
-            });
-            return;
+            return Err(JoinError::NoSongbird);
         };
-        // Register the voice handlers BEFORE joining: Discord delivers the
-        // Speaking events that carry the SSRC→user mapping in the first
-        // moments of the connection. Registering after `join` returned (the
-        // old order) raced them — and a lost mapping was a session that
-        // captured nothing (live-test finding). Mirrors Songbird::join, with
-        // the handlers added between `get_or_insert` and `Call::join`.
-        let recv = VoiceReceiver::new(self.follow, self.ev_tx.clone(), ctx.http.clone(), guild);
         let call = manager.get_or_insert(guild);
+        let recv = VoiceReceiver::new(self.follow, self.ev_tx.clone(), ctx.http.clone(), guild);
         {
             let mut c = call.lock().await;
+            // On a rejoin the previous receiver's handlers are still attached to
+            // the same Call; drop them first so we don't double-handle ticks
+            // (each VoiceTick would otherwise be processed twice).
+            if rejoin {
+                c.remove_all_global_events();
+            }
             c.add_global_event(CoreEvent::SpeakingStateUpdate.into(), recv.clone());
             c.add_global_event(CoreEvent::VoiceTick.into(), recv.clone());
             c.add_global_event(CoreEvent::ClientDisconnect.into(), recv);
@@ -252,37 +373,105 @@ impl Bot {
         })
         .await;
         match joined {
-            Err(_) => {
-                let _ = self.ev_tx.send(IntegrationEvent::Ended {
-                    reason: "joining the voice channel timed out — try recording again".into(),
-                    error: true,
-                });
-            }
-            Ok(Ok(())) => {
-                if let Ok(mut g) = self.joined_guild.lock() {
-                    *g = Some(guild);
-                }
-                tracing::info!("discord: joined voice + receiving");
-                // Consent/transparency: post in the voice channel's text chat
-                // (30e). Best-effort — a missing Send-Messages permission must
-                // not break the recording.
-                if let Some(msg) = self.announce.clone() {
-                    let http = ctx.http.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = channel.say(&http, msg).await {
-                            tracing::warn!("discord: recording announcement failed: {e}");
-                        }
-                    });
-                }
-            }
-            Ok(Err(e)) => {
-                let _ = self.ev_tx.send(IntegrationEvent::Ended {
-                    reason: format!("join failed: {e} (bot needs Connect permission)"),
-                    error: true,
-                });
-            }
+            Err(_) => Err(JoinError::Timeout),
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(JoinError::Failed(e.to_string())),
         }
     }
+
+    /// Phase 50: a participant joined our channel after we connected. DAVE's
+    /// MLS group never gained a decryptor for them (songbird 0.6.0 race →
+    /// permanent `InvalidPacket` for that user). Forcing a fresh DAVE epoch
+    /// fixes it: leaving and rejoining produces a new MLS Welcome that includes
+    /// ALL currently-present members, so everyone — the late joiner included —
+    /// becomes decryptable again.
+    ///
+    /// CRITICAL: the bot's own `leave()` here must NOT be read as "followed user
+    /// left" — we never send `Ended`, and serenity's `voice_state_update` for
+    /// the *bot's* own user id is filtered out in the handler. We also send NO
+    /// `Ended` on any rejoin error: a failed re-key leaves the pre-rejoin call
+    /// intact (worst case the late joiner stays undecryptable), which is
+    /// strictly better than tearing down a working recording.
+    async fn rejoin(&self, ctx: &Context, guild: GuildId, channel: ChannelId) {
+        // Surface the brief gap so the user understands the ~1–3 s of silence.
+        let _ = self.ev_tx.send(IntegrationEvent::Notice(
+            "Someone joined — re-syncing Discord audio…".into(),
+        ));
+        let Some(manager) = songbird::get(ctx).await else {
+            return;
+        };
+        if let Some(call) = manager.get(guild) {
+            let mut c = call.lock().await;
+            let _ = c.leave().await;
+        }
+        // Brief settle before reconnecting so Discord drops the old voice state.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        match self.join_call(ctx, guild, channel, true).await {
+            Ok(()) => {
+                tracing::info!("discord: re-keyed DAVE via rejoin (late-joiner capture)");
+            }
+            Err(e) => {
+                // Log only — see the method doc: no Ended on a failed re-key.
+                tracing::warn!("discord: rejoin to re-key DAVE failed: {e:?}");
+            }
+        }
+        if let Ok(mut t) = self.last_rejoin.lock() {
+            *t = Instant::now();
+        }
+    }
+
+    /// A user entered our channel after we connected: schedule a debounced
+    /// re-key. Returns immediately; the actual rejoin runs on a spawned task
+    /// after a quiet window (so a burst of joiners collapses to one rejoin).
+    fn schedule_rejoin(&self, ctx: &Context, guild: GuildId, channel: ChannelId) {
+        // Debounce floor: a recent rejoin already re-keyed to include everyone
+        // present, so skip.
+        let since = self
+            .last_rejoin
+            .lock()
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::MAX);
+        if !may_rejoin(since) {
+            tracing::debug!("discord: skip rejoin — re-keyed {since:?} ago (< floor)");
+            return;
+        }
+        // Quiet-window debounce: bump the generation; this task only fires if
+        // no later joiner bumped it again during the window.
+        let my_gen = self.rejoin_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let gen = self.rejoin_gen.clone();
+        let ev_tx = self.ev_tx.clone();
+        let last_rejoin = self.last_rejoin.clone();
+        let follow = self.follow;
+        let announce = self.announce.clone();
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(REJOIN_QUIET_WINDOW).await;
+            if gen.load(Ordering::SeqCst) != my_gen {
+                // A newer joiner reset the window; that later task will rejoin.
+                return;
+            }
+            // Re-build a transient Bot view to run the rejoin (cheap clones).
+            let bot = Bot {
+                follow,
+                announce,
+                ev_tx,
+                joined: Arc::new(AtomicBool::new(true)),
+                joined_chan: Arc::new(std::sync::Mutex::new(Some((guild, channel)))),
+                last_rejoin,
+                rejoin_gen: gen,
+            };
+            bot.rejoin(&ctx, guild, channel).await;
+        });
+    }
+}
+
+/// Internal join outcome so [`Bot::try_join`] and [`Bot::rejoin`] can react
+/// differently (try_join surfaces `Ended`; rejoin only logs).
+#[derive(Debug)]
+enum JoinError {
+    NoSongbird,
+    Timeout,
+    Failed(String),
 }
 
 #[async_trait]
@@ -307,22 +496,44 @@ impl EventHandler for Bot {
         }
     }
 
-    async fn voice_state_update(&self, ctx: Context, _old: Option<VoiceState>, new: VoiceState) {
-        if new.user_id != UserId::new(self.follow) {
+    async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+        // --- Followed-user logic (unchanged): drives session start/end. ---
+        if new.user_id == UserId::new(self.follow) {
+            match (new.guild_id, new.channel_id) {
+                // Followed user is in a guild voice channel → follow them in.
+                (Some(g), Some(c)) => self.try_join(&ctx, g, c).await,
+                // Followed user left voice → end the session.
+                (_, None) => {
+                    let _ = self.ev_tx.send(IntegrationEvent::Ended {
+                        reason: "you left the voice channel".into(),
+                        error: false,
+                    });
+                }
+                // A non-guild voice channel (DM/group call) — not followed.
+                (None, Some(_)) => {}
+            }
             return;
         }
-        match (new.guild_id, new.channel_id) {
-            // Followed user is in a guild voice channel → follow them in.
-            (Some(g), Some(c)) => self.try_join(&ctx, g, c).await,
-            // Followed user left voice → end the session.
-            (_, None) => {
-                let _ = self.ev_tx.send(IntegrationEvent::Ended {
-                    reason: "you left the voice channel".into(),
-                    error: false,
-                });
-            }
-            // A non-guild voice channel (DM/group call) — not followed.
-            (None, Some(_)) => {}
+
+        // --- Phase 50: late-joiner detection for ANY other user. ---
+        // Never react to the bot's own voice state — its leave()/join() during a
+        // re-key would otherwise trigger an endless rejoin loop.
+        if new.user_id == ctx.cache.current_user().id {
+            return;
+        }
+        // Only when we have actually joined a channel of our own to compare to.
+        let Some((our_guild, our_channel)) = self.joined_chan.lock().ok().and_then(|g| *g) else {
+            return;
+        };
+        // Same guild as our recording (voice activity in other guilds is moot).
+        if new.guild_id != Some(our_guild) {
+            return;
+        }
+        // A user *entering* our channel (join or move-in) — not an in-channel
+        // mute/deafen update. `old` is serenity's cached prior state (may be
+        // None; `is_channel_join` then treats it as a join, see its doc).
+        if is_channel_join(old.and_then(|o| o.channel_id), new.channel_id, our_channel) {
+            self.schedule_rejoin(&ctx, our_guild, our_channel);
         }
     }
 }
@@ -487,5 +698,65 @@ impl VoiceEventHandler for VoiceReceiver {
             _ => {}
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ch(n: u64) -> ChannelId {
+        ChannelId::new(n)
+    }
+
+    // --- is_channel_join: distinguishing a join INTO our channel from an
+    // in-channel state update or unrelated voice activity (Phase 50). ---
+
+    #[test]
+    fn join_into_our_channel_from_outside_triggers() {
+        // Was not in our channel (in another, or not in voice) → now in it.
+        assert!(is_channel_join(Some(ch(2)), Some(ch(1)), ch(1)));
+        assert!(is_channel_join(None, Some(ch(1)), ch(1)));
+    }
+
+    #[test]
+    fn in_channel_state_update_does_not_trigger() {
+        // Already in our channel, still in it: a mute/deafen/video toggle.
+        assert!(!is_channel_join(Some(ch(1)), Some(ch(1)), ch(1)));
+    }
+
+    #[test]
+    fn activity_in_other_channel_does_not_trigger() {
+        // Joined some other channel entirely.
+        assert!(!is_channel_join(None, Some(ch(2)), ch(1)));
+        assert!(!is_channel_join(Some(ch(3)), Some(ch(2)), ch(1)));
+    }
+
+    #[test]
+    fn leaving_does_not_trigger() {
+        // Left voice (new channel None) — never a join into ours.
+        assert!(!is_channel_join(Some(ch(1)), None, ch(1)));
+    }
+
+    #[test]
+    fn unknown_prior_state_treated_as_join() {
+        // Cache had no `old` (None) and they're now in our channel: we can't
+        // prove it's not a fresh join, so we trigger (over-trigger is one extra
+        // debounced rejoin; under-trigger silently loses the late joiner).
+        assert!(is_channel_join(None, Some(ch(1)), ch(1)));
+    }
+
+    // --- may_rejoin: the debounce FLOOR between consecutive re-keys. ---
+
+    #[test]
+    fn rejoin_blocked_within_floor() {
+        assert!(!may_rejoin(Duration::from_secs(0)));
+        assert!(!may_rejoin(REJOIN_FLOOR - Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn rejoin_allowed_after_floor() {
+        assert!(may_rejoin(REJOIN_FLOOR));
+        assert!(may_rejoin(REJOIN_FLOOR + Duration::from_secs(60)));
     }
 }

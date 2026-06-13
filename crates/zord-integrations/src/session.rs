@@ -36,17 +36,23 @@ pub enum EndReason {
 ///   it changes labeling/styling only, never the track layout;
 /// - a rename is forwarded to `on_rename(idx, name)` (engine updates
 ///   `speaker_names`);
+/// - a provider notice is forwarded to `on_notice(msg)` (engine surfaces it as
+///   `Event::Notice` — e.g. the Discord late-joiner re-sync banner, Phase 50);
 /// - returns when the provider ends, the caller raises `stop`, or the channel
 ///   closes.
 ///
 /// A participant key that re-appears keeps its original index (a rejoin maps to
 /// the same track); `on_join` is still called so the engine can attach the new
-/// stream.
+/// stream. Phase 50: after a Discord leave+rejoin every participant re-announces
+/// under their stable user-id key, so each `on_join` past the first for a given
+/// idx hands the engine a *fresh* audio stream for an *existing* track — the
+/// engine forwards it into that track's proc rather than spawning a duplicate.
 pub fn drive_session(
     integration: &mut dyn Integration,
     stop: &Arc<AtomicBool>,
     mut on_join: impl FnMut(i32, String, bool, u32, AudioStream),
     mut on_rename: impl FnMut(i32, String),
+    mut on_notice: impl FnMut(String),
 ) -> Result<EndReason> {
     let rx = integration.start()?;
     let mut indices: HashMap<String, i32> = HashMap::new();
@@ -75,6 +81,7 @@ pub fn drive_session(
                     on_rename(idx, name);
                 }
             }
+            Ok(IntegrationEvent::Notice(msg)) => on_notice(msg),
             Ok(IntegrationEvent::Ended { reason, error }) => {
                 integration.stop();
                 return Ok(EndReason::Provider { reason, error });
@@ -106,6 +113,7 @@ mod tests {
                 streams.push(audio); // keep alive so the provider isn't cut short
             },
             |_idx, _name| {},
+            |_msg| {},
         )
         .unwrap();
 
@@ -123,7 +131,8 @@ mod tests {
     fn stop_flag_ends_the_session() {
         let mut fake = FakeProvider::new(2, 100); // long session
         let stop = Arc::new(AtomicBool::new(true)); // already stopped
-        let reason = drive_session(&mut fake, &stop, |_, _, _, _, _| {}, |_, _| {}).unwrap();
+        let reason =
+            drive_session(&mut fake, &stop, |_, _, _, _, _| {}, |_, _| {}, |_| {}).unwrap();
         assert_eq!(reason, EndReason::Stopped);
     }
 }

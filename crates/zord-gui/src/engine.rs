@@ -5107,6 +5107,22 @@ fn run_integration_session(
                     ));
                 }
             };
+            // Phase 50: one persistent input sender per speaker idx. The proc
+            // for spk-{idx}.wav reads from a channel WE own, so a re-announce of
+            // the same idx (after a Discord leave+rejoin re-keys DAVE) forwards
+            // its NEW audio stream into the SAME proc instead of spawning a
+            // second one — a second proc would re-create spk-{idx}.wav and
+            // truncate the audio recorded before the rejoin. The proc's
+            // wall-clock silence padding (pad_to_wallclock, keyed to
+            // session_start) renders the rejoin gap as silence, keeping timing
+            // aligned when forwarding resumes.
+            let track_inputs: std::cell::RefCell<
+                std::collections::HashMap<i32, mpsc::Sender<Vec<f32>>>,
+            > = std::cell::RefCell::new(std::collections::HashMap::new());
+            // Forwarder threads (re-announce only): drain a fresh provider
+            // stream into an existing track. Tracked so they're joined at end.
+            let forwarders: std::cell::RefCell<Vec<thread::JoinHandle<()>>> =
+                std::cell::RefCell::new(Vec::new());
             let on_join = |idx: i32,
                            name: String,
                            is_me: bool,
@@ -5117,18 +5133,52 @@ fn run_integration_session(
                 // (from the configured user ID), not a separate channel.
                 announce(idx, &name);
                 if is_me {
+                    // Idempotent on re-announce: set_me_speaker just re-stamps.
                     if let Some(s) = store.as_ref() {
                         let _ = s.set_me_speaker(&session_id, idx);
                     }
                     let _ = ev.send(Event::MeSpeaker(Some(idx)));
                 }
+
+                // Re-announce of a known idx → bridge the new stream into the
+                // existing proc, don't spawn another.
+                if let Some(track_tx) = track_inputs.borrow().get(&idx).cloned() {
+                    let h = thread::spawn(move || {
+                        // Forward until this provider stream closes (it closes
+                        // at the next rejoin or session end); on a dead track
+                        // sender we simply stop.
+                        while let Ok(buf) = audio.recv() {
+                            if track_tx.send(buf).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    forwarders.borrow_mut().push(h);
+                    return;
+                }
+
+                // First time we've seen this idx: create the persistent input
+                // channel, spawn the proc reading it, and remember the sender.
+                let (track_tx, track_rx) = mpsc::channel::<Vec<f32>>();
+                track_inputs.borrow_mut().insert(idx, track_tx.clone());
+                // Bridge this first provider stream into the persistent channel
+                // (uniform with re-announces; the proc only ever reads track_rx).
+                let h_fwd = thread::spawn(move || {
+                    while let Ok(buf) = audio.recv() {
+                        if track_tx.send(buf).is_err() {
+                            break;
+                        }
+                    }
+                });
+                forwarders.borrow_mut().push(h_fwd);
+
                 let level = zord_audio::LevelControl::new(zord_audio::LevelMode::parse(
                     &others_mode,
                     others_gain,
                 ));
                 let wav = Some(zord_config::track_path(&session_dir, &format!("spk-{idx}")));
                 let h = spawn_proc(
-                    audio,
+                    track_rx,
                     sample_rate,
                     Source::Others,
                     Some(idx),
@@ -5145,8 +5195,16 @@ fn run_integration_session(
                 }
             };
             let on_rename = |idx: i32, name: String| announce(idx, &name);
-            match zord_integrations::drive_session(provider.as_mut(), &stopping, on_join, on_rename)
-            {
+            let on_notice = |msg: String| {
+                let _ = ev.send(Event::Notice(msg));
+            };
+            match zord_integrations::drive_session(
+                provider.as_mut(),
+                &stopping,
+                on_join,
+                on_rename,
+                on_notice,
+            ) {
                 Ok(reason) => {
                     tracing::info!("integration session ended: {reason:?}");
                     // Provider-flagged errors (join refused, bad token, gateway
@@ -5172,6 +5230,14 @@ fn run_integration_session(
                 Err(e) => {
                     let _ = ev.send(Event::Notice(format!("integration error: {e}")));
                 }
+            }
+            // Phase 50: the provider has ended → its participant streams are
+            // closed → every forwarder's `recv()` returns Err and the threads
+            // exit. Join them so the per-track input senders they hold are
+            // dropped, which lets each proc see its channel close and finalize
+            // its WAV (the procs themselves are joined by the parent below).
+            for h in forwarders.into_inner() {
+                let _ = h.join();
             }
             ended.store(true, Ordering::Relaxed);
         })
