@@ -706,11 +706,16 @@ fn MainApp() -> Element {
                     }
                 }
 
-                // Phase 47: voice bookmarks — apply to viewed or live session.
+                // Phase 47: voice bookmarks — only apply when the event's
+                // session is the one ON SCREEN. A live bookmark firing while
+                // the user browses a historical session must not overwrite
+                // that session's bookmark bar; live markers only update when
+                // the Live view itself is showing.
                 Event::Bookmarks { id, items } => {
-                    let is_live_session = live_session_id.peek().as_deref() == Some(&id);
                     let is_viewed = matches!(&*view.peek(), View::Session(cur) if *cur == id);
-                    if is_live_session || is_viewed {
+                    let is_live_viewed = matches!(&*view.peek(), View::Live)
+                        && live_session_id.peek().as_deref() == Some(&id);
+                    if is_viewed || is_live_viewed {
                         bookmarks.set(items);
                     }
                 }
@@ -5160,7 +5165,9 @@ fn BookmarkSettings(mut settings: Signal<Settings>) -> Element {
                         onkeydown: move |e: KeyboardEvent| {
                             if e.key() == Key::Enter {
                                 let phrase = new_phrase.peek().trim().to_string();
-                                if !phrase.is_empty() {
+                                // Reject phrases with no letters/digits — they
+                                // normalize to empty and could never match.
+                                if phrase.chars().any(|c| c.is_alphanumeric()) {
                                     let mut s = settings.peek().clone();
                                     if !s.bookmark_phrases.contains(&phrase) {
                                         s.bookmark_phrases.push(phrase);
@@ -5177,7 +5184,9 @@ fn BookmarkSettings(mut settings: Signal<Settings>) -> Element {
                         title: "Add phrase",
                         onclick: move |_| {
                             let phrase = new_phrase.peek().trim().to_string();
-                            if !phrase.is_empty() {
+                            // Reject phrases with no letters/digits — they
+                            // normalize to empty and could never match.
+                            if phrase.chars().any(|c| c.is_alphanumeric()) {
                                 let mut s = settings.peek().clone();
                                 if !s.bookmark_phrases.contains(&phrase) {
                                     s.bookmark_phrases.push(phrase);

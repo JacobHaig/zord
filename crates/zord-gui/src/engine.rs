@@ -4667,9 +4667,14 @@ fn run_session(
     // timestamp_ms). The transcribe thread owns the receiver so it can write
     // to the same DB connection it already holds.
     let (manual_bkmark_tx, manual_bkmark_rx) = mpsc::channel::<u64>();
-    let bookmark_back_ms = {
+    // Bookmark config loaded once per session: phrases move into the
+    // transcribe thread; the back-offset is also used by `wait_for_stop`.
+    let (bkmark_phrases, bookmark_back_ms) = {
         let s = zord_config::Settings::load();
-        s.bookmark_back_offset_secs as u64 * 1_000
+        (
+            s.bookmark_phrases,
+            s.bookmark_back_offset_secs as u64 * 1_000,
+        )
     };
 
     // Transcription + storage thread: consumes jobs from both channels.
@@ -4708,10 +4713,9 @@ fn run_session(
                     None
                 }
             };
-            // Phase 47: load bookmark phrases once for this session.
-            let bkmark_settings = zord_config::Settings::load();
-            let bkmark_phrases = bkmark_settings.bookmark_phrases.clone();
-            let bkmark_back_ms = bkmark_settings.bookmark_back_offset_secs as u64 * 1_000;
+            // Phase 47: bookmark config captured from the session-level load
+            // above (`bkmark_phrases` moved in; back-offset is Copy).
+            let bkmark_back_ms = bookmark_back_ms;
 
             // Helper: insert a bookmark and broadcast it.
             let drop_bookmark = |store: &Store,

@@ -596,23 +596,33 @@ fn normalize_phrase(s: &str) -> String {
 }
 
 /// Check whether `text` contains any of `phrases` (case- and
-/// punctuation-insensitive containment). Returns the **first** phrase that
-/// matches (as originally stored, not the normalized form).
+/// punctuation-insensitive, **word-boundary anchored** containment).
+/// Returns the **first** phrase that matches (as originally stored, not
+/// the normalized form).
+///
+/// Both sides are normalized and padded with spaces before the contains
+/// check so "mark that" matches "well, mark that please" but NOT
+/// "remark that". Phrases that normalize to empty (e.g. "!!!") never match.
 ///
 /// # Example
 /// ```
 /// use zord_config::matches_bookmark_phrase;
 /// let phrases = vec!["mark that".to_string()];
 /// assert_eq!(matches_bookmark_phrase("mark, that!", &phrases), Some("mark that".to_string()));
+/// assert_eq!(matches_bookmark_phrase("remark that", &phrases), None);
 /// ```
 pub fn matches_bookmark_phrase(text: &str, phrases: &[String]) -> Option<String> {
-    let norm_text = normalize_phrase(text);
+    // Pad with spaces so containment is anchored on word boundaries.
+    let norm_text = format!(" {} ", normalize_phrase(text));
     for phrase in phrases {
-        if phrase.trim().is_empty() {
+        let norm_phrase = normalize_phrase(phrase);
+        // A phrase that normalizes to empty (punctuation-only, whitespace)
+        // would match every segment via contains("") — never allow it.
+        if norm_phrase.is_empty() {
             continue;
         }
-        let norm_phrase = normalize_phrase(phrase);
-        if norm_text.contains(&norm_phrase) {
+        let padded = format!(" {} ", norm_phrase);
+        if norm_text.contains(&padded) {
             return Some(phrase.clone());
         }
     }
@@ -1113,6 +1123,45 @@ mod tests {
         assert_eq!(
             matches_bookmark_phrase("please bookmark this moment", &phrases),
             Some("bookmark this".to_string())
+        );
+    }
+
+    #[test]
+    fn matches_bookmark_phrase_word_boundaries() {
+        let phrases = vec!["mark that".to_string()];
+        // Substring inside a longer word must NOT match.
+        assert_eq!(matches_bookmark_phrase("remark that", &phrases), None);
+        assert_eq!(matches_bookmark_phrase("hallmark that", &phrases), None);
+        // Whole words surrounded by other words MUST match.
+        assert_eq!(
+            matches_bookmark_phrase("well mark that please", &phrases),
+            Some("mark that".to_string())
+        );
+        // Phrase at utterance start MUST match.
+        assert_eq!(
+            matches_bookmark_phrase("mark that for me", &phrases),
+            Some("mark that".to_string())
+        );
+        // Phrase at utterance end MUST match.
+        assert_eq!(
+            matches_bookmark_phrase("could you mark that", &phrases),
+            Some("mark that".to_string())
+        );
+    }
+
+    #[test]
+    fn matches_bookmark_phrase_rejects_empty_normalized() {
+        // Punctuation-only phrase normalizes to "" — must never match.
+        let phrases = vec!["!!!".to_string()];
+        assert_eq!(matches_bookmark_phrase("any segment text", &phrases), None);
+        // Whitespace-only phrase likewise.
+        let phrases = vec!["   ".to_string()];
+        assert_eq!(matches_bookmark_phrase("any segment text", &phrases), None);
+        // Mixed list: the empty-normalizing entry is skipped, a real one still fires.
+        let phrases = vec!["?!".to_string(), "mark that".to_string()];
+        assert_eq!(
+            matches_bookmark_phrase("ok mark that", &phrases),
+            Some("mark that".to_string())
         );
     }
 
