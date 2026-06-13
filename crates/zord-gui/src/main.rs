@@ -1586,10 +1586,10 @@ fn MainApp() -> Element {
         NotesDrawer { view, recording, live_session_id, show_notes, notes, notes_draft, engine: engine.clone() }
 
         // ---- Confirm-delete dialog ----
-        ConfirmDeleteDialog { confirm_delete, view, segments, summary, compressed, engine: engine.clone() }
+        ConfirmDeleteDialog { confirm_delete, view, segments, summary, compressed, stats_open, session_stats, engine: engine.clone() }
 
         // ---- Confirm-bulk-delete dialog (Phase 43f) ----
-        ConfirmBulkDeleteDialog { confirm_bulk_delete, selected_sessions, view, segments, summary, compressed, engine: engine.clone() }
+        ConfirmBulkDeleteDialog { confirm_bulk_delete, selected_sessions, view, segments, summary, compressed, stats_open, session_stats, engine: engine.clone() }
 
         // ---- Confirm-retranscribe dialog (Phase 25c) ----
         ConfirmRetranscribeDialog { confirm_retranscribe, settings, retranscribing, notice, engine: engine.clone() }
@@ -2864,6 +2864,9 @@ fn ConfirmBulkDeleteDialog(
     segments: Signal<Vec<Segment>>,
     summary: Signal<Option<String>>,
     compressed: Signal<Option<String>>,
+    /// Phase 46: close the stats card when the viewed session is in the batch.
+    stats_open: Signal<bool>,
+    session_stats: Signal<Option<SessionStats>>,
     engine: Engine,
 ) -> Element {
     rsx! {
@@ -2898,6 +2901,8 @@ fn ConfirmBulkDeleteDialog(
                                             segments.write().clear();
                                             summary.set(None);
                                             compressed.set(None);
+                                            stats_open.set(false);
+                                            session_stats.set(None);
                                         }
                                         let _ = engine.db_tx.send(DbCmd::DeleteSessions(ids));
                                         selected_sessions.write().clear();
@@ -2979,6 +2984,10 @@ fn ConfirmDeleteDialog(
     segments: Signal<Vec<Segment>>,
     summary: Signal<Option<String>>,
     compressed: Signal<Option<String>>,
+    /// Phase 46: close the stats card when the viewed session is deleted, so
+    /// it doesn't auto-open on the next session.
+    stats_open: Signal<bool>,
+    session_stats: Signal<Option<SessionStats>>,
     engine: Engine,
 ) -> Element {
     rsx! {
@@ -3001,6 +3010,8 @@ fn ConfirmDeleteDialog(
                                             segments.write().clear();
                                             summary.set(None);
                                             compressed.set(None);
+                                            stats_open.set(false);
+                                            session_stats.set(None);
                                         }
                                         confirm_delete.set(None);
                                     },

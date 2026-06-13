@@ -288,58 +288,84 @@ pub struct ProjectItem {
 // ---------------------------------------------------------------------------
 
 /// Per-speaker analytics for one session.
+///
+/// Every field is `#[serde(default)]` so stored `session_stats` JSON rows
+/// written by older builds keep deserializing after new fields are added
+/// (Phase 48 reads these rows directly).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpeakerStats {
     /// Stable key used as a map key and by Phase 48 profiles.
     /// `"me"` for `Source::Me`; `"spk-N"` for `Source::Others + Some(N)`;
     /// `"others"` for un-diarized `Source::Others + None`.
+    #[serde(default)]
     pub key: String,
     /// Raw speaker index (meaningful for spk-N rows; `None` for "me" and
     /// the un-diarized "others" bucket).
+    #[serde(default)]
     pub speaker: Option<i32>,
     /// `true` when this row is the app user's perspective (either `Source::Me`
     /// or an integration session where `speaker == me_speaker`).
+    #[serde(default)]
     pub is_me: bool,
     /// Total speaking time in milliseconds (sum of segment durations).
+    #[serde(default)]
     pub talk_ms: u64,
     /// Fraction of total speech time: `talk_ms / total_talk_ms` (0.0 when no
     /// speech at all). Range [0, 1].
+    #[serde(default)]
     pub talk_share: f32,
     /// Total word count (whitespace-split tokens in `Segment::text`).
+    #[serde(default)]
     pub words: u32,
     /// Speaking rate in words per minute. `0.0` when `talk_ms` is zero.
+    #[serde(default)]
     pub wpm: f32,
     /// Number of segments whose trimmed text ends with `'?'`.
+    #[serde(default)]
     pub questions: u32,
     /// Total number of segments attributed to this speaker.
+    #[serde(default)]
     pub lines: u32,
     /// Duration in ms of the longest unbroken speech run (same-speaker
     /// consecutive segments with inter-segment gaps < 2 000 ms are merged into
     /// one "monologue run" for this metric).
+    #[serde(default)]
     pub longest_monologue_ms: u64,
     /// How many times this speaker started a segment while a *different*
     /// speaker's segment was still nominally in-progress (i.e. speaker B's
     /// `t_start_ms` strictly inside another speaker's `[t_start_ms, t_end_ms)`).
+    #[serde(default)]
     pub interruptions_made: u32,
     /// Total milliseconds during which this speaker's segments overlapped with
     /// a different speaker's segments (attributed to both parties).
+    #[serde(default)]
     pub talk_over_ms: u64,
 }
 
 /// Full per-session conversation metrics, computed purely from segments.
 /// Serialized as JSON into `session_stats.json` in zord-store (Phase 46).
+///
+/// Every field is `#[serde(default)]` so stored rows from older builds keep
+/// deserializing after the schema grows (Phase 48 reads them directly).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionStats {
     /// Per-speaker rows, sorted by `talk_share` descending before delivery.
+    #[serde(default)]
     pub speakers: Vec<SpeakerStats>,
     /// Wall-clock meeting length in ms (`ended_at - started_at`). Zero when
     /// the session hasn't ended yet (compute is deferred until then).
+    #[serde(default)]
     pub meeting_ms: u64,
-    /// Union of all segment spans in ms — meeting_ms minus this equals
-    /// total silence time.
+    /// Union of all segment spans in ms, stored UNCLAMPED: it can exceed
+    /// `meeting_ms` when segments outlast `ended_at` (clock skew, padded
+    /// tails). Do NOT compute `meeting_ms - speech_ms` without saturating;
+    /// use [`SessionStats::silence_ratio`] for the clamped silence fraction.
+    #[serde(default)]
     pub speech_ms: u64,
-    /// `1 - speech_ms / meeting_ms`; how quiet this meeting was.
+    /// `1 - min(speech_ms, meeting_ms) / meeting_ms`; how quiet this meeting
+    /// was (speech_ms is clamped here, unlike the raw field).
     /// Zero when `meeting_ms` is zero.
+    #[serde(default)]
     pub silence_ratio: f32,
 }
 
@@ -471,14 +497,20 @@ pub fn compute_stats(
         for j in 0..n {
             let sj = sorted[j];
             let kj = speaker_key(sj.source, sj.speaker);
-            // Scan backward for segments that were still active when sj started.
+            // Scan backward over ALL earlier-starting segments. We cannot
+            // `break` on the first one that ended before sj starts: the array
+            // is sorted by START time, so a short early-ending segment can sit
+            // between sj and a long still-active one (A=[0,20s), B=[5s,7s),
+            // C=[10s,15s) — breaking at B would hide A from C). O(n²) is fine;
+            // meeting transcripts are small (<<10k segs).
             let mut k = j;
             while k > 0 {
                 k -= 1;
                 let si = sorted[k];
-                // si starts before sj; if si has ended before sj starts, done.
+                // si starts before sj; skip it if it ended before sj started —
+                // but keep scanning (earlier segments may still be active).
                 if si.t_end_ms <= sj.t_start_ms {
-                    break;
+                    continue;
                 }
                 let ki = speaker_key(si.source, si.speaker);
                 if ki == kj {
@@ -844,6 +876,41 @@ mod tests {
         let spk0 = stats.speakers.iter().find(|s| s.key == "spk-0").unwrap();
         assert_eq!(me.talk_over_ms, 3_000);
         assert_eq!(spk0.talk_over_ms, 3_000);
+    }
+
+    /// Test 8b — REGRESSION: a short early-ending segment between a long
+    /// segment and a later candidate must not hide the long one from the
+    /// backward sweep (sorted-by-START + early-`break` bug).
+    ///
+    /// A = me      [0, 20_000)   — long, spans everything
+    /// B = spk-0   [5_000, 7_000) — short, ends before C starts
+    /// C = spk-1   [10_000, 15_000) — starts after B ended, inside A
+    ///
+    /// Expected: C interrupts A exactly once; A↔C overlap = 5_000 ms on both;
+    /// B's only involvement is its own 2_000 ms overlap with A.
+    #[test]
+    fn stats_overlap_behind_short_segment() {
+        let segs = [
+            seg_t(Source::Me, None, 0, 20_000, "a"),
+            seg_t(Source::Others, Some(0), 5_000, 7_000, "b"),
+            seg_t(Source::Others, Some(1), 10_000, 15_000, "c"),
+        ];
+        let stats = compute_stats(&segs, None, 0, 25_000);
+        let me = stats.speakers.iter().find(|s| s.key == "me").unwrap();
+        let spk0 = stats.speakers.iter().find(|s| s.key == "spk-0").unwrap();
+        let spk1 = stats.speakers.iter().find(|s| s.key == "spk-1").unwrap();
+        // C started strictly inside A → one interruption made by C.
+        assert_eq!(spk1.interruptions_made, 1);
+        // B also started strictly inside A.
+        assert_eq!(spk0.interruptions_made, 1);
+        assert_eq!(me.interruptions_made, 0);
+        // A↔C overlap (5_000) must be attributed to both, despite B sitting
+        // between them in start order.
+        assert_eq!(spk1.talk_over_ms, 5_000);
+        // A: 2_000 (with B) + 5_000 (with C) = 7_000.
+        assert_eq!(me.talk_over_ms, 7_000);
+        // B: only its own 2_000 ms with A — uninvolved with C.
+        assert_eq!(spk0.talk_over_ms, 2_000);
     }
 
     /// Test 9 — union speech: overlapping segments counted once.
