@@ -262,10 +262,13 @@ jobs:
       # Stage ONNX Runtime 1.24.2 + VC++ redist BEFORE `dx bundle` (Phase 51b).
       # CRITICAL ORDERING: `dx bundle` builds the NSIS installer DURING the same
       # invocation, and the installer only stages the main exe plus resources
-      # declared in Dioxus.toml (`[bundle] resources`). Those resource paths
-      # point at `crates/zord-gui/ort-bundle/*.dll`, so the DLLs MUST exist here,
-      # before Bundle app, to be packed into the installer beside zord-gui.exe.
-      # ort 2.0.0-rc.12 targets onnxruntime 1.24.2 (API 24) — ship exactly that.
+      # declared in Dioxus.toml (`[bundle] resources`). dx 0.7.9 resolves those
+      # resource paths against the PROCESS CWD (the repo root, where this job
+      # runs `dx bundle --package zord-gui` — dx does NOT crate-dir-join resource
+      # paths, unlike icon/license). So the DLLs MUST be staged at repo-root
+      # `ort-bundle/` (matching `ort-bundle/onnxruntime.dll` in Dioxus.toml) and
+      # MUST exist before Bundle app, to be packed into the installer beside
+      # zord-gui.exe. ort 2.0.0-rc.12 targets onnxruntime 1.24.2 (API 24) — ship that.
       # The VC++ runtime DLLs: onnxruntime.dll is built /MD and needs them; they
       # exist on modern Win10/11 but we bundle them for safety. The right x64
       # copies live in C:\Windows\System32 on the x64 runner.
@@ -273,7 +276,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DEST="crates/zord-gui/ort-bundle"
+          # Repo-root ort-bundle/ — exactly where dx resolves the CWD-relative
+          # `[bundle] resources` paths from Dioxus.toml (dx runs from repo root).
+          DEST="ort-bundle"
           mkdir -p "$DEST"
           URL="https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip"
           curl -fsSL "$URL" -o ort.zip
@@ -311,7 +316,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SRC="crates/zord-gui/ort-bundle"
+          SRC="ort-bundle"
           # Bundle dir holding the portable zord-gui.exe (same dir Collect finds).
           BUNDLE_EXE=$(find target -path "*bundle*" -name "zord-gui.exe" | head -1)
           [ -z "$BUNDLE_EXE" ] && BUNDLE_EXE=$(find target -name "zord-gui.exe" -not -path "*/deps/*" | head -1)
@@ -395,12 +400,12 @@ jobs:
           # ONNX Runtime + VC++ redist (Phase 51b). Stage them in a temp subdir
           # (NOT loose in dist/, which would upload them as stray release assets)
           # for inclusion in the portable zip.
-          ORT="crates/zord-gui/ort-bundle"
+          ORT="ort-bundle"
           mkdir -p dist/_dll
           cp "$ORT"/*.dll dist/_dll/ 2>/dev/null || true
           # Self-update asset (Phase 51c): the updater downloads onnxruntime.dll
           # under this EXACT name and drops it beside the freshly-swapped exe.
-          # ASSET-NAME CONTRACT — must match update.rs `WANTED_DLL`. Do not rename
+          # ASSET-NAME CONTRACT — must match update.rs `ORT_DLL_ASSET`. Do not rename
           # without updating the updater (it'd silently stop refreshing the DLL).
           if [ -f "$ORT/onnxruntime.dll" ]; then
             cp "$ORT/onnxruntime.dll" "dist/onnxruntime-windows-x64.dll"

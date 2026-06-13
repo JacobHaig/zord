@@ -24,9 +24,10 @@ config.temp
 # Discord spike test recordings (never commit captured audio)
 discord-spike-out/
 
-# ONNX Runtime + VC++ redist DLLs the release workflow downloads into the GUI
-# crate for bundling (Phase 51b); fetched fresh per release, never committed.
-crates/zord-gui/ort-bundle/
+# ONNX Runtime + VC++ redist DLLs the release workflow downloads to repo root
+# for bundling (Phase 51b) — dx resolves [bundle] resources against the CWD
+# (repo root). Fetched fresh per release, never committed.
+/ort-bundle/
 
 # macOS
 .DS_Store
