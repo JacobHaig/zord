@@ -1845,8 +1845,11 @@ store distribution. Design new features with a clean free/premium seam in
 mind (Cargo features + license gating later); no gating implemented yet.
 
 ### Phase 46 — Conversation analytics: "Meeting DNA" (planned)
-Real numbers from data only Zord has (per-speaker audio + cross-session
-identity, all local):
+**Hard constraint (user, June 2026): NO LLM anywhere in this phase — every
+metric is pure-fn computation over data Zord already has (fast, exact,
+unit-tested). Any future metric that would need an LLM gets discussed
+first, not built.** Real numbers from data only Zord has (per-speaker
+audio + cross-session identity, all local):
 - **Per-session stats**, computed post-transcription into a cached
   `session_stats` store (job, recomputed on re-transcribe/re-diarize):
   talk-time share per speaker (diarized spans / integration track speech
@@ -1883,20 +1886,37 @@ The Speakers view grows person pages: click a voiceprint → their profile —
 every meeting they appeared in (links), talk-time/interruption trend
 (Phase 46 stats), their open `- [ ]` items scraped from the living
 Overview by owner name, topics they own (nearest-neighbor clusters over
-the Phase 45 chunk embeddings, labeled by the local LLM), last heard.
-Read-only composition of existing data — no new collection.
+the Phase 45 chunk embeddings, labeled by **TF-IDF top terms over the
+cluster's text — pure-fn, no LLM**; LLM-written labels noted as an
+optional upgrade requiring discussion first), last heard. Read-only
+composition of existing data — no new collection, no LLM.
 
-### Phase 49 — Sentiment "moments" (design pending — user reviewing)
-The continuous energy-arc idea was set aside (hard to track accurately and
-to read clearly). Options on the table for review:
-- **(a) High-confidence moment markers only**: the LLM flags discrete
-  moments (decision reached, tension spike, blocker raised) ONLY at high
-  confidence; rendered as sparse ticks on the timeline + a list. No
-  continuous signal to mistrust.
-- **(b) Mood as words, not graphics**: a one-line "temperature" sentence
-  per summary section ("calm until the deadline discussion; tense after").
-- **(c) Drop sentiment entirely** until a clearly reliable approach exists.
-Pick (a)/(b)/(c) at plan review before any build.
+### Phase 49 — Sentiment "moments" (planned — audio-first, in the Timeline)
+APPROVED (June 2026) with the design pivoted to **audio prosody, no LLM**,
+and the markers **built into the Timeline panel** as a moments lane:
+- **Model: SenseVoiceSmall via sherpa-onnx** (the runtime we already ship
+  for diarization/voiceprints/Parakeet — a model download, not a new
+  dependency). One small model emits per-utterance **emotion labels** and
+  **audio events** (laughter, applause, crying, coughing) from tone of
+  voice — signals text analysis fundamentally can't see.
+- **Conservative rendering (the accuracy concern, addressed):**
+  - *Event markers always*: laughter/applause are near-unambiguous —
+    rendered as their own tick style on the Timeline (click → seek). "The
+    room laughed here" is the most trustworthy sentiment signal there is.
+  - *Emotion ticks only on persistence*: an emotion mark renders only when
+    a strong non-neutral label holds across N consecutive utterances
+    (const, commented) — no continuous arc, nothing speculative.
+  - Stretch: cross-check against a small ONNX text classifier (ort is
+    already in-tree via Phase 45); render emotion ticks only when audio
+    and text agree.
+- **Pipeline:** post-transcription job (cancellable) runs SenseVoice over
+  the per-speaker tracks → `moments (session_id, t_ms, kind, speaker)`
+  table → Timeline moments lane + a small list in the session view.
+  Speaker attribution comes free from per-track processing.
+- **Gate task: verify the SenseVoiceSmall weights' license** for
+  commercial use per the model-licensing policy BEFORE wiring downloads
+  (code is Apache-2.0; weights' terms must be confirmed — if they fail
+  the policy, fall back to a commercially-licensed SER model or hold).
 
 **Declined (June 2026): pre-meeting briefing** — composing context for a
 10-person meeting whose attendees each carry separate meeting histories
