@@ -126,6 +126,54 @@ impl Segment {
     }
 }
 
+/// A sentiment "moment" on the session timeline (Phase 49): an audio-prosody
+/// marker derived from on-device ONNX models, attributed to a speaker track.
+///
+/// Two flavours share this shape:
+/// - **Audio events** (YAMNet): `kind` is one of `laughter`, `applause`,
+///   `crying`, `cough`, `sneeze`, `cheering`. Near-unambiguous → always shown.
+/// - **Emotion** (wav2vec2 SER): `kind` is `emotion:<label>` (e.g.
+///   `emotion:happy`), emitted only when a strong non-neutral label persists
+///   across several consecutive utterances (the conservative-rendering rule).
+///
+/// `t_ms` is milliseconds from session start; `speaker` is the diarized /
+/// integration speaker index of the track it came from (`me` and `others` map
+/// to fixed sentinels — see the engine producer). `score` is the model's
+/// confidence (0..1) at the marked frame/utterance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Moment {
+    /// Milliseconds from session start.
+    pub t_ms: u64,
+    /// Marker kind: an event class (`laughter`, `applause`, …) or
+    /// `emotion:<label>`.
+    pub kind: String,
+    /// Speaker index of the source track. `me`/`others` tracks use the
+    /// sentinels in [`Moment::SPEAKER_ME`] / [`Moment::SPEAKER_OTHERS`].
+    pub speaker: i32,
+    /// Model confidence at the marked frame/utterance (0..1).
+    pub score: f32,
+}
+
+impl Moment {
+    /// Speaker sentinel for the local user's `me` track (no diarized index).
+    pub const SPEAKER_ME: i32 = -1;
+    /// Speaker sentinel for the undiarized `others` track.
+    pub const SPEAKER_OTHERS: i32 = -2;
+
+    /// Prefix that marks an emotion (vs. audio-event) moment.
+    pub const EMOTION_PREFIX: &'static str = "emotion:";
+
+    /// The emotion label if this is an `emotion:<label>` moment, else `None`.
+    pub fn emotion_label(&self) -> Option<&str> {
+        self.kind.strip_prefix(Self::EMOTION_PREFIX)
+    }
+
+    /// Whether this is an emotion moment (`emotion:*`) rather than an audio event.
+    pub fn is_emotion(&self) -> bool {
+        self.kind.starts_with(Self::EMOTION_PREFIX)
+    }
+}
+
 /// A recording session (one "call" or capture run).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {

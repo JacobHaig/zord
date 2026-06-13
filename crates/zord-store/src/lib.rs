@@ -6,7 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use zord_core::{
-    ItemKind, ItemStatus, Project, ProjectItem, ProjectStatus, Segment, Session, Source, Word,
+    ItemKind, ItemStatus, Moment, Project, ProjectItem, ProjectStatus, Segment, Session, Source,
+    Word,
 };
 
 /// Maximum number of raw samples kept per enrolled person. Older samples beyond
@@ -554,6 +555,13 @@ impl Store {
         // opened before Phase 45, though the schema migration creates it on open).
         let _ = self.conn.execute(
             "DELETE FROM chunk_embeddings WHERE session_id = ?1",
+            params![session_id],
+        );
+        // Phase 49: sentiment moments are derived from the audio against the
+        // (now-stale) segment spans; clear them too so the sentiment worker can
+        // re-produce them against the new transcript. Same best-effort handling.
+        let _ = self.conn.execute(
+            "DELETE FROM moments WHERE session_id = ?1",
             params![session_id],
         );
         Ok(())
@@ -1331,6 +1339,62 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 49: sentiment moments
+    // -----------------------------------------------------------------------
+
+    /// Replace all sentiment moments for a session (delete-then-insert in one
+    /// transaction). The sentiment worker re-produces the full set per run, so
+    /// this is idempotent — re-analysing a session never accumulates duplicates.
+    pub fn add_moments(&self, session_id: &str, moments: &[Moment]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM moments WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        for m in moments {
+            tx.execute(
+                "INSERT INTO moments (session_id, t_ms, kind, speaker, score)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, i64v(m.t_ms), m.kind, m.speaker, m.score as f64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// All sentiment moments for a session, ordered by time then kind.
+    pub fn moments(&self, session_id: &str) -> Result<Vec<Moment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t_ms, kind, speaker, score FROM moments
+             WHERE session_id = ?1 ORDER BY t_ms, kind",
+        )?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok(Moment {
+                t_ms: get_u64(r, 0)?,
+                kind: r.get::<_, String>(1)?,
+                speaker: r.get::<_, i32>(2)?,
+                score: r.get::<_, f64>(3)? as f32,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Session ids (ended, has at least one segment) that have NO moment rows —
+    /// the sentiment-backfill candidate list. Mirrors
+    /// [`sessions_missing_embeddings`].
+    pub fn sessions_missing_moments(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM sessions
+             WHERE ended_at IS NOT NULL
+               AND id IN (SELECT DISTINCT session_id FROM segments)
+               AND id NOT IN (SELECT DISTINCT session_id FROM moments)
+             ORDER BY started_at",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }
 
 /// Best-effort `ALTER TABLE`s for columns added after the base schema; each is
@@ -1546,6 +1610,22 @@ fn create_schema(conn: &Connection) -> Result<()> {
                 phrase      TEXT    NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_bookmarks_session ON bookmarks(session_id, t_ms);
+
+            -- Phase 49: sentiment "moments" — audio-prosody markers (laughter,
+            -- applause, persistent emotion, …) produced by the on-device ONNX
+            -- models, one row per marker. `kind` is an event class or
+            -- `emotion:<label>`; `speaker` is the source track's index (with the
+            -- me/others sentinels from zord_core::Moment). Written delete-then-
+            -- insert per session by the sentiment worker, and cleared on
+            -- re-transcribe (see clear_segments). Cascades on session delete.
+            CREATE TABLE IF NOT EXISTS moments (
+                session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                t_ms        INTEGER NOT NULL,
+                kind        TEXT    NOT NULL,
+                speaker     INTEGER NOT NULL,
+                score       REAL    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_moments_session ON moments(session_id, t_ms);
             "#,
     )?;
     Ok(())
@@ -2926,6 +3006,176 @@ mod bookmark_tests {
         // After deletion the session is gone — querying bookmarks for a
         // non-existent session returns an empty result (no row constraint on read).
         assert!(s.bookmarks("s1").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod moment_tests {
+    use super::*;
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zord-moment-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    fn mk_session(s: &Store, id: &str) {
+        s.create_session(&Session {
+            id: id.into(),
+            started_at: 1_000,
+            ended_at: Some(61_000),
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+            overview_folded_ms: None,
+        })
+        .unwrap();
+    }
+
+    fn mk_segment(s: &Store, id: &str) {
+        // sessions_missing_moments only lists sessions that have segments.
+        s.insert_segment(
+            id,
+            &Segment {
+                id: None,
+                source: Source::Me,
+                t_start_ms: 0,
+                t_end_ms: 1_000,
+                text: "hi".into(),
+                words: vec![],
+                speaker: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn m(t_ms: u64, kind: &str, speaker: i32, score: f32) -> Moment {
+        Moment {
+            t_ms,
+            kind: kind.into(),
+            speaker,
+            score,
+        }
+    }
+
+    #[test]
+    fn absent_returns_empty() {
+        let db = tmp_db("absent");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        assert!(s.moments("s1").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn add_and_query_ordered() {
+        let db = tmp_db("roundtrip");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        s.add_moments(
+            "s1",
+            &[
+                m(30_000, "laughter", 1, 0.9),
+                m(10_000, "applause", Moment::SPEAKER_OTHERS, 0.8),
+                m(20_000, "emotion:happy", Moment::SPEAKER_ME, 0.7),
+            ],
+        )
+        .unwrap();
+        let got = s.moments("s1").unwrap();
+        assert_eq!(got.len(), 3);
+        // Ordered by t_ms ascending.
+        assert_eq!(got[0].t_ms, 10_000);
+        assert_eq!(got[1].t_ms, 20_000);
+        assert_eq!(got[2].t_ms, 30_000);
+        assert_eq!(got[1].kind, "emotion:happy");
+        assert_eq!(got[1].speaker, Moment::SPEAKER_ME);
+        assert!((got[2].score - 0.9).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// add_moments is delete-then-insert: re-running replaces, never accumulates.
+    #[test]
+    fn replace_not_accumulate() {
+        let db = tmp_db("replace");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        s.add_moments(
+            "s1",
+            &[m(1_000, "laughter", 0, 0.9), m(2_000, "cough", 0, 0.5)],
+        )
+        .unwrap();
+        assert_eq!(s.moments("s1").unwrap().len(), 2);
+        s.add_moments("s1", &[m(3_000, "applause", 0, 0.8)])
+            .unwrap();
+        let got = s.moments("s1").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, "applause");
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn isolated_per_session() {
+        let db = tmp_db("isolated");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        mk_session(&s, "s2");
+        s.add_moments("s1", &[m(5_000, "laughter", 0, 0.9)])
+            .unwrap();
+        assert_eq!(s.moments("s1").unwrap().len(), 1);
+        assert!(s.moments("s2").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// ON DELETE CASCADE: moments vanish when the session is deleted.
+    #[test]
+    fn cascade_on_session_delete() {
+        let db = tmp_db("cascade");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        s.add_moments("s1", &[m(12_000, "laughter", 0, 0.9)])
+            .unwrap();
+        assert_eq!(s.moments("s1").unwrap().len(), 1);
+        s.delete_session("s1").unwrap();
+        assert!(s.moments("s1").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// clear_segments must also clear moments (re-transcribe invalidates them).
+    #[test]
+    fn clear_segments_clears_moments() {
+        let db = tmp_db("clear");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        s.add_moments("s1", &[m(1_000, "laughter", 0, 0.9)])
+            .unwrap();
+        s.clear_segments("s1").unwrap();
+        assert!(s.moments("s1").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// sessions_missing_moments lists only ended sessions that have segments
+    /// but no moments yet.
+    #[test]
+    fn missing_moments_candidates() {
+        let db = tmp_db("missing");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        mk_session(&s, "s2");
+        mk_segment(&s, "s1");
+        mk_segment(&s, "s2");
+        // Both have segments + no moments → both candidates.
+        let missing = s.sessions_missing_moments().unwrap();
+        assert!(missing.contains(&"s1".to_string()));
+        assert!(missing.contains(&"s2".to_string()));
+        // Give s1 a moment; it drops out of the candidate list.
+        s.add_moments("s1", &[m(1_000, "laughter", 0, 0.9)])
+            .unwrap();
+        let missing2 = s.sessions_missing_moments().unwrap();
+        assert!(!missing2.contains(&"s1".to_string()));
+        assert!(missing2.contains(&"s2".to_string()));
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

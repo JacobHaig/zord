@@ -427,6 +427,9 @@ pub struct TimelinePanelProps {
     pub highlight: Signal<Option<i64>>,
     /// Phase 47: `(t_ms, phrase)` bookmark list for the current session.
     pub bookmarks: Signal<Vec<(u64, String)>>,
+    /// Phase 49: sentiment moments for the current session (event + emotion
+    /// markers). Empty in non-`sentiment` builds (never populated).
+    pub moments: Signal<Vec<zord_core::Moment>>,
 }
 
 /// The collapsible bottom session timeline panel.
@@ -449,6 +452,7 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         engine,
         mut highlight,
         bookmarks,
+        moments,
     } = props;
 
     // Local state: are we playing or paused?
@@ -571,6 +575,10 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
 
     // Phase 47: snapshot bookmarks for rendering.
     let bkmarks_v = bookmarks.read().clone();
+
+    // Phase 49: snapshot moments for the moments lane (only ever populated in
+    // `sentiment` builds; an empty vec means the lane is not rendered).
+    let moments_v = moments.read().clone();
 
     // Loading state: panel was opened but lanes haven't arrived yet.
     if lanes_v.is_empty() {
@@ -1217,6 +1225,75 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                     }
                 }
             }
+
+            // ── Phase 49: sentiment moments lane ─────────────────────────────
+            // A thin row of emoji/colored ticks: warm amber for audio events
+            // (laughter/applause/…), cool teal for persistent-emotion marks.
+            // Clicking a tick seeks playback to that moment (same as a waveform
+            // click). Only rendered when moments exist (i.e. `sentiment` builds
+            // that have analysed the session).
+            if !moments_v.is_empty() && max_dur > 0 {
+                {
+                    let moments_render = moments_v.clone();
+                    rsx! {
+                        div {
+                            class: "tl-moment-lane",
+                            title: "Moments — click a marker to seek",
+                            svg {
+                                class: "tl-svg tl-svg-moments",
+                                view_box: "0 0 1500 18",
+                                preserve_aspect_ratio: "none",
+                                line {
+                                    x1: "0", y1: "17", x2: "1500", y2: "17",
+                                    stroke: "var(--border, #3a3a4a)",
+                                    stroke_width: "1",
+                                }
+                                for (i, m) in moments_render.iter().enumerate() {
+                                    {
+                                        let t = m.t_ms;
+                                        let frac = t as f64 / max_dur as f64;
+                                        let px = frac.clamp(0.0, 1.0) * 1500.0;
+                                        let (glyph, color, label) = moment_style(&m.kind);
+                                        let tip = format!("{label} — {} ({:.0}%)", fmt_ms(t), m.score * 100.0);
+                                        let mut seek_m = on_seek.clone();
+                                        rsx! {
+                                            text {
+                                                key: "moment-{i}-{t}",
+                                                class: "tl-moment-tick",
+                                                x: "{px}",
+                                                y: "13",
+                                                font_size: "12",
+                                                text_anchor: "middle",
+                                                fill: "{color}",
+                                                cursor: "pointer",
+                                                onclick: move |e: MouseEvent| {
+                                                    e.stop_propagation();
+                                                    seek_m(t as f64 / max_dur as f64);
+                                                },
+                                                "{glyph}"
+                                                title { "{tip}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                if pos_v.is_some() {
+                                    {
+                                        let px = (playhead_frac * 1500.0) as i32;
+                                        rsx! {
+                                            line {
+                                                x1: "{px}", y1: "0", x2: "{px}", y2: "18",
+                                                stroke: "white",
+                                                stroke_width: "1.5",
+                                                stroke_opacity: "0.6",
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1226,6 +1303,36 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
 fn fmt_ms(ms: u64) -> String {
     let s = ms / 1000;
     format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// Phase 49: glyph + color + human label for a moment kind. Event kinds get a
+/// distinct emoji + warm color; emotion kinds (`emotion:<label>`) share a
+/// cooler color and a face glyph so the two flavours read differently in the
+/// moments lane. Returns `(glyph, fill_color, human_label)`.
+fn moment_style(kind: &str) -> (&'static str, &'static str, String) {
+    if let Some(label) = kind.strip_prefix("emotion:") {
+        // Emotion ticks: cool teal, a face glyph per label.
+        let glyph = match label {
+            "happy" => "🙂",
+            "sad" => "🙁",
+            "angry" => "😠",
+            "fear" => "😨",
+            "disgust" => "😖",
+            _ => "💬",
+        };
+        return (glyph, "#4ec9b0", format!("Mood: {label}"));
+    }
+    // Audio-event ticks: warm amber, an emoji per event class.
+    let (glyph, label) = match kind {
+        "laughter" => ("😂", "Laughter"),
+        "applause" => ("👏", "Applause"),
+        "cheering" => ("🎉", "Cheering"),
+        "crying" => ("😢", "Crying"),
+        "cough" => ("🤧", "Cough"),
+        "sneeze" => ("🤧", "Sneeze"),
+        _ => ("•", "Event"),
+    };
+    (glyph, "#f4a259", label.to_string())
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────

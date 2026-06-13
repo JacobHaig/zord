@@ -1934,8 +1934,51 @@ profile detail pane (back button returns to the card grid).
   populate next time the user opens the session (which triggers
   `compute_and_cache_stats`)
 
-### Phase 49 — Sentiment "moments" (planned — audio-first, in the Timeline)
+### Phase 49 — Sentiment "moments" ✅ DONE (model-runtime + AudioSet indices need live verification)
 APPROVED (June 2026) — **audio prosody, no LLM**, markers in the Timeline.
+
+**Implemented (June 2026, behind the `sentiment` Cargo feature):**
+- ✅ `sentiment` feature on zord-gui pulls raw `ort` + `ndarray`, version-/feature-
+  matched to the `ort` `fastembed` (the `semantic` feature) already locks
+  (`=2.0.0-rc.12`, `default-features=false` + `ndarray,std,api-24,download-binaries,
+  tls-rustls`) so the workspace resolves to a SINGLE ONNX Runtime. Default build
+  stays green and pulls no `ort`.
+- ✅ Store: `moments(session_id,t_ms,kind,speaker,score)` + `add_moments`
+  (delete-then-insert), `moments()`, `sessions_missing_moments()`; cleared in
+  `clear_segments` (re-transcribe). Cascade + clear + roundtrip tests.
+- ✅ `zord_core::Moment` shared type (with `me`/`others` speaker sentinels +
+  `emotion:<label>` convention).
+- ✅ Engine: `AnalyzeCmd::{AnalyzeSession,BackfillAll}` + `sentiment_loop`
+  worker (drain no-op without the feature), auto-enqueued post-transcription
+  (feature + models-present gated, never auto-downloads), job-registered
+  "sentiment", dedupe via `jobs.is_running`. `Event::Moments` (session-guarded
+  apply, emitted on `DbCmd::Load` too).
+- ✅ Pure, unit-tested helpers (19 tests): `frame_to_t_ms`, `collapse_events`
+  (consecutive same-kind merge + max-gap debounce), `persistent_emotion`
+  (isolated spike suppressed / 3-in-a-row emitted / neutral never emitted /
+  changing-label + weak-score break), `normalize_waveform` (zero-mean/unit-var,
+  known vector + constant-signal-no-NaN), `argmax`/`softmax`, `merge_moments`
+  dedup/order, `track_speaker` mapping.
+- ✅ Timeline UI: a moments lane (emoji/colored ticks — amber audio events, teal
+  emotion faces; click→seek) + the Settings → AI "Analyze meeting moments"
+  backfill button. Gated behind `cfg!(feature="sentiment")`.
+- ✅ Gate: fmt + clippy (workspace default, `-p zord-gui --features sentiment`,
+  and the full feature combo) clean; all workspace tests green; the
+  `--features sentiment` build links onnxruntime on macOS arm64.
+- ⚠️ **Live verification required** (cannot run in CI — models don't download/run
+  there): the ONNX inference code (`sentiment.rs` `runtime` region) is written
+  against the canonical model contracts but UNVERIFIED against real I/O —
+  YAMNet input rank / output `[frames,521]` ordering and the SER `[1,N]`→logits
+  shape are flagged `LIVE-TEST`. The AudioSet class indices (Laughter=13,
+  Applause=62, Crying=19, Cough=42, Sneeze=44, Cheering=61) are verified against
+  the canonical `yamnet_class_map.csv`; the SER `id2label` is verified.
+- ⚠️ **YAMNet source unresolved**: the plan named STMicroelectronics/yamnet, but
+  that repo hosts only a mel-patch ESC-10 transfer variant — NOT a waveform→521
+  ONNX. `YAMNET_URL` is left empty (a flagged TODO) so the worker cleanly skips
+  the event pass until a verified Apache-2.0 waveform→521 YAMNet `.onnx` is
+  slotted in; the wav2vec2 SER URL is verified and wired. Emotion moments work
+  end-to-end once the SER model downloads; event moments await the YAMNet URL.
+
 **License gate result (June 2026): SenseVoiceSmall REJECTED** — its weights
 carry Alibaba's FunASR Model License ("reference and learning purposes
 only" + auto-revision clause + maintainers declined to confirm commercial

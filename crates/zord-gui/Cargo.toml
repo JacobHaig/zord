@@ -45,6 +45,12 @@ semantic = ["dep:fastembed"]
 # the GitHub / own-store channel — store builds (Steam/MS Store) must not
 # self-update (the store does it), so their release jobs omit this feature.
 self-update = ["dep:self-replace"]
+# Sentiment "moments" on the Timeline (Phase 49): audio-prosody markers derived
+# from two Apache-2.0 ONNX models run on the SAME `ort` runtime the `semantic`
+# feature already ships — YAMNet (audio events: laughter/applause/…) and a
+# wav2vec2-base speech-emotion model (persistent non-neutral emotion). No LLM.
+# Heavy build dep (ort/ONNX Runtime + ndarray) — hence opt-in.
+sentiment = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 zord-core = { workspace = true }
@@ -91,3 +97,15 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # hf-hub feature so fastembed does NOT pull in the HF HTTP client — we download
 # model files ourselves via zord-net so our proxy-aware agent is used.
 fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls"], optional = true }
+# Sentiment moments (Phase 49): raw ONNX Runtime + ndarray for YAMNet + wav2vec2.
+# The version + feature set MIRROR what `fastembed` (the `semantic` feature)
+# already pins in Cargo.lock so the whole workspace resolves to a SINGLE `ort`
+# build — no second ONNX Runtime. fastembed 5.16.1 pins `ort = "=2.0.0-rc.12"`
+# with default-features=false + ["ndarray","std","api-24"], and its
+# `ort-download-binaries-rustls-tls` path (which zord-gui selects above) adds
+# `ort/download-binaries` + `ort/tls-rustls`. We replicate exactly that union
+# here so enabling `sentiment` alongside `semantic` unifies to one feature set.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["ndarray", "std", "api-24", "download-binaries", "tls-rustls"], optional = true }
+# ndarray for shaping model I/O tensors. Pinned to the version fastembed/ort
+# already lock (0.17.2), default-features off to match fastembed's ndarray dep.
+ndarray = { version = "0.17.2", default-features = false, optional = true }

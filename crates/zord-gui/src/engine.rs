@@ -219,6 +219,14 @@ pub enum Event {
     /// Phase 48: person profile assembled from cross-session store data.
     /// Emitted in response to [`DbCmd::LoadProfile`].
     Profile(crate::profile::ProfileData),
+    /// Phase 49: sentiment "moments" for a session. Emitted on `DbCmd::Load`
+    /// and after the sentiment worker analyses a session. `id` lets the GUI
+    /// drop results for a session it is no longer viewing (like `Stats`).
+    #[allow(dead_code)] // payload read by the GUI only under `sentiment`
+    Moments {
+        id: String,
+        items: Vec<zord_core::Moment>,
+    },
 }
 
 /// One audio track's amplitude profile for the session timeline (Phase 42a/42d).
@@ -605,6 +613,18 @@ pub enum EmbedCmd {
     Query(String),
 }
 
+/// Commands for the sentiment-moments worker (Phase 49). Producer code
+/// (`#[cfg(feature = "sentiment")]`) is gated; the enum is always compiled so
+/// the Engine can hold the sender unconditionally (mirrors [`EmbedCmd`]).
+#[allow(dead_code)]
+pub enum AnalyzeCmd {
+    /// Analyse one ended session's audio for moments and persist them.
+    /// Auto-enqueued after post-stop transcription (feature + models gated).
+    AnalyzeSession(String),
+    /// Backfill all sessions missing moments. Job key "sentiment"; cancellable.
+    BackfillAll,
+}
+
 /// Registry of cancellable background jobs: job id → cooperative cancel flag.
 /// Workers register a token on start, poll it at safe checkpoints, and remove it
 /// on finish; the GUI flips it via [`Engine::cancel_job`]. Rust can't kill a
@@ -685,6 +705,10 @@ pub struct Engine {
     /// GUI can unconditionally call `embed_tx.send(…)` inside a `cfg!` block.
     #[allow(dead_code)]
     pub embed_tx: mpsc::Sender<EmbedCmd>,
+    /// Sentiment-moments worker (Phase 49). Always present so the GUI can
+    /// unconditionally send inside a `cfg!(feature = "sentiment")` block.
+    #[allow(dead_code)]
+    pub analyze_tx: mpsc::Sender<AnalyzeCmd>,
     /// Cancellable background-job registry (see [`Jobs`]).
     pub jobs: Jobs,
 }
@@ -730,6 +754,7 @@ impl Engine {
         let (summ_tx, summ_rx) = mpsc::channel::<SummCmd>();
         let (play_tx, play_rx) = mpsc::channel::<PlayCmd>();
         let (embed_tx, embed_rx) = mpsc::channel::<EmbedCmd>();
+        let (analyze_tx, analyze_rx) = mpsc::channel::<AnalyzeCmd>();
         let jobs = Jobs::default();
 
         {
@@ -737,10 +762,11 @@ impl Engine {
             let dbp = db_path.clone();
             let stx = summ_tx.clone();
             let etx = embed_tx.clone();
+            let atx = analyze_tx.clone();
             thread::spawn(move || {
                 let sup = ev.clone();
                 supervise("recorder", &sup, move || {
-                    control_loop(rec_rx, ev, dbp, stx, etx)
+                    control_loop(rec_rx, ev, dbp, stx, etx, atx)
                 });
             });
         }
@@ -749,9 +775,12 @@ impl Engine {
             let dbp = db_path.clone();
             let jobs = jobs.clone();
             let etx = embed_tx.clone();
+            let atx = analyze_tx.clone();
             thread::spawn(move || {
                 let sup = ev.clone();
-                supervise("database", &sup, move || db_loop(db_rx, ev, dbp, jobs, etx));
+                supervise("database", &sup, move || {
+                    db_loop(db_rx, ev, dbp, jobs, etx, atx)
+                });
             });
         }
         {
@@ -779,6 +808,19 @@ impl Engine {
             thread::spawn(move || {
                 let sup = ev.clone();
                 supervise("embed", &sup, move || embed_loop(embed_rx, ev, dbp, jobs));
+            });
+        }
+        {
+            // Phase 49 sentiment-moments worker. Non-`sentiment` builds drain
+            // the channel as a no-op (same shape as the embed worker).
+            let ev = ev_tx.clone();
+            let jobs = jobs.clone();
+            let dbp = db_path.clone();
+            thread::spawn(move || {
+                let sup = ev.clone();
+                supervise("sentiment", &sup, move || {
+                    sentiment_loop(analyze_rx, ev, dbp, jobs)
+                });
             });
         }
         {
@@ -814,6 +856,7 @@ impl Engine {
                 summ_tx,
                 play_tx,
                 embed_tx,
+                analyze_tx,
                 jobs,
             },
             ev_rx,
@@ -2052,6 +2095,7 @@ fn db_loop(
     db_path: PathBuf,
     jobs: Jobs,
     embed_tx: mpsc::Sender<EmbedCmd>,
+    #[allow(unused_variables)] analyze_tx: mpsc::Sender<AnalyzeCmd>,
 ) {
     let store = match Store::open(&db_path) {
         Ok(s) => s,
@@ -2117,6 +2161,12 @@ fn db_loop(
                 let _ = ev.send(Event::Bookmarks {
                     id: id.clone(),
                     items,
+                });
+                // Phase 49: emit sentiment moments for the timeline lane.
+                let moments = store.moments(&id).unwrap_or_default();
+                let _ = ev.send(Event::Moments {
+                    id: id.clone(),
+                    items: moments,
                 });
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
@@ -2362,11 +2412,12 @@ fn db_loop(
                 let db_path = db_path.clone();
                 let jobs = jobs.clone();
                 let etx = embed_tx.clone();
+                let atx = analyze_tx.clone();
                 thread::spawn(move || {
                     let jid = format!("retranscribe:{id}");
                     let token = jobs.begin(&ev, &jid, "retranscribe", "Re-transcribing meeting");
                     supervise("retranscribe", &ev, || {
-                        retranscribe_session_ondemand(&db_path, &id, &ev, &token, &etx)
+                        retranscribe_session_ondemand(&db_path, &id, &ev, &token, &etx, &atx)
                     });
                     jobs.end(&ev, &jid);
                 });
@@ -3164,6 +3215,263 @@ fn embed_loop_impl(
                     }
                 }
                 let _ = ev.send(Event::SearchResults(results));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 49: sentiment-moments worker
+// ---------------------------------------------------------------------------
+
+/// Sentiment worker: analyses a session's per-speaker audio for moments.
+/// Non-`sentiment` builds compile to a drain loop (channel consumed, no-op),
+/// mirroring [`embed_loop`].
+fn sentiment_loop(
+    rx: mpsc::Receiver<AnalyzeCmd>,
+    #[allow(unused_variables)] ev: UnboundedSender<Event>,
+    #[allow(unused_variables)] db_path: PathBuf,
+    #[allow(unused_variables)] jobs: Jobs,
+) {
+    #[cfg(not(feature = "sentiment"))]
+    {
+        while rx.recv().is_ok() {}
+    }
+
+    #[cfg(feature = "sentiment")]
+    sentiment_loop_impl(rx, ev, db_path, jobs);
+}
+
+#[cfg(feature = "sentiment")]
+fn sentiment_loop_impl(
+    rx: mpsc::Receiver<AnalyzeCmd>,
+    ev: UnboundedSender<Event>,
+    db_path: PathBuf,
+    jobs: Jobs,
+) {
+    use crate::sentiment;
+    use zord_core::Moment;
+
+    /// Ensure both models are downloaded (explicit-request path only). Returns
+    /// `true` if BOTH are present afterward. Emits notices on download/skip.
+    fn ensure_models(ev: &UnboundedSender<Event>) -> bool {
+        // YAMNet: may be unavailable (no verified URL — see sentiment.rs).
+        match sentiment::ensure_yamnet(&mut |_, _| {}) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = ev.send(Event::Notice(
+                    "Audio-event model (YAMNet) is unavailable — only speech-emotion \
+                     moments will be produced. See logs."
+                        .to_string(),
+                ));
+            }
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("YAMNet download failed: {e}")));
+            }
+        }
+        match sentiment::ensure_ser(&mut |_, _| {}) {
+            Ok(true) => true,
+            Ok(false) => {
+                let _ = ev.send(Event::Notice(
+                    "Speech-emotion model is unavailable; cannot analyse moments.".to_string(),
+                ));
+                false
+            }
+            Err(e) => {
+                let _ = ev.send(Event::Notice(format!("Emotion model download failed: {e}")));
+                false
+            }
+        }
+    }
+
+    /// Analyse one session's per-speaker tracks and persist its moments.
+    /// Returns `true` on success (even if zero moments were found).
+    ///
+    /// LIVE-TEST: the whole body past the per-track loop runs real ONNX
+    /// inference and cannot be exercised in CI.
+    fn analyze_session(session_id: &str, store: &Store, ev: &UnboundedSender<Event>) -> bool {
+        let prefix = match store.get_session(session_id).ok().flatten() {
+            Some(s) => match s.audio_path {
+                Some(p) => p,
+                None => {
+                    // No retained audio — nothing to analyse; clear any stale rows.
+                    let _ = store.add_moments(session_id, &[]);
+                    return true;
+                }
+            },
+            None => return false,
+        };
+
+        // Lazily load whichever models are present. YAMNet is optional.
+        let mut yamnet = if sentiment::yamnet_present() {
+            sentiment::Yamnet::load().ok()
+        } else {
+            None
+        };
+        let mut ser = sentiment::Ser::load().ok();
+
+        let segments = store.segments(session_id).unwrap_or_default();
+        let mut all_parts: Vec<Vec<Moment>> = Vec::new();
+
+        for (suffix, path) in discover_session_tracks(&prefix) {
+            let speaker = sentiment::track_speaker(&suffix);
+
+            // ---- Events (YAMNet over the whole track) ----------------------
+            if let Some(y) = yamnet.as_mut() {
+                match zord_audio::read_audio_mono_16k(&path) {
+                    Ok(wav) => match y.events(&wav) {
+                        Ok(hits) => {
+                            let moments = sentiment::collapse_events(
+                                &hits,
+                                sentiment::YAMNET_HOP_MS,
+                                sentiment::EVENT_COLLAPSE_MAX_GAP_MS,
+                                speaker,
+                            );
+                            all_parts.push(moments);
+                        }
+                        Err(e) => tracing::warn!("sentiment: yamnet {suffix}: {e}"),
+                    },
+                    Err(e) => tracing::warn!("sentiment: read {suffix}: {e}"),
+                }
+            }
+
+            // ---- Emotion (wav2vec2 per utterance for THIS track) -----------
+            if let Some(s) = ser.as_mut() {
+                let utts = track_emotion_utterances(s, &path, &segments, &suffix);
+                let moments = sentiment::persistent_emotion(
+                    &utts,
+                    sentiment::EMOTION_PERSIST_N,
+                    sentiment::EMOTION_MIN_SCORE,
+                    speaker,
+                );
+                all_parts.push(moments);
+            }
+        }
+
+        let merged = sentiment::merge_moments(all_parts);
+        if let Err(e) = store.add_moments(session_id, &merged) {
+            tracing::warn!("sentiment: store moments {session_id}: {e}");
+            return false;
+        }
+        let _ = ev.send(Event::Moments {
+            id: session_id.to_string(),
+            items: merged,
+        });
+        true
+    }
+
+    /// Classify the utterances belonging to one track. Each segment that maps
+    /// to this track contributes a `(t_start_ms, label, score)` triple, with
+    /// the segment's audio span read from `path` (capped to the SER window).
+    ///
+    /// Track→segment mapping: `me` → `Source::Me`; `others` → `Source::Others`
+    /// with no diarized speaker; `spk-N` → `Source::Others` with `speaker==N`.
+    ///
+    /// LIVE-TEST: runs the SER model on each utterance.
+    fn track_emotion_utterances(
+        ser: &mut sentiment::Ser,
+        path: &std::path::Path,
+        segments: &[zord_core::Segment],
+        suffix: &str,
+    ) -> Vec<(u64, usize, f32)> {
+        use zord_core::Source;
+        let want = |seg: &zord_core::Segment| -> bool {
+            match suffix {
+                "me" => seg.source == Source::Me,
+                "others" => seg.source == Source::Others && seg.speaker.is_none(),
+                other => {
+                    let idx = other
+                        .strip_prefix("spk-")
+                        .and_then(|n| n.parse::<i32>().ok());
+                    seg.source == Source::Others && seg.speaker == idx
+                }
+            }
+        };
+        let mut out = Vec::new();
+        for seg in segments.iter().filter(|s| want(s)) {
+            let cap_end = seg
+                .t_start_ms
+                .saturating_add(sentiment::SER_UTTERANCE_CAP_MS)
+                .min(seg.t_end_ms.max(seg.t_start_ms + 1));
+            let samples = match zord_audio::read_audio_slice_ms(path, seg.t_start_ms, cap_end) {
+                Ok((s, _rate)) => s,
+                Err(e) => {
+                    tracing::warn!("sentiment: slice {suffix} @{}: {e}", seg.t_start_ms);
+                    continue;
+                }
+            };
+            if samples.is_empty() {
+                continue;
+            }
+            match ser.classify(&samples) {
+                Ok((label, score)) => out.push((seg.t_start_ms, label, score)),
+                Err(e) => tracing::warn!("sentiment: classify {suffix}: {e}"),
+            }
+        }
+        out
+    }
+
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            AnalyzeCmd::AnalyzeSession(session_id) => {
+                // Silent no-op if models aren't downloaded — Backfill is the
+                // explicit download entry point (mirrors the embed worker).
+                if !sentiment::ser_present() {
+                    continue;
+                }
+                let jid = format!("sentiment:{session_id}");
+                if jobs.is_running(&jid) {
+                    continue;
+                }
+                let _token = jobs.begin(&ev, &jid, "sentiment", "Analyzing meeting moments");
+                if let Ok(store) = Store::open(&db_path) {
+                    analyze_session(&session_id, &store, &ev);
+                }
+                jobs.end(&ev, &jid);
+            }
+
+            AnalyzeCmd::BackfillAll => {
+                let jid = "sentiment";
+                if jobs.is_running(jid) {
+                    continue;
+                }
+                let token = jobs.begin(&ev, jid, "sentiment", "Analyzing meeting moments");
+                if !sentiment::ser_present() || !sentiment::yamnet_present() {
+                    let _ = ev.send(Event::Notice(
+                        "Downloading sentiment models (first run; on-device, audio-prosody)…"
+                            .to_string(),
+                    ));
+                    if !ensure_models(&ev) {
+                        jobs.end(&ev, jid);
+                        continue;
+                    }
+                }
+                let Ok(store) = Store::open(&db_path) else {
+                    jobs.end(&ev, jid);
+                    continue;
+                };
+                let missing = store.sessions_missing_moments().unwrap_or_default();
+                let total = missing.len();
+                if total == 0 {
+                    let _ = ev.send(Event::Notice("Meeting moments are up to date.".to_string()));
+                } else {
+                    let _ = ev.send(Event::Notice(format!(
+                        "Analyzing moments for {total} session(s)…"
+                    )));
+                    let mut done = 0usize;
+                    for sid in missing {
+                        if cancelled(&token) {
+                            break;
+                        }
+                        if analyze_session(&sid, &store, &ev) {
+                            done += 1;
+                        }
+                    }
+                    let _ = ev.send(Event::Notice(format!(
+                        "Meeting moments analyzed ({done}/{total} sessions)."
+                    )));
+                }
+                jobs.end(&ev, jid);
             }
         }
     }
@@ -4281,6 +4589,7 @@ fn control_loop(
     db_path: PathBuf,
     summ_tx: mpsc::Sender<SummCmd>,
     embed_tx: mpsc::Sender<EmbedCmd>,
+    analyze_tx: mpsc::Sender<AnalyzeCmd>,
 ) {
     // Active microphone *test* (setup wizard) between sessions: the capture
     // source plus the stop flag of its level-pump thread. Dropped (capture
@@ -4377,9 +4686,17 @@ fn control_loop(
                     || std::env::var("ZORD_DISCORD").is_ok()
                     || std::env::var("ZORD_FAKE_INTEGRATION").is_ok();
                 let ended = if integration {
-                    run_integration_session(opts, &rx, &ev, &db_path, &summ_tx, &embed_tx)
+                    run_integration_session(
+                        opts,
+                        &rx,
+                        &ev,
+                        &db_path,
+                        &summ_tx,
+                        &embed_tx,
+                        &analyze_tx,
+                    )
                 } else {
-                    run_session(opts, &rx, &ev, &db_path, &summ_tx, &embed_tx)
+                    run_session(opts, &rx, &ev, &db_path, &summ_tx, &embed_tx, &analyze_tx)
                 };
                 if ended {
                     break; // session ended due to Shutdown
@@ -4466,6 +4783,7 @@ fn run_session(
     db_path: &PathBuf,
     summ_tx: &mpsc::Sender<SummCmd>,
     #[allow(unused_variables)] embed_tx: &mpsc::Sender<EmbedCmd>,
+    #[allow(unused_variables)] analyze_tx: &mpsc::Sender<AnalyzeCmd>,
 ) -> bool {
     let SessionOpts {
         model,
@@ -4890,6 +5208,15 @@ fn run_session(
     if post_pass || live {
         let _ = embed_tx.send(EmbedCmd::EmbedSession(session_id.clone()));
     }
+    // Auto-analyse moments (Phase 49): same trigger as auto-embed, but only
+    // when the audio is being kept (the sentiment worker reads the per-track
+    // WAVs) AND both ONNX models are already downloaded — we never auto-trigger
+    // a model download (the Settings "Analyze meeting moments" button is the
+    // explicit download entry point). Gated on the `sentiment` feature.
+    #[cfg(feature = "sentiment")]
+    if (post_pass || live) && persist_audio && crate::sentiment::models_present() {
+        let _ = analyze_tx.send(AnalyzeCmd::AnalyzeSession(session_id.clone()));
+    }
     if !persist_audio {
         if let Some(wav) = others_wav.as_ref() {
             let _ = std::fs::remove_file(wav);
@@ -4927,6 +5254,7 @@ fn run_integration_session(
     db_path: &PathBuf,
     summ_tx: &mpsc::Sender<SummCmd>,
     #[allow(unused_variables)] embed_tx: &mpsc::Sender<EmbedCmd>,
+    #[allow(unused_variables)] analyze_tx: &mpsc::Sender<AnalyzeCmd>,
 ) -> bool {
     // No mic/desktop capture in integration mode — all audio (Me included) comes
     // from the platform's per-participant streams.
@@ -5329,6 +5657,13 @@ fn run_integration_session(
     if post_pass || live {
         let _ = embed_tx.send(EmbedCmd::EmbedSession(session_id.clone()));
     }
+    // Auto-analyse moments (Phase 49 — same as run_session). Integration
+    // sessions always retain their per-speaker tracks, so no persist gate;
+    // still gated on both models being present (no auto-download).
+    #[cfg(feature = "sentiment")]
+    if (post_pass || live) && crate::sentiment::models_present() {
+        let _ = analyze_tx.send(AnalyzeCmd::AnalyzeSession(session_id.clone()));
+    }
 
     #[cfg(feature = "voiceprints")]
     enroll_integration_tracks(&store, &session_id, &session_dir, ev);
@@ -5482,6 +5817,7 @@ fn retranscribe_session_ondemand(
     ev: &UnboundedSender<Event>,
     token: &Arc<AtomicBool>,
     #[allow(unused_variables)] embed_tx: &mpsc::Sender<EmbedCmd>,
+    #[allow(unused_variables)] analyze_tx: &mpsc::Sender<AnalyzeCmd>,
 ) {
     let done = |ev: &UnboundedSender<Event>| {
         let _ = ev.send(Event::Retranscribed);
@@ -5545,6 +5881,13 @@ fn retranscribe_session_ondemand(
     #[cfg(feature = "semantic")]
     if ok {
         let _ = embed_tx.send(EmbedCmd::EmbedSession(session_id.to_string()));
+    }
+    // Auto-analyse moments after re-transcription (Phase 49). clear_segments
+    // already wiped the stale moments; re-produce against the new transcript
+    // when both models are present (no auto-download).
+    #[cfg(feature = "sentiment")]
+    if ok && crate::sentiment::models_present() {
+        let _ = analyze_tx.send(AnalyzeCmd::AnalyzeSession(session_id.to_string()));
     }
     done(ev)
 }

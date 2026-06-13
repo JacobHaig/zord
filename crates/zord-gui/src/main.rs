@@ -6,6 +6,7 @@ mod engine;
 mod osutil;
 mod overview;
 mod profile;
+mod sentiment;
 mod speakers;
 mod timeline;
 #[cfg(feature = "self-update")]
@@ -15,8 +16,8 @@ mod wizard;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use engine::{
-    AudioFiles, ChatScope, DbCmd, EmbedCmd, Engine, Event, ModelCmd, ModelInfo, PlayCmd,
-    RecorderCmd, Status, SummCmd, TimelineLane,
+    AnalyzeCmd, AudioFiles, ChatScope, DbCmd, EmbedCmd, Engine, Event, ModelCmd, ModelInfo,
+    PlayCmd, RecorderCmd, Status, SummCmd, TimelineLane,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -514,6 +515,11 @@ fn MainApp() -> Element {
     // Cleared on session change; populated by Event::Bookmarks.
     let mut bookmarks = use_signal(Vec::<(u64, String)>::new);
 
+    // Phase 49: sentiment moments for the currently viewed session. Cleared on
+    // session change; populated by Event::Moments (emitted on session load and
+    // after the sentiment worker runs). Only meaningful in `sentiment` builds.
+    let mut moments = use_signal(Vec::<zord_core::Moment>::new);
+
     // Phase 48: person profile. `None` = grid view; `Some(data)` = detail pane.
     // Set to None whenever the Speakers view is left (navigating to another
     // view clears it; cleared on the `on_open_session` path too).
@@ -732,6 +738,15 @@ fn MainApp() -> Element {
                         && live_session_id.peek().as_deref() == Some(&id);
                     if is_viewed || is_live_viewed {
                         bookmarks.set(items);
+                    }
+                }
+
+                // Phase 49: sentiment moments — session-guarded apply (like
+                // Stats). Only update when the event's session is on screen, so
+                // a backfill of other sessions never disturbs the current view.
+                Event::Moments { id, items } => {
+                    if matches!(&*view.peek(), View::Session(cur) if *cur == id) {
+                        moments.set(items);
                     }
                 }
 
@@ -1156,6 +1171,8 @@ fn MainApp() -> Element {
             session_stats.set(None);
             // Phase 47: clear bookmarks on session switch (fresh load will repopulate).
             bookmarks.set(Vec::new());
+            // Phase 49: clear moments on session switch (fresh load repopulates).
+            moments.set(Vec::new());
             // Phase 48: leaving the Speakers view (opening a session) clears the profile.
             person_profile.set(None);
             profile_loading.set(false);
@@ -1189,6 +1206,8 @@ fn MainApp() -> Element {
             session_stats.set(None);
             // Phase 47: clear saved-session bookmarks when returning to live.
             bookmarks.set(Vec::new());
+            // Phase 49: clear moments when returning to live.
+            moments.set(Vec::new());
             view.set(View::Live);
             summary.set(None);
             compressed.set(None);
@@ -1563,6 +1582,7 @@ fn MainApp() -> Element {
                                 engine: engine.clone(),
                                 highlight: highlight_seg,
                                 bookmarks,
+                                moments,
                             }
                         }
                     } else {
@@ -3661,6 +3681,30 @@ fn AiSettings(
                                                                     }
                                                                 }
                                                                 p { class: "field-note", "Downloads the model on first run. Indexing runs in the background; you can use the app normally. Re-run after adding new sessions." }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Phase 49: sentiment-moments backfill.
+                                                if cfg!(feature = "sentiment") {
+                                                    {
+                                                        let engine_sent = engine.clone();
+                                                        rsx! {
+                                                            div { class: "settings-subsection",
+                                                                h4 { "Meeting moments" }
+                                                                p { class: "field-note",
+                                                                    "Marks moments on the Timeline from audio prosody — laughter, applause, and stretches of persistent emotion — labeled per speaker. Fully on-device; nothing is sent anywhere."
+                                                                }
+                                                                div { class: "btn-row",
+                                                                    button {
+                                                                        class: "mbtn ghost",
+                                                                        onclick: move |_| {
+                                                                            let _ = engine_sent.analyze_tx.send(AnalyzeCmd::BackfillAll);
+                                                                        },
+                                                                        "Analyze meeting moments"
+                                                                    }
+                                                                }
+                                                                p { class: "field-note", "Downloads ~2 small ONNX models on first run (audio-event + speech-emotion). Analysis runs in the background; re-run after adding new sessions." }
                                                             }
                                                         }
                                                     }
