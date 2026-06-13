@@ -1934,8 +1934,18 @@ profile detail pane (back button returns to the card grid).
   populate next time the user opens the session (which triggers
   `compute_and_cache_stats`)
 
-### Phase 49 — Sentiment "moments" ✅ DONE (model-runtime + AudioSet indices need live verification)
+### Phase 49 — Sentiment "moments" ✅ DONE — EMOTION-ONLY (audio events deferred; model-runtime needs live verification)
 APPROVED (June 2026) — **audio prosody, no LLM**, markers in the Timeline.
+
+**Scope decision (June 2026): SHIP EMOTION-ONLY.** The persistent-emotion
+(wav2vec2-base SER) path ships end-to-end — its Apache-2.0 ONNX is verified and
+wired. The audio-event (YAMNet: laughter/applause/…) path is **DEFERRED**: no
+Apache-2.0 *pre-built* waveform→521-class YAMNet ONNX exists (the
+STMicroelectronics/yamnet repo only carries a mel-patch ESC-10 transfer
+variant). `YAMNET_URL` is intentionally empty so the worker cleanly skips the
+event pass; emotion moments are unaffected. Unlocking events requires
+self-converting Google's TF YAMNet (Apache-2.0) to ONNX and self-hosting it
+(see the cross-cutting follow-up note in §10/backlog).
 
 **Implemented (June 2026, behind the `sentiment` Cargo feature):**
 - ✅ `sentiment` feature on zord-gui pulls raw `ort` + `ndarray`, version-/feature-
@@ -1953,31 +1963,34 @@ APPROVED (June 2026) — **audio prosody, no LLM**, markers in the Timeline.
   (feature + models-present gated, never auto-downloads), job-registered
   "sentiment", dedupe via `jobs.is_running`. `Event::Moments` (session-guarded
   apply, emitted on `DbCmd::Load` too).
-- ✅ Pure, unit-tested helpers (19 tests): `frame_to_t_ms`, `collapse_events`
+- ✅ Pure, unit-tested helpers (22 tests): `frame_to_t_ms`, `collapse_events`
   (consecutive same-kind merge + max-gap debounce), `persistent_emotion`
   (isolated spike suppressed / 3-in-a-row emitted / neutral never emitted /
   changing-label + weak-score break), `normalize_waveform` (zero-mean/unit-var,
-  known vector + constant-signal-no-NaN), `argmax`/`softmax`, `merge_moments`
-  dedup/order, `track_speaker` mapping.
+  known vector + constant-signal-no-NaN), `resample_mono_to_16k` (16k
+  passthrough / 48k→~16k downsample / empty), `argmax`/`softmax`,
+  `merge_moments` dedup/order, `track_speaker` mapping.
+- ✅ SER utterances are resampled to 16 kHz before classification. The slice
+  reader returns NATIVE-rate audio (44.1/48 kHz); wav2vec2-base needs 16 kHz and
+  does no resampling, so the engine now resamples each utterance via
+  `resample_mono_to_16k` (reusing `zord_audio::MonoResampler`). Without this the
+  model perceived ~3× the real duration → garbage labels.
 - ✅ Timeline UI: a moments lane (emoji/colored ticks — amber audio events, teal
   emotion faces; click→seek) + the Settings → AI "Analyze meeting moments"
   backfill button. Gated behind `cfg!(feature="sentiment")`.
 - ✅ Gate: fmt + clippy (workspace default, `-p zord-gui --features sentiment`,
   and the full feature combo) clean; all workspace tests green; the
   `--features sentiment` build links onnxruntime on macOS arm64.
-- ⚠️ **Live verification required** (cannot run in CI — models don't download/run
-  there): the ONNX inference code (`sentiment.rs` `runtime` region) is written
-  against the canonical model contracts but UNVERIFIED against real I/O —
-  YAMNet input rank / output `[frames,521]` ordering and the SER `[1,N]`→logits
-  shape are flagged `LIVE-TEST`. The AudioSet class indices (Laughter=13,
-  Applause=62, Crying=19, Cough=42, Sneeze=44, Cheering=61) are verified against
-  the canonical `yamnet_class_map.csv`; the SER `id2label` is verified.
-- ⚠️ **YAMNet source unresolved**: the plan named STMicroelectronics/yamnet, but
-  that repo hosts only a mel-patch ESC-10 transfer variant — NOT a waveform→521
-  ONNX. `YAMNET_URL` is left empty (a flagged TODO) so the worker cleanly skips
-  the event pass until a verified Apache-2.0 waveform→521 YAMNet `.onnx` is
-  slotted in; the wav2vec2 SER URL is verified and wired. Emotion moments work
-  end-to-end once the SER model downloads; event moments await the YAMNet URL.
+- ⚠️ **Live verification required for emotion** (cannot run in CI — the SER model
+  doesn't download/run there): the SER inference (`sentiment.rs` `runtime`
+  region) is written against the canonical wav2vec2 contract — `[1,N]`→logits —
+  but the exact input rank / output shape is flagged `LIVE-TEST`. The SER
+  `id2label` (0=sad,1=angry,2=disgust,3=fear,4=happy,5=neutral) is verified.
+- ⚠️ **Audio events DEFERRED (not shipping)**: `YAMNET_URL` is empty; the event
+  pass cleanly self-skips. The AudioSet indices (Laughter=13, Applause=62,
+  Crying=19, Cough=42, Sneeze=44, Cheering=61) are already verified against the
+  canonical `yamnet_class_map.csv` and the YAMNet runtime is written against the
+  waveform→`[frames,521]` contract — both wait only on a self-hosted ONNX.
 
 **License gate result (June 2026): SenseVoiceSmall REJECTED** — its weights
 carry Alibaba's FunASR Model License ("reference and learning purposes
@@ -2022,6 +2035,9 @@ retrieval) proves itself first.
    Cached locally thereafter → fully offline.
 4. **CUDA in releases** — ship CUDA builds, or CPU-only + "build from source for
    GPU"? CUDA build matrix adds CI complexity.
+5. **Phase 49 follow-up: self-convert YAMNet (Apache-2.0 TF source) → ONNX, host
+   on the release page, set `YAMNET_URL`** — unlocks laughter/applause event
+   moments (the runtime + verified AudioSet indices are already in place).
 
 ---
 

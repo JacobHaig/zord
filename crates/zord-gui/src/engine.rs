@@ -3393,13 +3393,21 @@ fn sentiment_loop_impl(
                 .t_start_ms
                 .saturating_add(sentiment::SER_UTTERANCE_CAP_MS)
                 .min(seg.t_end_ms.max(seg.t_start_ms + 1));
-            let samples = match zord_audio::read_audio_slice_ms(path, seg.t_start_ms, cap_end) {
-                Ok((s, _rate)) => s,
-                Err(e) => {
-                    tracing::warn!("sentiment: slice {suffix} @{}: {e}", seg.t_start_ms);
-                    continue;
-                }
-            };
+            // `read_audio_slice_ms` returns samples at the track's NATIVE rate;
+            // wav2vec2-base needs 16 kHz and `classify` does not resample, so
+            // resample here before handing the utterance to the model.
+            let (native, rate) =
+                match zord_audio::read_audio_slice_ms(path, seg.t_start_ms, cap_end) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!("sentiment: slice {suffix} @{}: {e}", seg.t_start_ms);
+                        continue;
+                    }
+                };
+            if native.is_empty() {
+                continue;
+            }
+            let samples = sentiment::resample_mono_to_16k(&native, rate);
             if samples.is_empty() {
                 continue;
             }

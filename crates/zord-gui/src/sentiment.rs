@@ -129,6 +129,11 @@ pub const EMOTION_MIN_SCORE: f32 = 0.6;
 /// whether a longer or centered window classifies better).
 pub const SER_UTTERANCE_CAP_MS: u64 = 30_000;
 
+/// Sample rate wav2vec2-base SER expects (16 kHz). Utterance slices are read at
+/// the track's NATIVE rate, so they MUST be resampled to this before
+/// classification (see [`resample_mono_to_16k`]); the model does no resampling.
+pub const SER_SAMPLE_RATE: u32 = 16_000;
+
 // ===========================================================================
 // Pure functions (UNIT-TESTED) — no model, no I/O
 // ===========================================================================
@@ -280,6 +285,36 @@ pub fn normalize_waveform(samples: &[f32]) -> Vec<f32> {
         return samples.iter().map(|x| x - mean).collect();
     }
     samples.iter().map(|x| (x - mean) / std).collect()
+}
+
+/// Resample a MONO `f32` waveform from `src_rate` to 16 kHz for the SER model.
+///
+/// `read_audio_slice_ms` returns samples at the track's NATIVE rate
+/// (44.1/48 kHz), but wav2vec2-base expects 16 kHz and `Ser::classify` does NOT
+/// resample — feeding native-rate audio makes the model perceive ~3× the real
+/// duration and produces garbage labels. This wraps the same streaming
+/// [`zord_audio::MonoResampler`] used by the compression/diarize paths
+/// (channels = 1 since the input is already mono).
+///
+/// A rate that already equals 16 kHz is returned unchanged (the resampler
+/// short-circuits). On resampler error the input is returned as-is and the
+/// error logged — better to classify slightly-off audio than to drop the
+/// utterance silently. (The streaming resampler may drop a sub-chunk tail; for
+/// a multi-second utterance that's negligible.)
+pub fn resample_mono_to_16k(samples: &[f32], src_rate: u32) -> Vec<f32> {
+    if src_rate == SER_SAMPLE_RATE || samples.is_empty() {
+        return samples.to_vec();
+    }
+    match zord_audio::MonoResampler::to_rate(src_rate, 1, SER_SAMPLE_RATE)
+        .and_then(|mut r| r.process(samples))
+    {
+        Ok(out) if !out.is_empty() => out,
+        Ok(_) => samples.to_vec(), // resampler buffered everything (tiny input)
+        Err(e) => {
+            tracing::warn!("sentiment: SER resample {src_rate}->16k failed: {e}");
+            samples.to_vec()
+        }
+    }
 }
 
 /// Argmax of a logits/score slice → `(index, value)`. Returns `None` for an
@@ -797,6 +832,39 @@ mod tests {
     #[test]
     fn normalize_empty() {
         assert!(normalize_waveform(&[]).is_empty());
+    }
+
+    // ---- resample_mono_to_16k ----------------------------------------------
+    #[test]
+    fn resample_16k_passthrough() {
+        // Already 16 kHz → returned unchanged (no resampler, no length change).
+        let s: Vec<f32> = (0..8_000).map(|i| (i as f32 * 0.01).sin()).collect();
+        let out = resample_mono_to_16k(&s, SER_SAMPLE_RATE);
+        assert_eq!(out.len(), s.len());
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn resample_48k_downsamples_to_16k() {
+        // 1 second of 48 kHz mono (48_000 samples) → ~16_000 samples at 16 kHz.
+        // This is THE bug guard: a native-rate utterance MUST be ~1/3 length
+        // before classify, not fed at 48 kHz (which the model would read as ~3×
+        // the real duration). Allow a small streaming-tail tolerance.
+        let s: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.005).sin()).collect();
+        let out = resample_mono_to_16k(&s, 48_000);
+        assert!(
+            (15_000..=16_100).contains(&out.len()),
+            "48k→16k should yield ~16000 samples, got {}",
+            out.len()
+        );
+        // And it must be far shorter than the native input (the defect would
+        // have left it at ~48000).
+        assert!(out.len() < s.len() / 2);
+    }
+
+    #[test]
+    fn resample_empty_input() {
+        assert!(resample_mono_to_16k(&[], 48_000).is_empty());
     }
 
     // ---- argmax / softmax --------------------------------------------------
