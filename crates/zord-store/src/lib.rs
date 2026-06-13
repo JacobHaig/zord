@@ -801,6 +801,21 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
 
+    /// Return the speaker index linked to `voiceprint_id` in `session_id`, or
+    /// `None` when no such row exists.  Used by Phase 48 profile assembly.
+    pub fn speaker_idx_for_voiceprint(
+        &self,
+        session_id: &str,
+        voiceprint_id: i64,
+    ) -> Result<Option<i32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT speaker FROM speaker_names \
+             WHERE session_id = ?1 AND voiceprint_id = ?2 LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![session_id, voiceprint_id], |r| r.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     /// Tag which speaker index is the app user themself. Integration sessions
     /// record every participant as a uniform `spk-N` track; this marks the one
     /// matching the configured platform user ID (styling/perspective only).

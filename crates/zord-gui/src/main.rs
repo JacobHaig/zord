@@ -5,6 +5,7 @@
 mod engine;
 mod osutil;
 mod overview;
+mod profile;
 mod speakers;
 mod timeline;
 #[cfg(feature = "self-update")]
@@ -513,6 +514,13 @@ fn MainApp() -> Element {
     // Cleared on session change; populated by Event::Bookmarks.
     let mut bookmarks = use_signal(Vec::<(u64, String)>::new);
 
+    // Phase 48: person profile. `None` = grid view; `Some(data)` = detail pane.
+    // Set to None whenever the Speakers view is left (navigating to another
+    // view clears it; cleared on the `on_open_session` path too).
+    let mut person_profile: Signal<Option<profile::ProfileData>> = use_signal(|| None);
+    // `true` while the profile request is in flight (after clicking a name).
+    let mut profile_loading = use_signal(|| false);
+
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
         let initial = settings.peek().clone();
@@ -704,6 +712,13 @@ fn MainApp() -> Element {
                     if matches!(&*view.peek(), View::Session(cur) if *cur == id) {
                         session_stats.set(Some(stats));
                     }
+                }
+
+                // Phase 48: person profile — unguarded (single profile signal;
+                // switching people simply overwrites the previous result).
+                Event::Profile(data) => {
+                    person_profile.set(Some(data));
+                    profile_loading.set(false);
                 }
 
                 // Phase 47: voice bookmarks — only apply when the event's
@@ -1057,6 +1072,9 @@ fn MainApp() -> Element {
                 view.set(View::Speakers);
                 find_open.set(false); // leaving the transcript closes the find bar
                 close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
+                // Phase 48: clear any stale profile when re-entering Speakers view.
+                person_profile.set(None);
+                profile_loading.set(false);
                 let _ = engine.db_tx.send(DbCmd::Voiceprints);
             }
         }
@@ -1138,6 +1156,9 @@ fn MainApp() -> Element {
             session_stats.set(None);
             // Phase 47: clear bookmarks on session switch (fresh load will repopulate).
             bookmarks.set(Vec::new());
+            // Phase 48: leaving the Speakers view (opening a session) clears the profile.
+            person_profile.set(None);
+            profile_loading.set(false);
             view.set(View::Session(id.clone()));
             last_export.set(None);
             summary.set(None);
@@ -1456,6 +1477,8 @@ fn MainApp() -> Element {
                                 settings,
                                 engine,
                                 on_open_session: on_open_from_speakers,
+                                profile: person_profile,
+                                profile_loading,
                             }
                         }
                     }

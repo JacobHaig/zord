@@ -216,6 +216,9 @@ pub enum Event {
         id: String,
         items: Vec<(u64, String)>,
     },
+    /// Phase 48: person profile assembled from cross-session store data.
+    /// Emitted in response to [`DbCmd::LoadProfile`].
+    Profile(crate::profile::ProfileData),
 }
 
 /// One audio track's amplitude profile for the session timeline (Phase 42a/42d).
@@ -506,6 +509,9 @@ pub enum DbCmd {
     /// now" button). Job-registered ("kbexport", cancellable between sessions);
     /// emits a count notice on completion.
     KbExportAll,
+    /// Phase 48: assemble a person profile for the given voiceprint id and
+    /// emit [`Event::Profile`].
+    LoadProfile(i64),
 }
 
 /// Replay commands for the playback worker. The rodio output stream is `!Send`
@@ -2624,6 +2630,10 @@ fn db_loop(
                     });
                     jobs2.end(&ev2, &jid);
                 });
+            }
+
+            DbCmd::LoadProfile(voiceprint_id) => {
+                load_profile_and_emit(&store, voiceprint_id, &ev);
             }
         }
     }
@@ -5797,6 +5807,141 @@ fn compute_and_cache_stats(store: &Store, session_id: &str, ev: &UnboundedSender
         id: session_id.to_string(),
         stats,
     });
+}
+
+// Phase 48 — person profile assembly
+// ---------------------------------------------------------------------------
+
+/// Assemble a [`crate::profile::ProfileData`] for a voiceprint and emit
+/// [`Event::Profile`].
+///
+/// # Stats-key mapping
+/// `SpeakerStats` uses the keys `"me"`, `"spk-N"`, and `"others"`.
+/// For a given session:
+///   - We fetch the speaker index for this voiceprint via `speaker_names
+///     WHERE voiceprint_id = ?`.
+///   - For a standard (non-integration) session the matching `SpeakerStats`
+///     row has key `"spk-N"` where N is the 0-based speaker index.  There is
+///     one special case: if `sessions.me_speaker == N` in an integration
+///     session the segment source was still `Others+Some(N)` so the stats key
+///     is still `"spk-N"` — the `is_me` flag is set but the key stays the
+///     same.  For the `Source::Me` channel (non-integration) the key is
+///     `"me"`.  The speaker-names table only contains diarized
+///     `Others+Some(N)` rows (the Me channel is never put in speaker_names),
+///     so in practice every appearance will map to `"spk-N"`.
+///   - If the session has no cached `session_stats` row we skip with zeroes
+///     (honest cheap choice: avoids a full segment reload per session for a
+///     profile that may be viewed rarely; the zeroed entries are labelled with
+///     their title so the user can still navigate to them).
+fn load_profile_and_emit(store: &Store, voiceprint_id: i64, ev: &UnboundedSender<Event>) {
+    use crate::profile::{overview_items_for, tfidf_topics, ProfileData, ProfileMeeting};
+
+    // 1. Look up the voiceprint's display name.
+    let vp_info = match store.voiceprints() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let Some(vp) = vp_info.iter().find(|v| v.id == voiceprint_id) else {
+        return;
+    };
+    let name = vp.name.clone();
+
+    // 2. For each appearance, resolve speaker idx → stats row.
+    //
+    //    We query speaker_names for (session_id, speaker) pairs linked to this
+    //    voiceprint rather than iterating appearances, because appearances are
+    //    already available on VoiceprintInfo and share the same data.
+    let appearances = vp.appearances.clone(); // (session_id, title, match_score)
+
+    // Cap to last 10 sessions for segment loading (topics cost).
+    let recent_count = appearances.len().min(10);
+
+    let mut meetings: Vec<ProfileMeeting> = Vec::with_capacity(appearances.len());
+    let mut last_heard_ms: u64 = 0;
+    let mut person_lines: Vec<String> = Vec::new();
+    let mut other_lines: Vec<String> = Vec::new();
+
+    for (idx, (session_id, title, _score)) in appearances.iter().enumerate() {
+        // Resolve the speaker index for this voiceprint in this session.
+        let speaker_idx: Option<i32> = store
+            .speaker_idx_for_voiceprint(session_id, voiceprint_id)
+            .ok()
+            .flatten();
+
+        // Get the session's started_at for the meeting row.
+        let started_at = match store.get_session(session_id) {
+            Ok(Some(s)) => {
+                let ms = s.started_at;
+                if ms > last_heard_ms {
+                    last_heard_ms = ms;
+                }
+                ms
+            }
+            _ => 0,
+        };
+
+        // Try to find the stats row in the cache.
+        let (talk_share, interruptions) = match store.get_session_stats(session_id) {
+            Ok(Some((json, _))) => {
+                if let Ok(stats) = serde_json::from_str::<zord_core::SessionStats>(&json) {
+                    if let Some(spk_idx) = speaker_idx {
+                        // Stats key is always "spk-N" for speaker_names-linked rows.
+                        let key = format!("spk-{spk_idx}");
+                        if let Some(row) = stats.speakers.iter().find(|s| s.key == key) {
+                            (row.talk_share, row.interruptions_made)
+                        } else {
+                            (0.0, 0)
+                        }
+                    } else {
+                        (0.0, 0)
+                    }
+                } else {
+                    (0.0, 0)
+                }
+            }
+            // No cached stats: skip recompute, use zeroes (cheap honest choice).
+            _ => (0.0, 0),
+        };
+
+        meetings.push(ProfileMeeting {
+            session_id: session_id.clone(),
+            title: title.clone(),
+            started_at,
+            talk_share,
+            interruptions,
+        });
+
+        // Collect lines for TF-IDF (last ~10 sessions only).
+        if idx < recent_count {
+            if let (Ok(segs), Some(spk_idx)) = (store.segments(session_id), speaker_idx) {
+                for seg in &segs {
+                    let is_person = matches!(seg.source, zord_core::Source::Others)
+                        && seg.speaker == Some(spk_idx);
+                    if is_person {
+                        person_lines.push(seg.text.clone());
+                    } else {
+                        other_lines.push(seg.text.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Open items from the Overview.
+    let (overview_doc, _) = load_overview_doc(store);
+    let open_items = overview_items_for(&overview_doc, &name);
+
+    // 4. TF-IDF topics.
+    let topics = tfidf_topics(&person_lines, &other_lines, 6);
+
+    let _ = ev.send(Event::Profile(ProfileData {
+        voiceprint_id,
+        name,
+        meetings,
+        open_items,
+        topics,
+        last_heard_ms,
+    }));
 }
 
 /// Prepend silence to `mono` so the channel's produced-sample count catches up

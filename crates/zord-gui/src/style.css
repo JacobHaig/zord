@@ -814,6 +814,73 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .session-select-bar span { flex: 1; }
 .session-select-bar button { font-size: 12px; }
 
+/* Name button — Phase 48: the name area is now a clickable button */
+.speaker-name-btn {
+  font-weight: 600; flex: 1; text-align: left;
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--text); border-radius: var(--r-sm);
+  transition: color var(--t-fast) var(--ease);
+}
+.speaker-name-btn:hover { color: var(--accent); }
+
+/* ========================= 5b. PERSON PROFILE PANE (Phase 48) ==============
+   Replaces the card grid when a name is clicked. Token-based, mirrors the
+   speaker-card family. */
+
+.profile-pane {
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  animation: pop-in var(--t-pop) var(--ease);
+}
+.profile-header {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.profile-back-btn { align-self: flex-start; }
+.profile-title-row {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+}
+.profile-name { font-size: 22px; font-weight: 700; }
+.profile-meta {
+  display: flex; gap: var(--sp-3); font-size: 12px; color: var(--muted);
+}
+.profile-section {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r-lg); padding: var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  box-shadow: var(--elev-1);
+}
+.profile-section-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--muted); margin-bottom: var(--sp-1);
+}
+.profile-meetings { display: flex; flex-direction: column; gap: 2px; }
+.profile-meeting-row {
+  display: flex; align-items: center; justify-content: space-between;
+  background: transparent; border: none; border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2); cursor: pointer; width: 100%; text-align: left;
+  transition: background var(--t-fast) var(--ease);
+}
+.profile-meeting-row:hover { background: var(--panel-2); }
+.profile-meeting-title { font-size: 13px; color: var(--text); flex: 1; }
+.profile-meeting-meta { font-size: 12px; color: var(--muted); flex-shrink: 0; margin-left: var(--sp-3); }
+.profile-empty-note { font-size: 13px; color: var(--muted); }
+.profile-open-items {
+  list-style: disc; padding-left: var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  font-size: 13px;
+}
+.profile-topics { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.profile-topic-chip {
+  display: inline-flex; align-items: center;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 3px 10px;
+  font-size: 12px; color: var(--text);
+}
+.profile-loading {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-5); color: var(--muted); font-size: 14px;
+}
+.profile-loading .ic { width: 20px; height: 20px; }
+
 /* Consent dialog extra width */
 .consent-card { width: min(480px, 90%); }
 .consent-bullets {

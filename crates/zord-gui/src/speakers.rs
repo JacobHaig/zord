@@ -1,4 +1,6 @@
-//! Speakers view, consent dialog, and voice-identification settings UI.
+//! Speakers view, consent dialog, voice-identification settings UI, and
+//! Phase 48 person profile detail pane.
+//!
 //! Phase 38d — guarded at the component level with `cfg!(feature = "voiceprints")`
 //! runtime checks; the view is only reachable when the feature is compiled in.
 
@@ -6,7 +8,7 @@ use dioxus::prelude::*;
 use zord_config::Settings;
 use zord_store::VoiceprintInfo;
 
-use crate::{engine::DbCmd, icon, Engine};
+use crate::{engine::DbCmd, icon, profile::ProfileData, Engine};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -120,6 +122,10 @@ pub fn SpeakersView(
     settings: Signal<Settings>,
     engine: Engine,
     on_open_session: EventHandler<String>,
+    /// Phase 48: current profile detail pane (`None` = show card grid).
+    profile: Signal<Option<ProfileData>>,
+    /// Phase 48: `true` while the profile request is in flight.
+    profile_loading: Signal<bool>,
 ) -> Element {
     let mut show_consent = use_signal(|| false);
 
@@ -136,7 +142,24 @@ pub fn SpeakersView(
                     let enabled = settings.read().voiceprints_enabled;
                     let items = voiceprints.read().clone();
 
-                    if !enabled {
+                    // ── Phase 48: profile detail pane (overrides card grid) ────
+                    if let Some(p) = profile.read().clone() {
+                        rsx! {
+                            ProfilePane {
+                                data: p,
+                                on_back: move |_| profile.set(None),
+                                on_open_session,
+                            }
+                        }
+                    } else if *profile_loading.read() {
+                        // Loading state while the db thread assembles the profile.
+                        rsx! {
+                            div { class: "profile-loading",
+                                {icon("users")}
+                                span { "Loading profile\u{2026}" }
+                            }
+                        }
+                    } else if !enabled {
                         // ── State 1: disabled ──────────────────────────────
                         rsx! {
                             div { class: "speakers-hero",
@@ -174,7 +197,7 @@ pub fn SpeakersView(
                             div { class: "speakers-list",
                                 h2 { class: "speakers-title", "Voice library" }
                                 p { class: "field-note speakers-subtitle",
-                                    "{items.len()} person(s) remembered. Click a name to rename; use Forget to remove a voice."
+                                    "{items.len()} person(s) remembered. Click a name to see their profile; use the action buttons to rename or forget."
                                 }
                                 {
                                     // Build the name list before consuming `items`.
@@ -187,6 +210,7 @@ pub fn SpeakersView(
                                         let an = all_names_owned.clone();
                                         let cm = current_model.clone();
                                         let eng = engine.clone();
+                                        let eng2 = eng.clone();
                                         rsx! {
                                             SpeakerCard {
                                                 key: "{info.id}",
@@ -195,6 +219,11 @@ pub fn SpeakersView(
                                                 current_model: cm,
                                                 engine: eng,
                                                 on_open_session,
+                                                on_open_profile: move |vp_id: i64| {
+                                                    profile_loading.set(true);
+                                                    profile.set(None);
+                                                    let _ = eng2.db_tx.send(DbCmd::LoadProfile(vp_id));
+                                                },
                                             }
                                         }
                                     })
@@ -222,6 +251,8 @@ fn SpeakerCard(
     current_model: String,
     engine: Engine,
     on_open_session: EventHandler<String>,
+    /// Phase 48: called when the user clicks the name area to open the profile.
+    on_open_profile: EventHandler<i64>,
 ) -> Element {
     let id = info.id;
     let mut editing = use_signal(|| false);
@@ -386,7 +417,13 @@ fn SpeakerCard(
                         }
                     }
                 } else {
-                    div { class: "speaker-name", "{info.name}" }
+                    // Phase 48: clicking the name area opens the profile pane.
+                    button {
+                        class: "speaker-name speaker-name-btn",
+                        title: "View profile for {info.name}",
+                        onclick: move |_| on_open_profile.call(id),
+                        "{info.name}"
+                    }
                 }
                 div { class: "speaker-card-actions",
                     if !*editing.read() {
@@ -632,6 +669,119 @@ pub fn VoiceprintSettings(settings: Signal<Settings>, engine: Engine) -> Element
 
                         p { class: "field-note",
                             "Manage individual people in the Speakers view."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Phase 48: person profile detail pane ────────────────────────────────────
+
+/// "Jun 4, 2026" from an epoch-MILLISECONDS timestamp.
+fn fmt_date_ms(ms: u64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms as i64)
+        .single()
+        .map(|d| d.format("%b %-d, %Y").to_string())
+        .unwrap_or_default()
+}
+
+/// "32%" talk share string; 0 → "—" (stats unavailable).
+fn fmt_talk_share(share: f32) -> String {
+    if share <= 0.0 {
+        "\u{2014}".to_string()
+    } else {
+        format!("{:.0}%", (share * 100.0).round())
+    }
+}
+
+/// Profile detail pane rendered instead of the card grid when a name is clicked.
+#[component]
+fn ProfilePane(
+    data: ProfileData,
+    on_back: EventHandler<()>,
+    on_open_session: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div { class: "profile-pane",
+
+            // ── Header: back button + name ─────────────────────────────────
+            div { class: "profile-header",
+                button {
+                    class: "mbtn ghost profile-back-btn",
+                    onclick: move |_| on_back.call(()),
+                    "\u{2190} All speakers"
+                }
+                div { class: "profile-title-row",
+                    h2 { class: "profile-name", "{data.name}" }
+                    div { class: "profile-meta",
+                        if data.last_heard_ms > 0 {
+                            span { "Last heard {fmt_date_ms(data.last_heard_ms)}" }
+                        }
+                        span { "{data.meetings.len()} meeting(s)" }
+                    }
+                }
+            }
+
+            // ── Meetings list ──────────────────────────────────────────────
+            if !data.meetings.is_empty() {
+                div { class: "profile-section",
+                    h3 { class: "profile-section-title", "Meetings" }
+                    div { class: "profile-meetings",
+                        for m in data.meetings.iter().cloned() {
+                            {
+                                let label = if m.title.trim().is_empty() {
+                                    "Recording".to_string()
+                                } else {
+                                    m.title.clone()
+                                };
+                                let talk_str = fmt_talk_share(m.talk_share);
+                                let date_str = fmt_date_ms(m.started_at);
+                                let sid = m.session_id.clone();
+                                rsx! {
+                                    button {
+                                        key: "{m.session_id}",
+                                        class: "profile-meeting-row",
+                                        onclick: move |_| on_open_session.call(sid.clone()),
+                                        span { class: "profile-meeting-title", "{label}" }
+                                        span { class: "profile-meeting-meta",
+                                            "{date_str} \u{b7} {talk_str}"
+                                            if m.interruptions > 0 {
+                                                " \u{b7} {m.interruptions} interruption(s)"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Open items ─────────────────────────────────────────────────
+            div { class: "profile-section",
+                h3 { class: "profile-section-title", "Open items" }
+                if data.open_items.is_empty() {
+                    p { class: "profile-empty-note", "Nothing assigned in the Overview." }
+                } else {
+                    ul { class: "profile-open-items",
+                        for item in data.open_items.iter() {
+                            li { key: "{item}", "{item}" }
+                        }
+                    }
+                }
+            }
+
+            // ── Topics ─────────────────────────────────────────────────────
+            if !data.topics.is_empty() {
+                div { class: "profile-section",
+                    h3 { class: "profile-section-title", "Topics" }
+                    div { class: "profile-topics",
+                        for topic in data.topics.iter() {
+                            span { key: "{topic}", class: "profile-topic-chip", "{topic}" }
                         }
                     }
                 }

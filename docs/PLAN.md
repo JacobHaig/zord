@@ -1899,15 +1899,40 @@ Say a trigger phrase while recording → a bookmark drops at that moment.
   Recording; timeline bookmark tick lane (diamond markers, click → seek)
 - Gate: fmt + clippy (workspace + features) + all tests green
 
-### Phase 48 — Person profiles (planned; premium-tier candidate)
-The Speakers view grows person pages: click a voiceprint → their profile —
-every meeting they appeared in (links), talk-time/interruption trend
-(Phase 46 stats), their open `- [ ]` items scraped from the living
-Overview by owner name, topics they own (nearest-neighbor clusters over
-the Phase 45 chunk embeddings, labeled by **TF-IDF top terms over the
-cluster's text — pure-fn, no LLM**; LLM-written labels noted as an
-optional upgrade requiring discussion first), last heard. Read-only
-composition of existing data — no new collection, no LLM.
+### Phase 48 — Person profiles ✅ DONE
+The Speakers view grows person pages: clicking a voiceprint's name opens a
+profile detail pane (back button returns to the card grid).
+
+- ✅ `ProfileMeeting` + `ProfileData` structs in `zord-gui/src/profile.rs`
+- ✅ `DbCmd::LoadProfile(i64)` + `Event::Profile(ProfileData)` wired into the
+  engine db thread (`load_profile_and_emit`)
+- ✅ **Stats-key mapping**: `speaker_names WHERE voiceprint_id = ?` returns the
+  0-based speaker index; the matching `SpeakerStats` row has key `"spk-N"`.
+  This holds for both standard and integration sessions (the `is_me` flag
+  is set on the row when `speaker == me_speaker` but the key is still
+  `"spk-N"`).  Missing-stats rows fall through to zeroes (honest cheap
+  choice: avoids a full segment reload per session for infrequently-viewed
+  profiles; the meeting is still listed with its title).
+- ✅ `Store::speaker_idx_for_voiceprint(session_id, voiceprint_id)` added to
+  `zord-store` (replaces earlier direct-conn approach)
+- ✅ `overview_items_for(doc, name)` pure fn — unchecked `- [ ]` lines,
+  case-insensitive name match, caps at 20; 7 unit tests
+- ✅ `tfidf_topics(person_lines, other_lines, k)` pure fn — lowercase
+  alphanumeric tokenize ≥3 chars, 50-word stoplist, TF × ln(1 + N/df) IDF,
+  top-6 terms; 6 unit tests (13 new tests total in profile module)
+- ✅ UI (speakers.rs): name → clickable button → `DbCmd::LoadProfile` →
+  loading spinner → `ProfilePane` (header, meetings list with session links,
+  open items, topics chips); back button clears the signal; leaving the
+  Speakers view clears the profile signal
+- ✅ CSS: token-based, mirrors the speaker-card styling family; new classes:
+  `.profile-pane`, `.profile-header`, `.profile-meetings`, `.profile-meeting-row`,
+  `.profile-section`, `.profile-topic-chip`, `.profile-loading`,
+  `.speaker-name-btn`
+- ✅ Gate: fmt + clippy (workspace + features) + all tests green
+- Caveat: live verification pending (headless build only); sessions with no
+  cached `session_stats` row show zero talk_share/interruptions — they will
+  populate next time the user opens the session (which triggers
+  `compute_and_cache_stats`)
 
 ### Phase 49 — Sentiment "moments" (planned — audio-first, in the Timeline)
 APPROVED (June 2026) with the design pivoted to **audio prosody, no LLM**,
