@@ -20,7 +20,7 @@ use engine::{
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zord_config::Settings;
-use zord_core::{Segment, Session, Source};
+use zord_core::{Segment, Session, SessionStats, Source};
 use zord_export::Format;
 use zord_transcribe::ModelId;
 
@@ -504,6 +504,11 @@ fn MainApp() -> Element {
     // Whether to overlay all lanes into a single merged graph.
     let timeline_merged = use_signal(|| false);
 
+    // Phase 46: conversation analytics ("Meeting DNA") stats.
+    // `stats_open` toggles the stats card; closed when the session changes.
+    let mut stats_open = use_signal(|| false);
+    let mut session_stats = use_signal(|| Option::<zord_core::SessionStats>::None);
+
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
         let initial = settings.peek().clone();
@@ -688,6 +693,13 @@ fn MainApp() -> Element {
                 // scrubber and stop-state detection.
                 Event::TimelinePos { ms } => {
                     timeline_pos.set(ms);
+                }
+
+                // Phase 46: conversation analytics — session-guarded apply.
+                Event::Stats { id, stats } => {
+                    if matches!(&*view.peek(), View::Session(cur) if *cur == id) {
+                        session_stats.set(Some(stats));
+                    }
                 }
 
                 Event::RemoteModels { models, error } => {
@@ -1103,6 +1115,9 @@ fn MainApp() -> Element {
         move |id: String| {
             // Close timeline if it was open for a different session.
             close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
+            // Phase 46: close stats panel and clear cached stats on session switch.
+            stats_open.set(false);
+            session_stats.set(None);
             view.set(View::Session(id.clone()));
             last_export.set(None);
             summary.set(None);
@@ -1128,6 +1143,9 @@ fn MainApp() -> Element {
         let engine = engine.clone();
         move |_: ()| {
             close_timeline(&engine, timeline_open, timeline_lanes, timeline_pos);
+            // Phase 46: close stats panel when leaving session view.
+            stats_open.set(false);
+            session_stats.set(None);
             view.set(View::Live);
             summary.set(None);
             compressed.set(None);
@@ -1292,6 +1310,19 @@ fn MainApp() -> Element {
                                 close_timeline(&engine3, timeline_open, timeline_lanes, timeline_pos);
                             }
                         },
+                        stats_open,
+                        on_toggle_stats: {
+                            let id2 = id.clone();
+                            let engine2 = engine.clone();
+                            move |_| {
+                                let was_open = *stats_open.peek();
+                                stats_open.set(!was_open);
+                                if !was_open {
+                                    // Opening: (re-)compute stats.
+                                    let _ = engine2.db_tx.send(DbCmd::LoadStats(id2.clone()));
+                                }
+                            }
+                        },
                     }
                 }
 
@@ -1337,6 +1368,19 @@ fn MainApp() -> Element {
                 // session that has speaker labels.
                 if let View::Session(id) = &*view.read() {
                     SpeakerLegend { id: id.clone(), segments, speaker_names, me_speaker, engine: engine.clone() }
+                }
+
+                // Phase 46: conversation analytics stats card.
+                if let View::Session(_) = &*view.read() {
+                    if *stats_open.read() {
+                        StatsPanel {
+                            stats: session_stats,
+                            segments,
+                            speaker_names,
+                            me_speaker,
+                            on_close: move |_| stats_open.set(false),
+                        }
+                    }
                 }
 
                 // Transcript / results. Pass signals so the list subscribes and
@@ -2019,6 +2063,10 @@ fn SessionToolbar(
     /// Close the timeline panel — routes through `close_timeline` in MainApp
     /// so playback stops and lane/pos state clears (same path as the panel's ×).
     on_close_timeline: EventHandler<()>,
+    /// Phase 46: whether the stats card is open.
+    stats_open: Signal<bool>,
+    /// Phase 46: toggle the stats card; fires DbCmd::LoadStats when opening.
+    on_toggle_stats: EventHandler<()>,
 ) -> Element {
     let sid = id.clone();
     let eng_sum = engine.clone();
@@ -2174,6 +2222,14 @@ fn SessionToolbar(
 
             // --- Output cluster (right) ---
             div { class: "export-spacer" }
+            // Phase 46: stats card toggle button.
+            button {
+                class: if *stats_open.read() { "tbtn find-active" } else { "tbtn" },
+                title: "Show meeting analytics (talk time, WPM, interruptions, silence ratio…)",
+                onclick: move |_| on_toggle_stats.call(()),
+                {icon("overview")}
+                "Stats"
+            }
             // Phase 42c: timeline toggle button.
             button {
                 class: if *timeline_open.read() { "tbtn find-active" } else { "tbtn" },
@@ -2497,6 +2553,180 @@ fn CompressedPanel(
                         }
                     }
                 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 46 — Conversation analytics stats card
+// ---------------------------------------------------------------------------
+
+/// Format milliseconds as `H:MM:SS` or `M:SS`.
+fn fmt_ms(ms: u64) -> String {
+    let s = ms / 1000;
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{sec:02}")
+    } else {
+        format!("{m}:{sec:02}")
+    }
+}
+
+/// One-liner standout insight: pick the most interesting metric to surface.
+/// Pure-fn heuristic — no LLM.
+fn standout_insight(
+    stats: &SessionStats,
+    names: &std::collections::HashMap<i32, String>,
+) -> String {
+    // Rule 1: if a single speaker has > 60% talk share, call it out.
+    if let Some(top) = stats.speakers.first() {
+        if top.talk_share > 0.60 {
+            let pct = (top.talk_share * 100.0).round() as u32;
+            let label = match &top.key[..] {
+                "me" => "You".to_string(),
+                "others" => "Others".to_string(),
+                key => {
+                    // spk-N → resolve display name or "Speaker N".
+                    if let Some(n) = key.strip_prefix("spk-").and_then(|s| s.parse::<i32>().ok()) {
+                        names
+                            .get(&n)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Speaker {}", n + 1))
+                    } else {
+                        key.to_string()
+                    }
+                }
+            };
+            return format!("{label} spoke {pct}% of this meeting.");
+        }
+    }
+    // Rule 2: if silence ratio is high (> 40%), note it.
+    if stats.silence_ratio > 0.40 {
+        let pct = (stats.silence_ratio * 100.0).round() as u32;
+        return format!("{pct}% of this meeting was silence.");
+    }
+    // Default: no standout — empty string → not rendered.
+    String::new()
+}
+
+/// Phase 46 — Conversation analytics card, toggled by the Stats toolbar button.
+/// Shown only for `View::Session`; closing it is via the × button or session switch.
+#[component]
+fn StatsPanel(
+    stats: Signal<Option<SessionStats>>,
+    segments: Signal<Vec<Segment>>,
+    speaker_names: Signal<std::collections::HashMap<i32, String>>,
+    me_speaker: Signal<Option<i32>>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let names = speaker_names.read().clone();
+    let me_spk = *me_speaker.read();
+    let has_transcript = !segments.read().is_empty();
+
+    rsx! {
+        div { class: "stats-card",
+            div { class: "stats-header",
+                span { class: "stats-title", {icon("overview")} " Meeting DNA" }
+                button {
+                    class: "tl-close",
+                    title: "Close stats",
+                    onclick: move |_| on_close.call(()),
+                    {icon("close")}
+                }
+            }
+
+            if !has_transcript {
+                div { class: "stats-empty", "Transcribe first to see analytics." }
+            } else if let Some(s) = stats.read().clone() {
+                {
+                    // ── header row ──────────────────────────────────────────
+                    let meeting_s = s.meeting_ms / 1000;
+                    let speech_pct = (s.speech_ms.min(s.meeting_ms) * 100)
+                        .checked_div(s.meeting_ms)
+                        .unwrap_or(0) as u32;
+                    let insight = standout_insight(&s, &names);
+                    rsx! {
+                        div { class: "stats-meta",
+                            span { class: "stats-meta-item",
+                                {fmt_dur(meeting_s)} " · " {speech_pct.to_string()} "% speech"
+                            }
+                        }
+                        if !insight.is_empty() {
+                            div { class: "stats-insight", "{insight}" }
+                        }
+                        // ── per-speaker rows ─────────────────────────────────
+                        div { class: "stats-speakers",
+                            for spk in s.speakers.iter() {
+                                {
+                                    // Resolve display label (same rules as speaker_label).
+                                    let label = match &spk.key[..] {
+                                        "me" => "Me".to_string(),
+                                        "others" => "Others".to_string(),
+                                        key => {
+                                            if let Some(n) = key.strip_prefix("spk-")
+                                                .and_then(|s| s.parse::<i32>().ok())
+                                            {
+                                                names.get(&n).cloned()
+                                                    .unwrap_or_else(|| format!("Speaker {}", n + 1))
+                                            } else {
+                                                key.to_string()
+                                            }
+                                        }
+                                    };
+                                    // Speaker row accent class (same palette as transcript).
+                                    let accent_class = match &spk.key[..] {
+                                        "me" => "spk-me".to_string(),
+                                        key => {
+                                            if let Some(n) = key.strip_prefix("spk-")
+                                                .and_then(|s| s.parse::<i32>().ok())
+                                            {
+                                                // Check if this spk-N is the me_speaker.
+                                                if me_spk == Some(n) {
+                                                    "spk-me".to_string()
+                                                } else {
+                                                    format!("spk-{n}")
+                                                }
+                                            } else {
+                                                "spk-others".to_string()
+                                            }
+                                        }
+                                    };
+                                    let share_pct = (spk.talk_share * 100.0).round() as u32;
+                                    let talk_min = spk.talk_ms / 60_000;
+                                    let talk_sec = (spk.talk_ms % 60_000) / 1000;
+                                    let wpm = spk.wpm.round() as u32;
+                                    let longest = fmt_ms(spk.longest_monologue_ms);
+                                    let interruptions = spk.interruptions_made;
+                                    let questions = spk.questions;
+                                    rsx! {
+                                        div { class: "stats-spk-row {accent_class}",
+                                            div { class: "stats-spk-name", "{label}" }
+                                            div { class: "stats-spk-bar-wrap",
+                                                div {
+                                                    class: "stats-spk-bar",
+                                                    style: "width: {share_pct}%",
+                                                }
+                                            }
+                                            div { class: "stats-spk-detail",
+                                                span { "{share_pct}% · " }
+                                                span { "{talk_min}:{talk_sec:02} · " }
+                                                span { "{wpm} wpm · " }
+                                                span { "{questions} Q · " }
+                                                span { "longest {longest} · " }
+                                                span { "{interruptions} interruptions" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                div { class: "stats-empty", "Loading…" }
+            }
+        }
     }
 }
 

@@ -203,6 +203,13 @@ pub enum Event {
     TimelinePos {
         ms: Option<u64>,
     },
+    /// Phase 46: per-session conversation analytics, freshly computed from
+    /// segments and persisted in the store. The `id` field lets the GUI
+    /// discard results for sessions it is no longer viewing.
+    Stats {
+        id: String,
+        stats: zord_core::SessionStats,
+    },
 }
 
 /// One audio track's amplitude profile for the session timeline (Phase 42a/42d).
@@ -466,6 +473,11 @@ pub enum DbCmd {
         start_ms: u64,
         end_ms: u64,
     },
+    /// Compute (or serve) the per-session conversation analytics (Phase 46).
+    /// Always recomputes from segments (pure fn, milliseconds), persists the
+    /// result in `session_stats`, and emits [`Event::Stats`].  Called on
+    /// session load, after transcription, and after diarization.
+    LoadStats(String),
     /// Export a diagnostic bundle (Phase 43c): a zip written to the exports dir
     /// containing logs, a redacted config, and system info. Replies with
     /// [`Event::Exported`] (path) on success or [`Event::Notice`] on failure.
@@ -2082,6 +2094,8 @@ fn db_loop(
                 ));
                 let _ = ev.send(Event::AudioFiles(session_audio_files(&store, &id)));
                 let _ = ev.send(Event::MeSpeaker(store.me_speaker(&id).unwrap_or(None)));
+                // Phase 46: compute and cache conversation analytics on load.
+                compute_and_cache_stats(&store, &id, &ev);
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
                 Ok(path) => {
@@ -2470,6 +2484,10 @@ fn db_loop(
                     });
                     jobs.end(&ev, &jid);
                 });
+            }
+
+            DbCmd::LoadStats(id) => {
+                compute_and_cache_stats(&store, &id, &ev);
             }
 
             DbCmd::ExportDiagnostics => {
@@ -3633,6 +3651,8 @@ fn apply_diarization(
         "Identified {} speaker(s) in this conversation.",
         speakers.len()
     )));
+    // Phase 46: diarization changes speaker keys → recompute analytics.
+    compute_and_cache_stats(store, session_id, ev);
 }
 
 /// Milliseconds of overlap between two [start, end] intervals.
@@ -5595,6 +5615,8 @@ fn post_transcribe_inner(
             kb_mirror_session(&dir, store, session_id);
         }
     }
+    // Phase 46: recompute conversation analytics now that the transcript is fresh.
+    compute_and_cache_stats(store, session_id, ev);
     true
 }
 
@@ -5605,6 +5627,39 @@ fn post_transcribe_inner(
 /// spin up — one per track."
 fn effective_transcribe_workers(cap: u32, tracks: usize) -> usize {
     (cap as usize).min(tracks).max(1)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 46 — per-session conversation analytics helper
+// ---------------------------------------------------------------------------
+
+/// Compute [`zord_core::SessionStats`] for a session, persist it in the
+/// `session_stats` table, and emit `Event::Stats`.
+///
+/// This is always a full recompute (segments load + pure-fn = milliseconds),
+/// so there is no staleness issue.  The stored row exists for Phase 48
+/// cross-session trends and is refreshed whenever stats are viewed, after
+/// transcription, and after diarization.
+fn compute_and_cache_stats(store: &Store, session_id: &str, ev: &UnboundedSender<Event>) {
+    let segs = match store.segments(session_id) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let session = match store.get_session(session_id) {
+        Ok(Some(s)) => s,
+        _ => return,
+    };
+    let ended_at = session.ended_at.unwrap_or(session.started_at);
+    let me_speaker = store.me_speaker(session_id).ok().flatten();
+    let stats = zord_core::compute_stats(&segs, me_speaker, session.started_at, ended_at);
+    // Persist (best-effort; a cache miss is benign).
+    if let Ok(json) = serde_json::to_string(&stats) {
+        let _ = store.set_session_stats(session_id, &json, now_ms());
+    }
+    let _ = ev.send(Event::Stats {
+        id: session_id.to_string(),
+        stats,
+    });
 }
 
 /// Prepend silence to `mono` so the channel's produced-sample count catches up

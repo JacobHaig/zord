@@ -250,6 +250,31 @@ impl Store {
         Ok(rows.next().transpose()?.flatten())
     }
 
+    // ----- Phase 46: conversation analytics cache ----------------------------
+
+    /// Persist (upsert) the JSON-serialized [`zord_core::SessionStats`] for a
+    /// session, stamping `computed_at` with the given epoch-ms timestamp.
+    pub fn set_session_stats(&self, session_id: &str, json: &str, computed_at: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_stats (session_id, json, computed_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET json = excluded.json, computed_at = excluded.computed_at",
+            params![session_id, json, i64v(computed_at)],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch the cached stats JSON for a session, if any. Returns
+    /// `(json_string, computed_at_ms)`.
+    pub fn get_session_stats(&self, session_id: &str) -> Result<Option<(String, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT json, computed_at FROM session_stats WHERE session_id = ?1")?;
+        let mut rows = stmt.query_map(params![session_id], |r| {
+            Ok((r.get::<_, String>(0)?, get_u64(r, 1)?))
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
     // ----- Phase 26: rolling project ledger -----------------------------------
 
     /// Insert a project.
@@ -1458,6 +1483,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_model
                 ON chunk_embeddings(model, session_id);
+
+            -- Phase 46: per-session conversation analytics cache.
+            -- Stored as JSON so the struct schema can evolve without migrations.
+            -- Refreshed on every LoadStats call (compute is fast — milliseconds)
+            -- and after transcription / diarization complete.  The row also
+            -- serves Phase 48 cross-session trends (never re-use the app_meta
+            -- table for per-session data).
+            CREATE TABLE IF NOT EXISTS session_stats (
+                session_id  TEXT    PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                json        TEXT    NOT NULL,
+                computed_at INTEGER NOT NULL
+            );
             "#,
     )?;
     Ok(())
@@ -2680,5 +2717,81 @@ mod chunk_segments_tests {
         let chunks = chunk_segments(&segs);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].seg_id, 2);
+    }
+}
+
+#[cfg(test)]
+mod session_stats_tests {
+    use super::*;
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zord-sstats-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    fn mk_session(s: &Store, id: &str) {
+        s.create_session(&Session {
+            id: id.into(),
+            started_at: 1_000,
+            ended_at: Some(61_000),
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+            overview_folded_ms: None,
+        })
+        .unwrap();
+    }
+
+    /// get_session_stats returns None when no row exists.
+    #[test]
+    fn get_returns_none_when_absent() {
+        let db = tmp_db("absent");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "sess1");
+        assert!(s.get_session_stats("sess1").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// set then get roundtrips the json string and computed_at.
+    #[test]
+    fn set_get_roundtrip() {
+        let db = tmp_db("roundtrip");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "sess1");
+        s.set_session_stats("sess1", r#"{"hello":"world"}"#, 99_000)
+            .unwrap();
+        let (json, at) = s.get_session_stats("sess1").unwrap().unwrap();
+        assert_eq!(json, r#"{"hello":"world"}"#);
+        assert_eq!(at, 99_000);
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// Upsert: a second set_session_stats call replaces the row.
+    #[test]
+    fn upsert_replaces() {
+        let db = tmp_db("upsert");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "sess1");
+        s.set_session_stats("sess1", r#"{"v":1}"#, 1_000).unwrap();
+        s.set_session_stats("sess1", r#"{"v":2}"#, 2_000).unwrap();
+        let (json, at) = s.get_session_stats("sess1").unwrap().unwrap();
+        assert_eq!(json, r#"{"v":2}"#);
+        assert_eq!(at, 2_000);
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// Row is deleted when its session is deleted (ON DELETE CASCADE).
+    #[test]
+    fn cascade_delete() {
+        let db = tmp_db("cascade");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "sess1");
+        s.set_session_stats("sess1", r#"{"x":1}"#, 1_000).unwrap();
+        s.delete_session("sess1").unwrap();
+        assert!(s.get_session_stats("sess1").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

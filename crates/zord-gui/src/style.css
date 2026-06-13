@@ -933,3 +933,82 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* Timestamp clickable jump (in TranscriptView when timeline is open) */
 .ts.tl-jump { cursor: pointer; color: var(--accent); text-decoration: underline dotted; }
 .ts.tl-jump:hover { opacity: 0.8; }
+
+/* ============================================================
+   Phase 46 — Conversation analytics card ("Meeting DNA")
+   ============================================================ */
+.stats-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.stats-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.stats-title {
+  font-weight: 600; font-size: 13px;
+  display: flex; align-items: center; gap: 6px;
+}
+.stats-meta {
+  font-size: 12px; color: var(--muted);
+  margin-bottom: 6px;
+}
+.stats-meta-item { }
+.stats-insight {
+  font-size: 13px; color: var(--text);
+  font-style: italic;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  border-radius: var(--r-md);
+}
+.stats-empty {
+  font-size: 13px; color: var(--muted); font-style: italic;
+}
+.stats-speakers {
+  display: flex; flex-direction: column; gap: 6px;
+}
+.stats-spk-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  grid-template-rows: auto auto;
+  gap: 3px 10px;
+  padding: 6px 8px;
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+  border-left: 3px solid var(--muted);
+}
+.stats-spk-row.spk-me   { border-left-color: var(--me); }
+.stats-spk-row.spk-0    { border-left-color: #ffb454; }
+.stats-spk-row.spk-1    { border-left-color: #6fd3ff; }
+.stats-spk-row.spk-2    { border-left-color: #a6e22e; }
+.stats-spk-row.spk-3    { border-left-color: #ff80bf; }
+.stats-spk-row.spk-4    { border-left-color: #c792ea; }
+.stats-spk-row.spk-5    { border-left-color: #ffd866; }
+.stats-spk-row.spk-6    { border-left-color: #80ffd4; }
+.stats-spk-row.spk-7    { border-left-color: #ff6e6e; }
+.stats-spk-row.spk-others { border-left-color: var(--muted); }
+.stats-spk-name {
+  grid-column: 1; grid-row: 1;
+  font-size: 13px; font-weight: 600; align-self: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.stats-spk-bar-wrap {
+  grid-column: 2; grid-row: 1;
+  height: 6px; background: var(--line);
+  border-radius: 3px; overflow: hidden; align-self: center;
+}
+.stats-spk-bar {
+  height: 100%; background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.stats-spk-detail {
+  grid-column: 1 / -1; grid-row: 2;
+  font-size: 11px; color: var(--muted);
+}

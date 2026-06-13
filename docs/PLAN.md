@@ -1844,25 +1844,35 @@ knowledge-base export, voiceprints at team scale, policy/admin controls,
 store distribution. Design new features with a clean free/premium seam in
 mind (Cargo features + license gating later); no gating implemented yet.
 
-### Phase 46 — Conversation analytics: "Meeting DNA" (planned)
+### Phase 46 — Conversation analytics: "Meeting DNA" ✅ DONE
 **Hard constraint (user, June 2026): NO LLM anywhere in this phase — every
 metric is pure-fn computation over data Zord already has (fast, exact,
 unit-tested). Any future metric that would need an LLM gets discussed
 first, not built.** Real numbers from data only Zord has (per-speaker
 audio + cross-session identity, all local):
 - **Per-session stats**, computed post-transcription into a cached
-  `session_stats` store (job, recomputed on re-transcribe/re-diarize):
+  `session_stats` store (recomputed on load / re-transcribe / re-diarize):
   talk-time share per speaker (diarized spans / integration track speech
   flags), interruption & talk-over counts (the timeline's overlap data),
   longest monologue, words-per-minute per speaker, question density
   (`?`-terminated lines), silence ratio, meeting length vs speech length.
-- **Surfaces:** a "Stats" card for the session (toolbar-toggled panel like
-  the timeline — not standing), each metric with a one-line plain-English
-  read ("You spoke 68% of this meeting"); speaker names/colors from the
-  existing identity surfaces.
-- **Cross-session trends per person** (voiceprint-linked): talk-time and
-  interruption trends over the last N meetings — feeds Phase 48 person
-  profiles. Pure-fn metric computation, unit-tested; no LLM required.
+  `compute_stats` lives in `zord-core` — pure fn, 13 unit tests, zero
+  panics on degenerate input.
+- **Store cache:** `session_stats (session_id PK, json, computed_at)`
+  table in zord-store; 4 store tests (absent/roundtrip/upsert/cascade).
+- **Engine:** `DbCmd::LoadStats` + `Event::Stats`; hooks after
+  `DbCmd::Load`, `post_transcribe_inner`, and `apply_diarization`.
+- **Surfaces:** "Stats" toolbar toggle button (closes on session switch);
+  `StatsPanel` component with meeting-length header, speech% ratio,
+  standout-metric one-liner (pure-fn heuristic), per-speaker rows with
+  talk-share progress bar + "32% · 4:20 · 142 wpm · 9 Q · longest 3:40
+  · 4 interruptions". Speaker identity colors from existing palette.
+  Empty state: "Transcribe first." Un-diarized sessions show
+  me/others rows honestly.
+- **Cross-session trends** (row is there for Phase 48 queries): the
+  `session_stats.json` blob feeds Phase 48 person profiles unchanged.
+- Live verification pending (headless-only build environment).
+  Commit: `feat(gui): conversation analytics — pure-fn Meeting DNA stats card (Phase 46)`.
 
 ### Phase 47 — Voice bookmarks: "mark that" (planned)
 Say a trigger phrase while recording → a bookmark drops at that moment.
