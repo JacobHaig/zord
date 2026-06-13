@@ -1935,31 +1935,29 @@ profile detail pane (back button returns to the card grid).
   `compute_and_cache_stats`)
 
 ### Phase 49 — Sentiment "moments" (planned — audio-first, in the Timeline)
-APPROVED (June 2026) with the design pivoted to **audio prosody, no LLM**,
-and the markers **built into the Timeline panel** as a moments lane:
-- **Model: SenseVoiceSmall via sherpa-onnx** (the runtime we already ship
-  for diarization/voiceprints/Parakeet — a model download, not a new
-  dependency). One small model emits per-utterance **emotion labels** and
-  **audio events** (laughter, applause, crying, coughing) from tone of
-  voice — signals text analysis fundamentally can't see.
+APPROVED (June 2026) — **audio prosody, no LLM**, markers in the Timeline.
+**License gate result (June 2026): SenseVoiceSmall REJECTED** — its weights
+carry Alibaba's FunASR Model License ("reference and learning purposes
+only" + auto-revision clause + maintainers declined to confirm commercial
+use); at least as restrictive as the already-rejected Qwen-3B. Replaced with
+two **Apache-2.0** models on the **`ort` runtime already shipped by Phase 45
+`semantic`** (no sherpa needed):
+- **Audio events — YAMNet** (TF Models, Apache-2.0; STMicroelectronics int8
+  ONNX): 521 AudioSet classes incl. laughter, applause, crying, coughing.
+- **Speech emotion — wav2vec2-base SER** (`DunnBC22/...`, Apache-2.0; ONNX
+  community export): per-utterance happy/sad/angry/neutral.
+Both downloaded on demand like other models (commercial-licensed per
+docs/model-licensing.md). Behind a `sentiment` Cargo feature.
 - **Conservative rendering (the accuracy concern, addressed):**
-  - *Event markers always*: laughter/applause are near-unambiguous —
-    rendered as their own tick style on the Timeline (click → seek). "The
-    room laughed here" is the most trustworthy sentiment signal there is.
-  - *Emotion ticks only on persistence*: an emotion mark renders only when
-    a strong non-neutral label holds across N consecutive utterances
-    (const, commented) — no continuous arc, nothing speculative.
-  - Stretch: cross-check against a small ONNX text classifier (ort is
-    already in-tree via Phase 45); render emotion ticks only when audio
-    and text agree.
-- **Pipeline:** post-transcription job (cancellable) runs SenseVoice over
-  the per-speaker tracks → `moments (session_id, t_ms, kind, speaker)`
-  table → Timeline moments lane + a small list in the session view.
-  Speaker attribution comes free from per-track processing.
-- **Gate task: verify the SenseVoiceSmall weights' license** for
-  commercial use per the model-licensing policy BEFORE wiring downloads
-  (code is Apache-2.0; weights' terms must be confirmed — if they fail
-  the policy, fall back to a commercially-licensed SER model or hold).
+  - *Event markers always* (YAMNet): laughter/applause are near-
+    unambiguous — their own tick style on the Timeline (click → seek).
+  - *Emotion ticks only on persistence* (wav2vec2): an emotion mark renders
+    only when a strong non-neutral label holds across N consecutive
+    utterances (const, commented) — no continuous arc, nothing speculative.
+- **Pipeline:** post-transcription job (cancellable) runs both models over
+  the per-speaker tracks (16 kHz mono) → `moments (session_id, t_ms, kind,
+  speaker)` table → Timeline moments lane + a small list in the session
+  view. Speaker attribution is free from per-track processing.
 
 **Declined (June 2026): pre-meeting briefing** — composing context for a
 10-person meeting whose attendees each carry separate meeting histories
