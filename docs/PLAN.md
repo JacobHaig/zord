@@ -2126,17 +2126,26 @@ safe at runtime. Same feature flag, all three OSes → true parity.
   gated `any(semantic,sentiment)`: set `ORT_DYLIB_PATH` to the exe-relative
   lib if present. Gate: build/clippy/test under `semantic`+`sentiment` (tests
   are pure-fn — no live model needed; load-dynamic build doesn't fetch ORT).
-- **51b — release CI bundles onnxruntime 1.24.2 + re-enables Windows semantic:**
+- **51b — release CI bundles onnxruntime 1.24.2 + re-enables Windows semantic ✅:**
   download the matching MS GitHub lib per OS (`onnxruntime-win-x64-1.24.2.zip`
   → `onnxruntime.dll`; `onnxruntime-osx-arm64-1.24.2.tgz` → real
   `libonnxruntime.dylib`, not the symlink), place it beside the GUI exe (in the
   bundle, dist, CLI dir, and the zips); macOS: also codesign the dylib + bundle
-  the VC++ redist DLLs on Windows (vcruntime140/_1, msvcp140) or document the
+  the VC++ redist DLLs on Windows (vcruntime140/_1, msvcp140/_1) or document the
   prereq; REVERT the Windows `semantic` strip so FEATURES is unified again.
-  Verified by the release run (cannot be exercised headlessly).
-- **51c — updater handles the DLL:** `update.rs` self-swaps only the exe today;
-  ship `onnxruntime.dll` as a release asset and download+place it beside the new
-  exe on Windows self-update so a bumped ORT version isn't left stale/missing.
+  DONE: per-OS "Bundle ONNX Runtime" steps in release.yml; Windows DLLs reach
+  the NSIS installer via `Dioxus.toml [bundle] resources` (downloaded into
+  `crates/zord-gui/ort-bundle/` BEFORE `dx bundle`, since dx builds the
+  installer in that same step) and the portable exe/CLI/zip via post-bundle
+  copies; macOS dylib signed explicitly before the `--deep` app sign. Verified
+  by the release run (cannot be exercised headlessly).
+- **51c — updater handles the DLL ✅:** `update.rs` self-swaps only the exe
+  today; ship `onnxruntime.dll` as a release asset and download+place it beside
+  the new exe on Windows self-update so a bumped ORT version isn't left
+  stale/missing. DONE: asset `onnxruntime-windows-x64.dll` (name is a contract
+  shared by release.yml Collect + `update.rs ORT_DLL_ASSET`); `UpdateInfo` now
+  carries `ort_dll_url`; `download_and_install` refreshes the DLL post-swap,
+  best-effort (logs + continues on failure), Windows-only + `self-update`-gated.
 - **51d — verify + re-cut 0.3.1:** full gate; delete the partial macOS-only
   v0.3.1 release+tag; retag at the unified commit; watch BOTH Windows + macOS
   go green WITH semantic present. **Key risk to confirm on the build:**

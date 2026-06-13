@@ -30,10 +30,11 @@ env:
   # Optional engines bundled into the released GUI app. encryption is now
   # included; it requires vendored OpenSSL (macOS: fine with existing toolchain;
   # Windows: Strawberry Perl ships on windows-latest, NASM installed explicitly).
-  # The channel step appends self-update for github builds. NOTE: `semantic`
-  # (ort/onnxruntime) ships on macOS only — the Windows job strips it because
-  # ort's prebuilt needs the dynamic CRT, which clashes with the static CRT
-  # sherpa/llama require (see the Windows Resolve-channel step).
+  # The channel step appends self-update for github builds. `semantic`
+  # (ort/onnxruntime) now ships on ALL platforms: Phase 51 switched ort to
+  # `load-dynamic`, so the /MT static-CRT exe links clean and we ship the
+  # matching `onnxruntime.dll`/`libonnxruntime.dylib` beside the binary (see the
+  # per-OS "Bundle ONNX Runtime" steps). No more Windows-only caveat.
   FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord,encryption,semantic"
   # The CLI (zord-app) only declares a subset — voiceprints/discord/self-update
   # are GUI/integration features it doesn't have; passing them fails the build.
@@ -89,6 +90,30 @@ jobs:
       - name: Build CLI
         run: cargo build --release --package zord-app --features "${{ env.CLI_FEATURES }}"
 
+      # Bundle ONNX Runtime 1.24.2 (Phase 51b). ort runs `load-dynamic`, so the
+      # app loads `libonnxruntime.dylib` from beside the exe at runtime — we must
+      # ship it. Place it inside the .app (next to zord-gui) AND beside the CLI.
+      # ort 2.0.0-rc.12 targets onnxruntime 1.24.2 (API 24); ship exactly that.
+      # The tgz contains the REAL file `libonnxruntime.1.24.2.dylib` plus a
+      # `libonnxruntime.dylib` SYMLINK — copy the real file and name the dest
+      # `libonnxruntime.dylib` (never ship the symlink; it'd dangle in the zip).
+      - name: Bundle ONNX Runtime (libonnxruntime.dylib)
+        run: |
+          set -euo pipefail
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-osx-arm64-1.24.2.tgz"
+          curl -fsSL "$URL" -o ort.tgz
+          mkdir -p ort-extract
+          tar -xzf ort.tgz -C ort-extract
+          # Find the real dylib (not the symlink).
+          REAL=$(find ort-extract -name "libonnxruntime*.dylib" ! -type l | head -1)
+          if [ -z "$REAL" ]; then echo "::error::real libonnxruntime dylib not found"; exit 1; fi
+          echo "Found ORT dylib: $REAL"
+          APP=$(find target -path "*bundle*" -name "*.app" -maxdepth 8 -type d | head -1)
+          if [ -z "$APP" ]; then echo "::error::GUI .app not found"; exit 1; fi
+          cp "$REAL" "$APP/Contents/MacOS/libonnxruntime.dylib"
+          cp "$REAL" target/release/libonnxruntime.dylib
+          ls -l "$APP/Contents/MacOS/libonnxruntime.dylib" target/release/libonnxruntime.dylib
+
       # ---- Optional: code-sign + notarize (only if secrets are set) ----
       - name: Import signing certificate
         if: env.HAS_SIGNING == 'true'
@@ -115,6 +140,12 @@ jobs:
         run: |
           APP=$(find target -path "*bundle*" -name "*.app" -maxdepth 8 -type d | head -1)
           echo "Signing $APP"
+          # Sign the nested ONNX Runtime dylib FIRST (Phase 51b). `--deep` alone
+          # can miss a hand-placed dylib, leaving it unsigned → notarization
+          # rejects the app. Sign it explicitly with the hardened runtime, then
+          # the --deep app sign seals everything.
+          codesign --force --options runtime --sign "$SIGNING_IDENTITY" \
+            "$APP/Contents/MacOS/libonnxruntime.dylib"
           codesign --deep --force --options runtime \
             --entitlements crates/zord-gui/entitlements.plist \
             --sign "$SIGNING_IDENTITY" "$APP"
@@ -134,7 +165,13 @@ jobs:
           VER="${GITHUB_REF_NAME#v}"; [ "$GITHUB_REF_TYPE" = "tag" ] || VER="dev"
           # Store-channel artifacts carry the channel in the name.
           [ "${{ env.CHANNEL }}" = "github" ] || VER="$VER-${{ env.CHANNEL }}"
-          # GUI installer (dx-produced .dmg).
+          # GUI installer (dx-produced .dmg). NOTE (Phase 51b): the .dmg is built
+          # FROM the .app DURING `dx bundle`, before the ONNX Runtime step patches
+          # the .app — so this .dmg does NOT carry libonnxruntime.dylib (semantic
+          # search won't work from a .dmg install). The notarized portable .app
+          # zip below DOES carry it. Fixing the .dmg needs the dylib injected
+          # before `dx bundle` (no dx hook places files in Contents/MacOS) or the
+          # .dmg rebuilt from the patched .app — deferred (see report / 51d).
           DMG=$(find target -name "*.dmg" -maxdepth 6 | head -1)
           if [ -n "$DMG" ]; then cp "$DMG" "dist/Zord-$VER-macos-arm64.dmg"; fi
           # Portable GUI: the .app, zipped (a bundle can't be a single file).
@@ -149,6 +186,11 @@ jobs:
             rm -rf "$STAGE"; mkdir -p "$STAGE"
             cp -R "$APP" "$STAGE/"
             cp target/release/zord "$STAGE/zord"
+            # ONNX Runtime beside the CLI so `zord` finds it (Phase 51b); the
+            # .app already carries its own copy via the bundle.
+            if [ -f target/release/libonnxruntime.dylib ]; then
+              cp target/release/libonnxruntime.dylib "$STAGE/libonnxruntime.dylib"
+            fi
             ditto -c -k --keepParent "$STAGE" "dist/Zord-$VER-macos-arm64.zip"
             rm -rf "$STAGE"
           fi
@@ -209,21 +251,80 @@ jobs:
         run: |
           F="${{ env.FEATURES }}"
           if [ "${{ env.CHANNEL }}" = "github" ]; then F="$F,self-update"; fi
-          # Drop `semantic` on Windows: it pulls ort/onnxruntime, whose prebuilt
-          # binary needs the DYNAMIC MSVC CRT (/MD), but this build forces the
-          # STATIC CRT (/MT) so sherpa-onnx (parakeet) + llama/whisper link.
-          # /MT and /MD can't coexist in one binary → libort_sys LNK2019 on CRT
-          # math symbols. macOS has no such split, so it keeps semantic. Windows
-          # semantic search is disabled until ort can build against /MT.
-          F="${F//,semantic/}"; F="${F//semantic,/}"; F="${F//semantic/}"
+          # `semantic` (ort/onnxruntime) now ships on Windows too (Phase 51b).
+          # Phase 51 switched ort to `load-dynamic`, which emits no static-link
+          # directives, so the /MT static-CRT exe links clean — the old LNK2019
+          # CRT-symbol wall is gone. We ship the matching `onnxruntime.dll`
+          # beside the exe (see "Bundle ONNX Runtime" below). No strip needed.
           echo "FEATURES=$F" >> "$GITHUB_ENV"
           echo "ZORD_CHANNEL=${{ env.CHANNEL }}" >> "$GITHUB_ENV"
+
+      # Stage ONNX Runtime 1.24.2 + VC++ redist BEFORE `dx bundle` (Phase 51b).
+      # CRITICAL ORDERING: `dx bundle` builds the NSIS installer DURING the same
+      # invocation, and the installer only stages the main exe plus resources
+      # declared in Dioxus.toml (`[bundle] resources`). Those resource paths
+      # point at `crates/zord-gui/ort-bundle/*.dll`, so the DLLs MUST exist here,
+      # before Bundle app, to be packed into the installer beside zord-gui.exe.
+      # ort 2.0.0-rc.12 targets onnxruntime 1.24.2 (API 24) — ship exactly that.
+      # The VC++ runtime DLLs: onnxruntime.dll is built /MD and needs them; they
+      # exist on modern Win10/11 but we bundle them for safety. The right x64
+      # copies live in C:\Windows\System32 on the x64 runner.
+      - name: Bundle ONNX Runtime + VC++ redist (onnxruntime.dll)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="crates/zord-gui/ort-bundle"
+          mkdir -p "$DEST"
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip"
+          curl -fsSL "$URL" -o ort.zip
+          powershell -NoProfile -Command "Expand-Archive -Force -Path ort.zip -DestinationPath ort-extract"
+          DLL=$(find ort-extract -name "onnxruntime.dll" | head -1)
+          if [ -z "$DLL" ]; then echo "::error::onnxruntime.dll not found in archive"; exit 1; fi
+          cp "$DLL" "$DEST/onnxruntime.dll"
+          echo "Staged onnxruntime.dll from $DLL"
+          # VC++ runtime DLLs from System32 (already the x64 arch on this runner).
+          # Copy whatever is present; flag any missing rather than failing — the
+          # app still runs on hosts that already have the redist installed.
+          for d in vcruntime140.dll vcruntime140_1.dll msvcp140.dll msvcp140_1.dll; do
+            SRC="/c/Windows/System32/$d"
+            if [ -f "$SRC" ]; then
+              cp "$SRC" "$DEST/$d"
+              echo "Staged VC++ redist: $d"
+            else
+              echo "::warning::VC++ redist DLL not found, skipping: $d"
+            fi
+          done
+          ls -l "$DEST"
 
       - name: Bundle app (WASAPI loopback + cpal mic, CPU whisper)
         run: dx bundle --release --package zord-gui --platform desktop --features "${{ env.FEATURES }}"
 
       - name: Build CLI
         run: cargo build --release --package zord-app --features "${{ env.CLI_FEATURES }}"
+
+      # Place ONNX Runtime + VC++ redist beside the OTHER Windows binaries
+      # (Phase 51b). The NSIS installer already got them via Dioxus.toml
+      # resources during Bundle app; this covers the PORTABLE GUI exe (in the
+      # bundle dir the Collect step greps) and the CLI exe (target/release).
+      # `setup_ort_dylib()` loads onnxruntime.dll from beside the running exe.
+      - name: Place ONNX Runtime beside portable exe + CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="crates/zord-gui/ort-bundle"
+          # Bundle dir holding the portable zord-gui.exe (same dir Collect finds).
+          BUNDLE_EXE=$(find target -path "*bundle*" -name "zord-gui.exe" | head -1)
+          [ -z "$BUNDLE_EXE" ] && BUNDLE_EXE=$(find target -name "zord-gui.exe" -not -path "*/deps/*" | head -1)
+          if [ -n "$BUNDLE_EXE" ]; then
+            BUNDLE_DIR=$(dirname "$BUNDLE_EXE")
+            cp "$SRC"/*.dll "$BUNDLE_DIR"/
+            echo "Copied DLLs beside portable exe: $BUNDLE_DIR"
+          else
+            echo "::warning::portable zord-gui.exe not found; skipping co-located DLLs"
+          fi
+          # Beside the CLI exe.
+          cp "$SRC"/*.dll target/release/
+          ls -l target/release/onnxruntime.dll
 
       # ---- Optional: Authenticode sign (only if secrets are set) ----
       - name: Sign EXEs with Authenticode
@@ -291,15 +392,34 @@ jobs:
           if [ -n "$GUIEXE" ]; then cp "$GUIEXE" "dist/Zord-$VER-windows-x64-gui.exe"; fi
           # CLI binary.
           if [ -f target/release/zord.exe ]; then cp target/release/zord.exe "dist/zord-$VER-windows-x64-cli.exe"; fi
-          # Portable zip: the GUI exe + CLI exe (extract, then run — also sidesteps
-          # SmartScreen prompts on a direct .exe download). Installer not included.
-          EXES=()
-          [ -f "dist/Zord-$VER-windows-x64-gui.exe" ] && EXES+=("dist/Zord-$VER-windows-x64-gui.exe")
-          [ -f "dist/zord-$VER-windows-x64-cli.exe" ] && EXES+=("dist/zord-$VER-windows-x64-cli.exe")
-          if [ ${#EXES[@]} -gt 0 ]; then
-            PATHS=$(printf "'%s'," "${EXES[@]}"); PATHS=${PATHS%,}
+          # ONNX Runtime + VC++ redist (Phase 51b). Stage them in a temp subdir
+          # (NOT loose in dist/, which would upload them as stray release assets)
+          # for inclusion in the portable zip.
+          ORT="crates/zord-gui/ort-bundle"
+          mkdir -p dist/_dll
+          cp "$ORT"/*.dll dist/_dll/ 2>/dev/null || true
+          # Self-update asset (Phase 51c): the updater downloads onnxruntime.dll
+          # under this EXACT name and drops it beside the freshly-swapped exe.
+          # ASSET-NAME CONTRACT — must match update.rs `WANTED_DLL`. Do not rename
+          # without updating the updater (it'd silently stop refreshing the DLL).
+          if [ -f "$ORT/onnxruntime.dll" ]; then
+            cp "$ORT/onnxruntime.dll" "dist/onnxruntime-windows-x64.dll"
+          fi
+          # Portable zip: the GUI exe + CLI exe + the DLLs they load at runtime
+          # (extract, then run — also sidesteps SmartScreen prompts on a direct
+          # .exe download). Installer not included (it carries its own copies).
+          ZIP_ITEMS=()
+          [ -f "dist/Zord-$VER-windows-x64-gui.exe" ] && ZIP_ITEMS+=("dist/Zord-$VER-windows-x64-gui.exe")
+          [ -f "dist/zord-$VER-windows-x64-cli.exe" ] && ZIP_ITEMS+=("dist/zord-$VER-windows-x64-cli.exe")
+          for d in onnxruntime.dll vcruntime140.dll vcruntime140_1.dll msvcp140.dll msvcp140_1.dll; do
+            [ -f "dist/_dll/$d" ] && ZIP_ITEMS+=("dist/_dll/$d")
+          done
+          if [ ${#ZIP_ITEMS[@]} -gt 0 ]; then
+            PATHS=$(printf "'%s'," "${ZIP_ITEMS[@]}"); PATHS=${PATHS%,}
             powershell -NoProfile -Command "Compress-Archive -Force -Path $PATHS -DestinationPath 'dist/Zord-$VER-windows-x64.zip'"
           fi
+          # Drop the temp DLL staging dir so it isn't uploaded as release assets.
+          rm -rf dist/_dll
           ls -la dist
 
       - name: Upload to release

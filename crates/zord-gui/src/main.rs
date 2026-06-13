@@ -4200,12 +4200,17 @@ fn UpdateSettings(settings: Signal<Settings>, mut notice: Signal<Option<String>>
                     button {
                         class: "mbtn",
                         disabled: *busy.read(),
-                        onclick: move |_| {
+                        // Clone the DLL url out of `info` first so the closure
+                        // doesn't capture `info` (the label below still uses it).
+                        onclick: {
+                            let ort_dll_url = info.ort_dll_url.clone();
+                            move |_| {
                             busy.set(true);
                             let url = url.clone();
+                            let ort_dll_url = ort_dll_url.clone();
                             spawn(async move {
                                 let res = tokio::task::spawn_blocking(move || {
-                                    update::download_and_install(&url)
+                                    update::download_and_install(&url, ort_dll_url.as_deref())
                                 })
                                 .await;
                                 busy.set(false);
@@ -4217,6 +4222,7 @@ fn UpdateSettings(settings: Signal<Settings>, mut notice: Signal<Option<String>>
                                     Err(_) => notice.set(Some("update failed".into())),
                                 }
                             });
+                            }
                         },
                         "Download & install v{info.version}"
                     }

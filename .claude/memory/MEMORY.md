@@ -26,4 +26,5 @@
 - [Productionization](productionization.md) — Phases 32–35 + v0.3.0 release learnings: FEATURES vs CLI_FEATURES split, re-tag-on-workflow-fix, develop-only CI, asset names are an API
 - [Voiceprints](voiceprints.md) — Phase 38 cross-session speaker identity: tables, matcher params (0.72/0.05/3s/30s/cap 8), implicit enrollment paths, kill-switch, legal memo, storage subtlety
 - [Business direction](business-direction.md) — proprietary license, private-repo move (updater decision pending), planned free/premium split; design with the seam in mind
-- [CI Windows ort/CRT](ci-windows-ort-crt.md) — semantic/sentiment (ort) are macOS-only in releases: ort needs dynamic CRT, clashes with sherpa/llama static CRT on Windows
+- [CI Windows ort/CRT](ci-windows-ort-crt.md) — RESOLVED Phase 51 via ort load-dynamic: semantic/sentiment now ship on all platforms; the ONNX Runtime DLL is bundled beside the exe (was macOS-only due to a /MT-vs-/MD CRT clash)
+- [Platform tiers](platform-tiers.md) — Windows is TIER 1 (parity non-negotiable), macOS tier 2, Linux tier 3; a macOS-only feature is a defect
