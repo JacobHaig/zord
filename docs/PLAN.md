@@ -2154,3 +2154,10 @@ safe at runtime. Same feature flag, all three OSes → true parity.
   real build proves it. Live runtime (DLL loads + an embedding runs on Windows)
   is the user's test; a green Windows build with semantic is the strongest
   headless signal.
+
+  - Phase 51 follow-up: the macOS .dmg ships without libonnxruntime.dylib
+    (dx freezes the dmg during bundle, before injection; resources land in
+    Contents/Resources not Contents/MacOS). The notarized .app zip + combined
+    zip carry it, so semantic works from those. Fix later by rebuilding the
+    dmg post-injection (hdiutil) or a Resources fallback in setup_ort_dylib.
+    macOS is tier 2, so deferred.
