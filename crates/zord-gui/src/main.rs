@@ -90,7 +90,47 @@ fn icon(name: &str) -> Element {
     rsx! { span { class: "ic", dangerous_inner_html: svg } }
 }
 
+/// Point `ort` (load-dynamic, Phase 51) at the ONNX Runtime shared library we
+/// ship next to the executable, by setting `ORT_DYLIB_PATH` before any ort use.
+/// We bundle `onnxruntime.dll` / `libonnxruntime.dylib` / `libonnxruntime.so`
+/// in the same directory as the binary (GUI bundle, portable exe, CLI). If the
+/// user already set `ORT_DYLIB_PATH`, or the lib isn't found beside the exe
+/// (e.g. a feature-less dev build), this is a no-op — ort falls back to its
+/// default search. Compiled only when an ONNX-backed feature is on.
+#[cfg(any(feature = "semantic", feature = "sentiment"))]
+fn setup_ort_dylib() {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+        return; // respect an explicit override
+    }
+    let lib_name = if cfg!(target_os = "windows") {
+        "onnxruntime.dll"
+    } else if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let lib = dir.join(lib_name);
+            if lib.is_file() {
+                // SAFETY: called as the first line of main(), before any thread
+                // is spawned — the documented-safe window for set_var.
+                std::env::set_var("ORT_DYLIB_PATH", &lib);
+            }
+        }
+    }
+}
+
+/// No-op when no ONNX-backed feature is compiled in.
+#[cfg(not(any(feature = "semantic", feature = "sentiment")))]
+fn setup_ort_dylib() {}
+
 fn main() {
+    // Phase 51: point ONNX Runtime (load-dynamic) at the shared lib we ship
+    // beside the exe. MUST run before any thread spawns (`set_var` is unsound
+    // once multithreaded) and before any ort use — so it's the very first line.
+    setup_ort_dylib();
+
     // Logging: always to stderr, plus a rotating file at <app-data>/logs/zord.log
     // so a bundled GUI leaves a copy/pasteable trail when something fails. The
     // returned guard must outlive the app, so keep it in `main`'s scope.

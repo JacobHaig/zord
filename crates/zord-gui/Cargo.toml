@@ -96,16 +96,22 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Only compiled when the `semantic` feature is enabled. We disable the default
 # hf-hub feature so fastembed does NOT pull in the HF HTTP client — we download
 # model files ourselves via zord-net so our proxy-aware agent is used.
-fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls"], optional = true }
+#
+# Phase 51: `ort-load-dynamic` (NOT download-binaries). ort then emits ZERO
+# static-link directives for onnxruntime and loads the shared lib at runtime
+# via libloading — so the Windows STATIC-CRT (/MT) exe (required by sherpa /
+# llama) links clean instead of clashing with onnxruntime's DYNAMIC-CRT (/MD)
+# prebuilt. We ship onnxruntime 1.24.2 beside the exe and point ORT_DYLIB_PATH
+# at it (see setup_ort_dylib in main.rs). Same strategy on every OS → Windows
+# (tier 1) gets semantic at full parity. See [[ci-windows-ort-crt]].
+fastembed = { version = "5", default-features = false, features = ["ort-load-dynamic"], optional = true }
 # Sentiment moments (Phase 49): raw ONNX Runtime + ndarray for YAMNet + wav2vec2.
-# The version + feature set MIRROR what `fastembed` (the `semantic` feature)
-# already pins in Cargo.lock so the whole workspace resolves to a SINGLE `ort`
-# build — no second ONNX Runtime. fastembed 5.16.1 pins `ort = "=2.0.0-rc.12"`
-# with default-features=false + ["ndarray","std","api-24"], and its
-# `ort-download-binaries-rustls-tls` path (which zord-gui selects above) adds
-# `ort/download-binaries` + `ort/tls-rustls`. We replicate exactly that union
-# here so enabling `sentiment` alongside `semantic` unifies to one feature set.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["ndarray", "std", "api-24", "download-binaries", "tls-rustls"], optional = true }
+# Version + feature set MIRROR what `fastembed` pins so the workspace resolves
+# to a SINGLE `ort` build (no second ONNX Runtime). fastembed 5.16.1 pins
+# `ort = "=2.0.0-rc.12"` default-features=false + ["ndarray","std","api-24"];
+# its `ort-load-dynamic` path adds `ort/load-dynamic`. We replicate exactly that
+# union so `sentiment` + `semantic` unify to one feature set + one linkage.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["ndarray", "std", "api-24", "load-dynamic"], optional = true }
 # ndarray for shaping model I/O tensors. Pinned to the version fastembed/ort
 # already lock (0.17.2), default-features off to match fastembed's ndarray dep.
 ndarray = { version = "0.17.2", default-features = false, optional = true }
