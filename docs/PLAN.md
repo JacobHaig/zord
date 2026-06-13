@@ -1991,3 +1991,23 @@ retrieval) proves itself first.
 - ruhear (evaluated, not adopted): https://github.com/aizcutei/ruhear
 - Dioxus releases (0.7.x current): https://github.com/dioxuslabs/dioxus/releases · https://docs.rs/crate/dioxus/latest
 - Whisper large-v3-turbo accuracy/speed: https://huggingface.co/openai/whisper-large-v3-turbo · https://whispernotes.app/blog/introducing-whisper-large-v3-turbo
+
+### Phase 50 — Discord late-joiner capture (planned → building)
+**Root cause (5-agent investigation, June 2026):** a participant who joins a
+DAVE-E2EE voice channel AFTER the bot connected is never captured — songbird
+0.6.0 silently fails to add them to the MLS decrypt group (ClientsConnect vs
+DaveMlsProposals race → `UnexpectedUser` rejection → no decryptor → permanent
+`InvalidPacket` for that user). songbird 0.6.0 / davey 0.1.3 are latest; bug
+unpatched upstream; DAVE cannot be disabled (mandatory since 03/2026).
+**Fix:** detect joins via serenity `voice_state_update` (fires for ALL users,
+non-privileged) → debounced programmatic leave+rejoin → fresh DAVE epoch whose
+Welcome includes all present members → late joiner decrypts → existing
+ParticipantJoined→spawn_proc→spk-N pipeline captures them.
+**Hazard handled:** on rejoin every participant re-announces; the engine must
+route a re-announced speaker idx to its EXISTING track (persistent per-idx
+input + forwarder) instead of spawning a duplicate proc that truncates
+spk-N.wav. The rejoin gap becomes wall-clock silence padding. Re-arm the
+VoiceReceiver handlers on the new call; the bot's own leave() must NOT be read
+as "followed user left." Debounce (one rejoin per quiet window; floor between
+rejoins). Surface a "someone joined — re-syncing audio…" notice. File an
+upstream songbird issue. Live verification required (multi-person DAVE call).
