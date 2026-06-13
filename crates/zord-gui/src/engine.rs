@@ -210,6 +210,12 @@ pub enum Event {
         id: String,
         stats: zord_core::SessionStats,
     },
+    /// Phase 47: voice bookmarks for a session. Emitted after a bookmark is
+    /// dropped (live or manual) and on `DbCmd::Load` so saved sessions show them.
+    Bookmarks {
+        id: String,
+        items: Vec<(u64, String)>,
+    },
 }
 
 /// One audio track's amplitude profile for the session timeline (Phase 42a/42d).
@@ -357,6 +363,10 @@ pub enum RecorderCmd {
     },
     /// Stop a running microphone test.
     MicTestStop,
+    /// Drop a manual bookmark at the current recording time (Phase 47).
+    /// The engine subtracts the configured back-offset from the live elapsed
+    /// time and stores the bookmark as phrase "(manual)". No-op when not recording.
+    DropBookmark,
     /// Stop the engine entirely (process exit normally handles this; kept for
     /// completeness / future graceful shutdown).
     #[allow(dead_code)]
@@ -2096,6 +2106,12 @@ fn db_loop(
                 let _ = ev.send(Event::MeSpeaker(store.me_speaker(&id).unwrap_or(None)));
                 // Phase 46: compute and cache conversation analytics on load.
                 compute_and_cache_stats(&store, &id, &ev);
+                // Phase 47: emit bookmarks so the session view can show them.
+                let items = store.bookmarks(&id).unwrap_or_default();
+                let _ = ev.send(Event::Bookmarks {
+                    id: id.clone(),
+                    items,
+                });
             }
             DbCmd::Export { id, format } => match export_session(&store, &id, format) {
                 Ok(path) => {
@@ -4363,6 +4379,7 @@ fn control_loop(
             RecorderCmd::Stop => {}              // nothing recording
             RecorderCmd::SetMicMuted(_) => {}    // nothing recording
             RecorderCmd::SetSystemMuted(_) => {} // nothing recording
+            RecorderCmd::DropBookmark => {}      // no-op when idle (Phase 47)
         }
     }
 }
@@ -4389,10 +4406,17 @@ struct SessionOpts {
 
 /// Block until Stop / Shutdown, applying live mic/desktop mute toggles in the
 /// meantime. Returns `true` if it ended because of `Shutdown`.
+///
+/// `manual_bookmark_tx` (Phase 47): when `Some`, a `DropBookmark` command sends
+/// the current elapsed-ms timestamp down this channel so the transcribe thread
+/// (which holds the Store) can persist it promptly.
 fn wait_for_stop(
     rx: &mpsc::Receiver<RecorderCmd>,
     mic_muted: &Arc<AtomicBool>,
     sys_muted: &Arc<AtomicBool>,
+    session_start: &Instant,
+    back_offset_ms: u64,
+    manual_bookmark_tx: Option<&mpsc::Sender<u64>>,
 ) -> bool {
     let mut shutdown = false;
     loop {
@@ -4411,6 +4435,14 @@ fn wait_for_stop(
             Ok(RecorderCmd::Start { .. }) => {} // ignore double-start
             // Mic tests are a between-sessions (wizard) affair.
             Ok(RecorderCmd::MicTestStart { .. } | RecorderCmd::MicTestStop) => {}
+            Ok(RecorderCmd::DropBookmark) => {
+                // Phase 47: manual bookmark. Record elapsed time minus back-offset.
+                let elapsed_ms = session_start.elapsed().as_millis() as u64;
+                let t_ms = elapsed_ms.saturating_sub(back_offset_ms);
+                if let Some(tx) = manual_bookmark_tx {
+                    let _ = tx.send(t_ms);
+                }
+            }
         }
     }
     shutdown
@@ -4631,6 +4663,15 @@ fn run_session(
         ));
     }
 
+    // Phase 47: channel for manual bookmarks (DropBookmark command →
+    // timestamp_ms). The transcribe thread owns the receiver so it can write
+    // to the same DB connection it already holds.
+    let (manual_bkmark_tx, manual_bkmark_rx) = mpsc::channel::<u64>();
+    let bookmark_back_ms = {
+        let s = zord_config::Settings::load();
+        s.bookmark_back_offset_secs as u64 * 1_000
+    };
+
     // Transcription + storage thread: consumes jobs from both channels.
     // Capture-only recordings spawn none — VAD jobs are simply dropped.
     let transcribe = model_path.clone().map(|model_path| {
@@ -4667,11 +4708,35 @@ fn run_session(
                     None
                 }
             };
+            // Phase 47: load bookmark phrases once for this session.
+            let bkmark_settings = zord_config::Settings::load();
+            let bkmark_phrases = bkmark_settings.bookmark_phrases.clone();
+            let bkmark_back_ms = bkmark_settings.bookmark_back_offset_secs as u64 * 1_000;
+
+            // Helper: insert a bookmark and broadcast it.
+            let drop_bookmark = |store: &Store,
+                                 session: &str,
+                                 t_ms: u64,
+                                 phrase: &str,
+                                 ev: &UnboundedSender<Event>| {
+                if store.add_bookmark(session, t_ms, phrase).is_ok() {
+                    let items = store.bookmarks(session).unwrap_or_default();
+                    let _ = ev.send(Event::Bookmarks {
+                        id: session.to_string(),
+                        items,
+                    });
+                }
+            };
+
             while let Ok(job) = job_rx.recv() {
                 // Stop requested: drop the remaining backlog instead of running
                 // whisper over all of it, so teardown is prompt.
                 if stopping.load(Ordering::Relaxed) {
                     break;
+                }
+                // Phase 47: drain any pending manual bookmarks before processing this job.
+                while let Ok(t_ms) = manual_bkmark_rx.try_recv() {
+                    drop_bookmark(&store, &session, t_ms, "(manual)", &ev);
                 }
                 // Provisional speaker for this whole VAD chunk (Others only).
                 #[allow(unused_mut)]
@@ -4692,6 +4757,15 @@ fn run_session(
                             } else if seg.speaker.is_none() {
                                 seg.speaker = live_speaker;
                             }
+                            // Phase 47: check for trigger phrase in finalized segment text.
+                            if !bkmark_phrases.is_empty() {
+                                if let Some(matched) =
+                                    zord_config::matches_bookmark_phrase(&seg.text, &bkmark_phrases)
+                                {
+                                    let t_ms = seg.t_start_ms.saturating_sub(bkmark_back_ms);
+                                    drop_bookmark(&store, &session, t_ms, &matched, &ev);
+                                }
+                            }
                             let _ = store.insert_segment(&session, &seg);
                             let _ = ev.send(Event::Segment(seg));
                         }
@@ -4701,11 +4775,24 @@ fn run_session(
                     }
                 }
             }
+            // Phase 47: drain any remaining manual bookmarks after job_rx closes.
+            while let Ok(t_ms) = manual_bkmark_rx.try_recv() {
+                drop_bookmark(&store, &session, t_ms, "(manual)", &ev);
+            }
         })
     });
 
     // Wait for Stop / Shutdown (also handle live mic/desktop mute toggles).
-    let shutdown = wait_for_stop(rx, &mic_muted, &sys_muted);
+    let shutdown = wait_for_stop(
+        rx,
+        &mic_muted,
+        &sys_muted,
+        &session_start,
+        bookmark_back_ms,
+        Some(&manual_bkmark_tx),
+    );
+    // Drop the sender so the transcribe thread's manual_bkmark_rx sees channel closed.
+    drop(manual_bkmark_tx);
 
     // Tell the worker threads to bail out of any queued backlog promptly.
     stopping.store(true, Ordering::Relaxed);
@@ -4901,6 +4988,10 @@ fn run_integration_session(
 
     let _ = ev.send(Event::Status(Status::Recording));
 
+    // Phase 47: channel for manual bookmarks from DropBookmark command.
+    let (integ_bkmark_tx, integ_bkmark_rx) = mpsc::channel::<u64>();
+    let integ_bookmark_back_ms = settings.bookmark_back_offset_secs as u64 * 1_000;
+
     // Transcription + storage thread (same shape as run_session); ground-truth
     // `job.speaker` lands on each segment.
     let transcribe = model_path.clone().map(|model_path| {
@@ -4920,15 +5011,47 @@ fn run_integration_session(
                 Ok(s) => s,
                 Err(_) => return,
             };
+            // Phase 47: load bookmark phrases once.
+            let bkmark_settings = zord_config::Settings::load();
+            let bkmark_phrases = bkmark_settings.bookmark_phrases.clone();
+            let bkmark_back_ms = bkmark_settings.bookmark_back_offset_secs as u64 * 1_000;
+
+            let drop_bookmark = |store: &Store,
+                                 session: &str,
+                                 t_ms: u64,
+                                 phrase: &str,
+                                 ev: &UnboundedSender<Event>| {
+                if store.add_bookmark(session, t_ms, phrase).is_ok() {
+                    let items = store.bookmarks(session).unwrap_or_default();
+                    let _ = ev.send(Event::Bookmarks {
+                        id: session.to_string(),
+                        items,
+                    });
+                }
+            };
+
             while let Ok(job) = job_rx.recv() {
                 if stopping.load(Ordering::Relaxed) {
                     break;
+                }
+                // Phase 47: drain any pending manual bookmarks.
+                while let Ok(t_ms) = integ_bkmark_rx.try_recv() {
+                    drop_bookmark(&store, &session, t_ms, "(manual)", &ev);
                 }
                 match transcriber.transcribe(&job.vad.samples, job.source, job.vad.t_start_ms) {
                     Ok(segs) => {
                         for mut seg in segs {
                             if let Some(spk) = job.speaker {
                                 seg.speaker = Some(spk);
+                            }
+                            // Phase 47: phrase trigger check.
+                            if !bkmark_phrases.is_empty() {
+                                if let Some(matched) =
+                                    zord_config::matches_bookmark_phrase(&seg.text, &bkmark_phrases)
+                                {
+                                    let t_ms = seg.t_start_ms.saturating_sub(bkmark_back_ms);
+                                    drop_bookmark(&store, &session, t_ms, &matched, &ev);
+                                }
                             }
                             let _ = store.insert_segment(&session, &seg);
                             let _ = ev.send(Event::Segment(seg));
@@ -4938,6 +5061,9 @@ fn run_integration_session(
                         let _ = ev.send(Event::Notice(format!("transcribe error: {e}")));
                     }
                 }
+            }
+            while let Ok(t_ms) = integ_bkmark_rx.try_recv() {
+                drop_bookmark(&store, &session, t_ms, "(manual)", &ev);
             }
         })
     });
@@ -5047,6 +5173,12 @@ fn run_integration_session(
                 shutdown = true;
                 break;
             }
+            Ok(RecorderCmd::DropBookmark) => {
+                // Phase 47: manual bookmark in integration session.
+                let elapsed_ms = session_start.elapsed().as_millis() as u64;
+                let t_ms = elapsed_ms.saturating_sub(integ_bookmark_back_ms);
+                let _ = integ_bkmark_tx.send(t_ms);
+            }
             Ok(_) => {} // mute toggles are N/A in integration mode
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if ended.load(Ordering::Relaxed) {
@@ -5056,6 +5188,7 @@ fn run_integration_session(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    drop(integ_bkmark_tx);
 
     stopping.store(true, Ordering::Relaxed);
     let mut crashed = integration_thread.join().is_err();

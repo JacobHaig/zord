@@ -425,6 +425,8 @@ pub struct TimelinePanelProps {
     pub engine: Engine,
     /// Jump the transcript to this segment (highlight + scroll).
     pub highlight: Signal<Option<i64>>,
+    /// Phase 47: `(t_ms, phrase)` bookmark list for the current session.
+    pub bookmarks: Signal<Vec<(u64, String)>>,
 }
 
 /// The collapsible bottom session timeline panel.
@@ -446,6 +448,7 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         segments,
         engine,
         mut highlight,
+        bookmarks,
     } = props;
 
     // Local state: are we playing or paused?
@@ -565,6 +568,9 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
         .map(|l| l.duration_ms)
         .max()
         .unwrap_or(0);
+
+    // Phase 47: snapshot bookmarks for rendering.
+    let bkmarks_v = bookmarks.read().clone();
 
     // Loading state: panel was opened but lanes haven't arrived yet.
     if lanes_v.is_empty() {
@@ -1128,6 +1134,80 @@ pub fn TimelinePanel(props: TimelinePanelProps) -> Element {
                                                         }
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Phase 47: bookmark tick lane ─────────────────────────────────
+            // Only rendered when there are bookmarks; a thin row of orange
+            // diamond ticks above a baseline.  Clicking a tick seeks playback
+            // to that position (same as a waveform click).
+            if !bkmarks_v.is_empty() && max_dur > 0 {
+                {
+                    let bkmarks_render = bkmarks_v.clone();
+                    rsx! {
+                        div {
+                            class: "tl-bookmark-lane",
+                            title: "Bookmark lane — click a marker to seek",
+                            svg {
+                                class: "tl-svg tl-svg-bookmarks",
+                                view_box: "0 0 1500 16",
+                                preserve_aspect_ratio: "none",
+                                // baseline
+                                line {
+                                    x1: "0", y1: "15", x2: "1500", y2: "15",
+                                    stroke: "var(--border, #3a3a4a)",
+                                    stroke_width: "1",
+                                }
+                                for (t_ms, phrase) in bkmarks_render.iter() {
+                                    {
+                                        let t = *t_ms;
+                                        let frac = t as f64 / max_dur as f64;
+                                        let px = (frac.clamp(0.0, 1.0) * 1500.0) as i32;
+                                        // Diamond: center (px, 8), half-width 4, half-height 6
+                                        let pts = format!(
+                                            "{px},2 {},8 {px},14 {},8",
+                                            px + 5, px - 5
+                                        );
+                                        let tip = format!(
+                                            "Bookmark — {} ({})",
+                                            fmt_ms(t),
+                                            phrase
+                                        );
+                                        let mut seek_bkm = on_seek.clone();
+                                        rsx! {
+                                            polygon {
+                                                key: "bkm-{t}-{phrase}",
+                                                class: "tl-bookmark-tick",
+                                                points: "{pts}",
+                                                fill: "#ffb454",
+                                                stroke: "none",
+                                                cursor: "pointer",
+                                                onclick: move |e: MouseEvent| {
+                                                    e.stop_propagation();
+                                                    seek_bkm(t as f64 / max_dur as f64);
+                                                },
+                                                title { "{tip}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Playhead across the bookmark lane
+                                if pos_v.is_some() {
+                                    {
+                                        let px = (playhead_frac * 1500.0) as i32;
+                                        rsx! {
+                                            line {
+                                                x1: "{px}", y1: "0", x2: "{px}", y2: "16",
+                                                stroke: "white",
+                                                stroke_width: "1.5",
+                                                stroke_opacity: "0.6",
                                             }
                                         }
                                     }

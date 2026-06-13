@@ -1874,7 +1874,7 @@ audio + cross-session identity, all local):
 - Live verification pending (headless-only build environment).
   Commit: `feat(gui): conversation analytics — pure-fn Meeting DNA stats card (Phase 46)`.
 
-### Phase 47 — Voice bookmarks: "mark that" (planned)
+### Phase 47 — Voice bookmarks: "mark that" ✅ DONE
 Say a trigger phrase while recording → a bookmark drops at that moment.
 - **v1 trigger = live-transcript matching** (no new model): while live
   transcription runs, watch finalized segments for any configured phrase
@@ -1885,11 +1885,19 @@ Say a trigger phrase while recording → a bookmark drops at that moment.
   "Bookmark phrases" editor (list add/remove; defaults "mark that",
   "bookmark this"); stored as `bookmark_phrases: Vec<String>`.
 - **Storage/UI**: `bookmarks (session_id, t_ms, phrase)` table; a marker
-  lane in the timeline panel (click → seek) + a small bookmark list in the
-  session view (click → scroll transcript); a manual "drop bookmark"
-  button while recording for mouse-first moments. The trigger segment
-  itself is bookmarked at its start time (you say it right after the thing
-  worth marking — small configurable back-offset, default ~10 s).
+  lane in the timeline panel (click → seek) + a bookmark chip row above
+  the transcript (click → scroll transcript); a manual "Bookmark" button
+  while recording (ghost style, sidebar foot near mute buttons). The
+  trigger segment is bookmarked at `t_start_ms - back_offset_ms`
+  (default 10 s, configurable in Settings → Recording).
+- ✅ `matches_bookmark_phrase` pure fn + 2 tests (zord-config)
+- ✅ `bookmarks` table + `add_bookmark` / `bookmarks(session_id)` + 4
+  tests including ON DELETE CASCADE (zord-store)
+- ✅ `Event::Bookmarks`, `RecorderCmd::DropBookmark`, phrase trigger in
+  both `run_session` and `run_integration_session` (engine.rs)
+- ✅ `BookmarkBar` chip row + `BookmarkSettings` section in Settings →
+  Recording; timeline bookmark tick lane (diamond markers, click → seek)
+- Gate: fmt + clippy (workspace + features) + all tests green
 
 ### Phase 48 — Person profiles (planned; premium-tier candidate)
 The Speakers view grows person pages: click a voiceprint → their profile —

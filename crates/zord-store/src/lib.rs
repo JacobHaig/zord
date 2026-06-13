@@ -1291,6 +1291,31 @@ impl Store {
         })?;
         Ok(rows.next().transpose()?)
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 47: voice bookmarks
+    // -----------------------------------------------------------------------
+
+    /// Insert a bookmark for `session_id` at `t_ms`, recording the trigger
+    /// phrase (or "(manual)" for button-dropped bookmarks). Returns the new rowid.
+    pub fn add_bookmark(&self, session_id: &str, t_ms: u64, phrase: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO bookmarks (session_id, t_ms, phrase) VALUES (?1, ?2, ?3)",
+            params![session_id, i64v(t_ms), phrase],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// All bookmarks for a session, ordered by time. Returns `(t_ms, phrase)`.
+    pub fn bookmarks(&self, session_id: &str) -> Result<Vec<(u64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT t_ms, phrase FROM bookmarks WHERE session_id = ?1 ORDER BY t_ms")?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok((get_u64(r, 0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }
 
 /// Best-effort `ALTER TABLE`s for columns added after the base schema; each is
@@ -1495,6 +1520,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
                 json        TEXT    NOT NULL,
                 computed_at INTEGER NOT NULL
             );
+
+            -- Phase 47: voice bookmarks.
+            -- Each row marks a moment in a session. `phrase` is the trigger text
+            -- or "(manual)" for button-dropped bookmarks. Cascades on session delete.
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                t_ms        INTEGER NOT NULL,
+                phrase      TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bookmarks_session ON bookmarks(session_id, t_ms);
             "#,
     )?;
     Ok(())
@@ -2792,6 +2828,89 @@ mod session_stats_tests {
         s.set_session_stats("sess1", r#"{"x":1}"#, 1_000).unwrap();
         s.delete_session("sess1").unwrap();
         assert!(s.get_session_stats("sess1").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod bookmark_tests {
+    use super::*;
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zord-bkmark-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        let _ = std::fs::remove_file(&db);
+        db
+    }
+
+    fn mk_session(s: &Store, id: &str) {
+        s.create_session(&Session {
+            id: id.into(),
+            started_at: 1_000,
+            ended_at: Some(61_000),
+            title: None,
+            audio_path: None,
+            model: "m".into(),
+            overview_folded_ms: None,
+        })
+        .unwrap();
+    }
+
+    /// bookmarks() returns empty vec when none inserted.
+    #[test]
+    fn absent_returns_empty() {
+        let db = tmp_db("absent");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        assert!(s.bookmarks("s1").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// add_bookmark + bookmarks roundtrip, ordered by t_ms.
+    #[test]
+    fn add_and_query_ordered() {
+        let db = tmp_db("roundtrip");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        s.add_bookmark("s1", 30_000, "mark that").unwrap();
+        s.add_bookmark("s1", 10_000, "bookmark this").unwrap();
+        s.add_bookmark("s1", 20_000, "(manual)").unwrap();
+        let bm = s.bookmarks("s1").unwrap();
+        assert_eq!(bm.len(), 3);
+        // Must be ordered by t_ms ascending.
+        assert_eq!(bm[0], (10_000, "bookmark this".to_string()));
+        assert_eq!(bm[1], (20_000, "(manual)".to_string()));
+        assert_eq!(bm[2], (30_000, "mark that".to_string()));
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// Bookmarks are isolated per session.
+    #[test]
+    fn isolated_per_session() {
+        let db = tmp_db("isolated");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        mk_session(&s, "s2");
+        s.add_bookmark("s1", 5_000, "mark that").unwrap();
+        assert_eq!(s.bookmarks("s1").unwrap().len(), 1);
+        assert!(s.bookmarks("s2").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// ON DELETE CASCADE: bookmarks are removed when the session is deleted.
+    #[test]
+    fn cascade_on_session_delete() {
+        let db = tmp_db("cascade");
+        let s = Store::open(&db).unwrap();
+        mk_session(&s, "s1");
+        s.add_bookmark("s1", 12_000, "mark that").unwrap();
+        s.add_bookmark("s1", 24_000, "(manual)").unwrap();
+        assert_eq!(s.bookmarks("s1").unwrap().len(), 2);
+        s.delete_session("s1").unwrap();
+        // After deletion the session is gone — querying bookmarks for a
+        // non-existent session returns an empty result (no row constraint on read).
+        assert!(s.bookmarks("s1").unwrap().is_empty());
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 }

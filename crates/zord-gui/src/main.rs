@@ -509,6 +509,10 @@ fn MainApp() -> Element {
     let mut stats_open = use_signal(|| false);
     let mut session_stats = use_signal(|| Option::<zord_core::SessionStats>::None);
 
+    // Phase 47: voice bookmarks for the currently viewed or live session.
+    // Cleared on session change; populated by Event::Bookmarks.
+    let mut bookmarks = use_signal(Vec::<(u64, String)>::new);
+
     // Create the engine once and drain its events into signals.
     let engine = use_hook(|| {
         let initial = settings.peek().clone();
@@ -699,6 +703,15 @@ fn MainApp() -> Element {
                 Event::Stats { id, stats } => {
                     if matches!(&*view.peek(), View::Session(cur) if *cur == id) {
                         session_stats.set(Some(stats));
+                    }
+                }
+
+                // Phase 47: voice bookmarks — apply to viewed or live session.
+                Event::Bookmarks { id, items } => {
+                    let is_live_session = live_session_id.peek().as_deref() == Some(&id);
+                    let is_viewed = matches!(&*view.peek(), View::Session(cur) if *cur == id);
+                    if is_live_session || is_viewed {
+                        bookmarks.set(items);
                     }
                 }
 
@@ -1118,6 +1131,8 @@ fn MainApp() -> Element {
             // Phase 46: close stats panel and clear cached stats on session switch.
             stats_open.set(false);
             session_stats.set(None);
+            // Phase 47: clear bookmarks on session switch (fresh load will repopulate).
+            bookmarks.set(Vec::new());
             view.set(View::Session(id.clone()));
             last_export.set(None);
             summary.set(None);
@@ -1146,6 +1161,8 @@ fn MainApp() -> Element {
             // Phase 46: close stats panel when leaving session view.
             stats_open.set(false);
             session_stats.set(None);
+            // Phase 47: clear saved-session bookmarks when returning to live.
+            bookmarks.set(Vec::new());
             view.set(View::Live);
             summary.set(None);
             compressed.set(None);
@@ -1383,6 +1400,35 @@ fn MainApp() -> Element {
                     }
                 }
 
+                // Phase 47: bookmark chip row — shown above transcript when
+                // bookmarks exist (session or live view).
+                if matches!(&*view.read(), View::Session(_) | View::Live) {
+                    {
+                        let bms = bookmarks.read().clone();
+                        if !bms.is_empty() {
+                            let is_tl_open = *timeline_open.read();
+                            let bkm_seek: Option<EventHandler<u64>> = if is_tl_open {
+                                let e = engine.clone();
+                                Some(EventHandler::new(move |ms: u64| {
+                                    let _ = e.play_tx.send(PlayCmd::TimelineSeek { start_ms: ms });
+                                }))
+                            } else {
+                                None
+                            };
+                            rsx! {
+                                BookmarkBar {
+                                    bookmarks: bms,
+                                    segments,
+                                    highlight: highlight_seg,
+                                    on_seek: bkm_seek,
+                                }
+                            }
+                        } else {
+                            rsx! {}
+                        }
+                    }
+                }
+
                 // Transcript / results. Pass signals so the list subscribes and
                 // re-renders itself; App is not re-rendered on each new segment.
                 if *view.read() == View::Search {
@@ -1488,6 +1534,7 @@ fn MainApp() -> Element {
                                 segments,
                                 engine: engine.clone(),
                                 highlight: highlight_seg,
+                                bookmarks,
                             }
                         }
                     } else {
@@ -2006,6 +2053,23 @@ fn SessionsSidebar(
                             onclick: move |e| on_mute.call(e),
                             {icon(if *mic_muted.read() { "mic-off" } else { "mic" })}
                             if *mic_muted.read() { "Unmute mic" } else { "Mute mic" }
+                        }
+                    }
+                    // Phase 47: manual "Bookmark" button — visible while recording.
+                    if recording {
+                        {
+                            let e_bkmark = engine.clone();
+                            rsx! {
+                                button {
+                                    class: "record mute",
+                                    title: "Drop a bookmark at the current recording time (minus the back-offset configured in Settings → Recording)",
+                                    onclick: move |_| {
+                                        let _ = e_bkmark.rec_tx.send(RecorderCmd::DropBookmark);
+                                    },
+                                    {icon("bookmark")}
+                                    "Bookmark"
+                                }
+                            }
                         }
                     }
                     if !recording && discord_button {
@@ -3053,6 +3117,7 @@ fn SettingsOverlay(
                                 AudioInputSettings { settings, devices: devices.clone() }
                                 LevelSettings { settings }
                                 RetentionSettings { settings }
+                                BookmarkSettings { settings }
                                 }
                                 if *settings_tab.read() == "ai" {
                                 AiSettings {
@@ -5035,6 +5100,109 @@ fn RetentionSettings(mut settings: Signal<Settings>) -> Element {
     }
 }
 
+// ── Phase 47: bookmark settings ───────────────────────────────────────────────
+
+/// Settings → Recording: bookmark phrases + back-offset editor.
+#[component]
+fn BookmarkSettings(mut settings: Signal<Settings>) -> Element {
+    // Local draft for the "add phrase" input.
+    let mut new_phrase = use_signal(String::new);
+    rsx! {
+        section { class: "settings-section",
+            h3 { "Voice bookmarks" }
+            p { class: "field-note",
+                "Say any of the phrases below during live transcription to drop a \
+                 bookmark at that moment. Voice bookmarks require live transcription \
+                 to be enabled."
+            }
+            div { class: "field",
+                label { "Bookmark phrases" }
+                div { class: "phrase-list",
+                    for (i, phrase) in settings.read().bookmark_phrases.iter().enumerate() {
+                        {
+                            let p = phrase.clone();
+                            rsx! {
+                                div { class: "phrase-row", key: "{i}",
+                                    span { class: "phrase-text", "{p}" }
+                                    button {
+                                        class: "ghost remove-phrase",
+                                        title: "Remove this phrase",
+                                        onclick: move |_| {
+                                            let mut s = settings.peek().clone();
+                                            s.bookmark_phrases.remove(i);
+                                            let _ = s.save();
+                                            settings.set(s);
+                                        },
+                                        "×"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                div { class: "phrase-add-row",
+                    input {
+                        r#type: "text",
+                        placeholder: "Add phrase…",
+                        value: "{new_phrase}",
+                        oninput: move |e: FormEvent| new_phrase.set(e.value()),
+                        onkeydown: move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                let phrase = new_phrase.peek().trim().to_string();
+                                if !phrase.is_empty() {
+                                    let mut s = settings.peek().clone();
+                                    if !s.bookmark_phrases.contains(&phrase) {
+                                        s.bookmark_phrases.push(phrase);
+                                        let _ = s.save();
+                                        settings.set(s);
+                                    }
+                                    new_phrase.set(String::new());
+                                }
+                            }
+                        },
+                    }
+                    button {
+                        class: "ghost add-phrase",
+                        title: "Add phrase",
+                        onclick: move |_| {
+                            let phrase = new_phrase.peek().trim().to_string();
+                            if !phrase.is_empty() {
+                                let mut s = settings.peek().clone();
+                                if !s.bookmark_phrases.contains(&phrase) {
+                                    s.bookmark_phrases.push(phrase);
+                                    let _ = s.save();
+                                    settings.set(s);
+                                }
+                                new_phrase.set(String::new());
+                            }
+                        },
+                        "Add"
+                    }
+                }
+            }
+            div { class: "field",
+                label { "Back-offset (seconds)" }
+                input {
+                    r#type: "number", min: "0", max: "60", class: "days",
+                    value: "{settings.read().bookmark_back_offset_secs}",
+                    oninput: move |e: FormEvent| {
+                        let mut s = settings.peek().clone();
+                        s.bookmark_back_offset_secs =
+                            e.value().trim().parse::<u32>().unwrap_or(10).min(60);
+                        let _ = s.save();
+                        settings.set(s);
+                    },
+                }
+                p { class: "field-note",
+                    "When a phrase is matched the bookmark is placed this many seconds \
+                     before the start of that segment, so it marks the moment you \
+                     actually spoke rather than when transcription completed."
+                }
+            }
+        }
+    }
+}
+
 /// Settings → Audio input: microphone device + capture-mode pickers.
 #[component]
 fn AudioInputSettings(mut settings: Signal<Settings>, devices: Vec<String>) -> Element {
@@ -5492,6 +5660,63 @@ fn theme_style(s: &Settings) -> String {
         }
     }
     css.trim_end().to_string()
+}
+
+// ── Phase 47: bookmark chip row ───────────────────────────────────────────────
+
+/// A compact row of bookmark chips shown above the transcript when there are
+/// bookmarks. Clicking a chip scrolls the transcript to the nearest segment
+/// and, when the timeline is open, seeks playback to that position.
+#[component]
+fn BookmarkBar(
+    /// `(t_ms, phrase)` pairs ordered by time.
+    bookmarks: Vec<(u64, String)>,
+    /// The session's transcript segments (used for nearest-segment lookup).
+    segments: Signal<Vec<Segment>>,
+    /// Transcript highlight/scroll signal.
+    mut highlight: Signal<Option<i64>>,
+    /// Optional seek handler (only wired when the timeline panel is open).
+    on_seek: Option<EventHandler<u64>>,
+) -> Element {
+    rsx! {
+        div { class: "bookmark-bar",
+            for (t_ms, phrase) in bookmarks.iter() {
+                {
+                    let t = *t_ms;
+                    let label = format!("🔖 {} ({})", fmt_ts(t), phrase);
+                    let on_seek_copy = on_seek;
+                    rsx! {
+                        button {
+                            key: "{t}-{phrase}",
+                            class: "bookmark-chip",
+                            title: "Jump to this bookmark",
+                            onclick: move |_| {
+                                // Find the nearest segment by t_start_ms and scroll to it.
+                                let segs = segments.read();
+                                let hit = segs
+                                    .iter()
+                                    .min_by_key(|s| (s.t_start_ms as i64 - t as i64).unsigned_abs());
+                                if let Some(seg) = hit {
+                                    if let Some(id) = seg.id {
+                                        highlight.set(Some(id));
+                                        let _ = document::eval(&format!(
+                                            "requestAnimationFrame(()=>{{const e=document.getElementById('seg-{id}');\
+                                             if(e){{e.scrollIntoView({{block:'nearest',behavior:'smooth'}});}}}})"
+                                        ));
+                                    }
+                                }
+                                // Seek the timeline if it's open.
+                                if let Some(ref handler) = on_seek_copy {
+                                    handler.call(t);
+                                }
+                            },
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

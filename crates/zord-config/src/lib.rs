@@ -243,6 +243,23 @@ pub struct Settings {
     /// updates a document.
     #[serde(default)]
     pub kb_export_dir: String,
+    /// Phrases that drop a bookmark when heard during live transcription (Phase 47).
+    /// Case- and punctuation-insensitive containment match. Requires live
+    /// transcription to be on; documented in Settings → Recording.
+    #[serde(default = "default_bookmark_phrases")]
+    pub bookmark_phrases: Vec<String>,
+    /// How many seconds before the trigger phrase the bookmark lands (Phase 47).
+    /// You say the phrase *after* the moment you want marked. Default 10.
+    #[serde(default = "default_bookmark_back_offset")]
+    pub bookmark_back_offset_secs: u32,
+}
+
+fn default_bookmark_phrases() -> Vec<String> {
+    vec!["mark that".to_string(), "bookmark this".to_string()]
+}
+
+fn default_bookmark_back_offset() -> u32 {
+    10
 }
 
 fn default_transcribe_workers() -> u32 {
@@ -518,6 +535,8 @@ impl Default for Settings {
             voiceprints_consented_at: 0,
             transcribe_workers: default_transcribe_workers(),
             kb_export_dir: String::new(),
+            bookmark_phrases: default_bookmark_phrases(),
+            bookmark_back_offset_secs: default_bookmark_back_offset(),
         }
     }
 }
@@ -541,6 +560,63 @@ impl Settings {
             .map(|(_, _, prompt)| prompt.to_string())
             .unwrap_or_default()
     }
+}
+
+// ── Phase 47: voice-bookmark phrase matcher ───────────────────────────────────
+
+/// Normalize a string for phrase matching: lowercase, strip all characters
+/// except letters/digits/spaces, collapse consecutive spaces.
+fn normalize_phrase(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let stripped: String = lower
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    // Collapse runs of whitespace to a single space.
+    let mut result = String::with_capacity(stripped.len());
+    let mut prev_space = false;
+    for c in stripped.chars() {
+        if c == ' ' {
+            if !prev_space && !result.is_empty() {
+                result.push(' ');
+            }
+            prev_space = true;
+        } else {
+            result.push(c);
+            prev_space = false;
+        }
+    }
+    result.trim_end().to_string()
+}
+
+/// Check whether `text` contains any of `phrases` (case- and
+/// punctuation-insensitive containment). Returns the **first** phrase that
+/// matches (as originally stored, not the normalized form).
+///
+/// # Example
+/// ```
+/// use zord_config::matches_bookmark_phrase;
+/// let phrases = vec!["mark that".to_string()];
+/// assert_eq!(matches_bookmark_phrase("mark, that!", &phrases), Some("mark that".to_string()));
+/// ```
+pub fn matches_bookmark_phrase(text: &str, phrases: &[String]) -> Option<String> {
+    let norm_text = normalize_phrase(text);
+    for phrase in phrases {
+        if phrase.trim().is_empty() {
+            continue;
+        }
+        let norm_phrase = normalize_phrase(phrase);
+        if norm_text.contains(&norm_phrase) {
+            return Some(phrase.clone());
+        }
+    }
+    None
 }
 
 /// Optional OS-keychain storage for the database passphrase
@@ -983,6 +1059,61 @@ mod tests {
         // A saved path round-trips correctly.
         let s: Settings = serde_json::from_str(r#"{"kb_export_dir": "/tmp/my-kb"}"#).unwrap();
         assert_eq!(s.kb_export_dir, "/tmp/my-kb");
+    }
+
+    #[test]
+    fn bookmark_phrases_defaults_and_roundtrip() {
+        // Default: two sensible phrases.
+        let s = Settings::default();
+        assert_eq!(s.bookmark_phrases, vec!["mark that", "bookmark this"]);
+        assert_eq!(s.bookmark_back_offset_secs, 10);
+        // Missing fields use defaults.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.bookmark_phrases, vec!["mark that", "bookmark this"]);
+        assert_eq!(s.bookmark_back_offset_secs, 10);
+        // Custom values round-trip.
+        let s: Settings = serde_json::from_str(
+            r#"{"bookmark_phrases": ["flag this"], "bookmark_back_offset_secs": 5}"#,
+        )
+        .unwrap();
+        assert_eq!(s.bookmark_phrases, vec!["flag this"]);
+        assert_eq!(s.bookmark_back_offset_secs, 5);
+    }
+
+    #[test]
+    fn matches_bookmark_phrase_basic() {
+        let phrases = vec!["mark that".to_string(), "bookmark this".to_string()];
+        // Exact match.
+        assert_eq!(
+            matches_bookmark_phrase("mark that", &phrases),
+            Some("mark that".to_string())
+        );
+        // Case-insensitive.
+        assert_eq!(
+            matches_bookmark_phrase("MARK THAT", &phrases),
+            Some("mark that".to_string())
+        );
+        // Punctuation in speech ("mark, that!").
+        assert_eq!(
+            matches_bookmark_phrase("mark, that!", &phrases),
+            Some("mark that".to_string())
+        );
+        // Phrase embedded in longer text.
+        assert_eq!(
+            matches_bookmark_phrase("Ok, mark that for later", &phrases),
+            Some("mark that".to_string())
+        );
+        // No match.
+        assert_eq!(matches_bookmark_phrase("hello world", &phrases), None);
+        // Empty input.
+        assert_eq!(matches_bookmark_phrase("", &phrases), None);
+        // Empty phrases list.
+        assert_eq!(matches_bookmark_phrase("mark that", &[]), None);
+        // Multi-word phrase match.
+        assert_eq!(
+            matches_bookmark_phrase("please bookmark this moment", &phrases),
+            Some("bookmark this".to_string())
+        );
     }
 
     #[test]
