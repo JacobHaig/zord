@@ -30,7 +30,10 @@ env:
   # Optional engines bundled into the released GUI app. encryption is now
   # included; it requires vendored OpenSSL (macOS: fine with existing toolchain;
   # Windows: Strawberry Perl ships on windows-latest, NASM installed explicitly).
-  # The channel step appends self-update for github builds.
+  # The channel step appends self-update for github builds. NOTE: `semantic`
+  # (ort/onnxruntime) ships on macOS only — the Windows job strips it because
+  # ort's prebuilt needs the dynamic CRT, which clashes with the static CRT
+  # sherpa/llama require (see the Windows Resolve-channel step).
   FEATURES: "diarization,voiceprints,llm-local,llm-remote,parakeet,discord,encryption,semantic"
   # The CLI (zord-app) only declares a subset — voiceprints/discord/self-update
   # are GUI/integration features it doesn't have; passing them fails the build.
@@ -206,6 +209,13 @@ jobs:
         run: |
           F="${{ env.FEATURES }}"
           if [ "${{ env.CHANNEL }}" = "github" ]; then F="$F,self-update"; fi
+          # Drop `semantic` on Windows: it pulls ort/onnxruntime, whose prebuilt
+          # binary needs the DYNAMIC MSVC CRT (/MD), but this build forces the
+          # STATIC CRT (/MT) so sherpa-onnx (parakeet) + llama/whisper link.
+          # /MT and /MD can't coexist in one binary → libort_sys LNK2019 on CRT
+          # math symbols. macOS has no such split, so it keeps semantic. Windows
+          # semantic search is disabled until ort can build against /MT.
+          F="${F//,semantic/}"; F="${F//semantic,/}"; F="${F//semantic/}"
           echo "FEATURES=$F" >> "$GITHUB_ENV"
           echo "ZORD_CHANNEL=${{ env.CHANNEL }}" >> "$GITHUB_ENV"
 
