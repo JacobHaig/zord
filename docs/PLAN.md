@@ -2105,3 +2105,43 @@ upstream songbird issue. Live verification required (multi-person DAVE call).
   to confirm the late joiner actually becomes decryptable after the re-key and
   that the gap/forwarding behaves on real audio (cannot be exercised in CI).
   Upstream songbird issue still to be filed.
+
+### Phase 51 — Unified ONNX Runtime (Windows feature parity) (planned → building)
+**Problem:** `semantic` (and `sentiment`) pull `ort`/ONNX Runtime, whose
+prebuilt is dynamic-CRT (/MD); the Windows build forces static-CRT (/MT) so
+sherpa-onnx + llama/whisper link → `libort_sys` LNK2019 on CRT math symbols.
+v0.3.1 shipped semantic macOS-only as a stopgap. **Windows is TIER 1
+([[platform-tiers]]) — a macOS-only feature is a defect.** Fix validated by a
+3-agent investigation (ort source + Discord/MS docs).
+**Approach: ort `load-dynamic` on ALL platforms.** It emits ZERO static-link
+directives (`ort-sys/disable-linking` early-returns), so the /MT exe links
+clean; `onnxruntime.dll`/`.dylib`/`.so` is loaded at runtime via `libloading`.
+The ONNX C API is CRT-boundary-safe by design (opaque handles, explicit
+allocator, no exceptions/FILE* across the boundary), so /MT-exe + /MD-DLL is
+safe at runtime. Same feature flag, all three OSes → true parity.
+- **51a — deps + runtime path:** fastembed → `ort-load-dynamic`; direct `ort`
+  → `load-dynamic` (drop `download-binaries`/`tls-rustls`); both unify to one
+  `ort =2.0.0-rc.12` `{ndarray,std,api-24,load-dynamic}`. Add `setup_ort_dylib()`
+  as the FIRST line of `main()` (before any thread spawn — `set_var` safety),
+  gated `any(semantic,sentiment)`: set `ORT_DYLIB_PATH` to the exe-relative
+  lib if present. Gate: build/clippy/test under `semantic`+`sentiment` (tests
+  are pure-fn — no live model needed; load-dynamic build doesn't fetch ORT).
+- **51b — release CI bundles onnxruntime 1.24.2 + re-enables Windows semantic:**
+  download the matching MS GitHub lib per OS (`onnxruntime-win-x64-1.24.2.zip`
+  → `onnxruntime.dll`; `onnxruntime-osx-arm64-1.24.2.tgz` → real
+  `libonnxruntime.dylib`, not the symlink), place it beside the GUI exe (in the
+  bundle, dist, CLI dir, and the zips); macOS: also codesign the dylib + bundle
+  the VC++ redist DLLs on Windows (vcruntime140/_1, msvcp140) or document the
+  prereq; REVERT the Windows `semantic` strip so FEATURES is unified again.
+  Verified by the release run (cannot be exercised headlessly).
+- **51c — updater handles the DLL:** `update.rs` self-swaps only the exe today;
+  ship `onnxruntime.dll` as a release asset and download+place it beside the new
+  exe on Windows self-update so a bumped ORT version isn't left stale/missing.
+- **51d — verify + re-cut 0.3.1:** full gate; delete the partial macOS-only
+  v0.3.1 release+tag; retag at the unified commit; watch BOTH Windows + macOS
+  go green WITH semantic present. **Key risk to confirm on the build:**
+  sherpa-onnx statically bundles its OWN onnxruntime — two ORT copies in one
+  process; expected fine (sherpa's isn't exported as OrtGetApiBase) but only the
+  real build proves it. Live runtime (DLL loads + an embedding runs on Windows)
+  is the user's test; a green Windows build with semantic is the strongest
+  headless signal.
