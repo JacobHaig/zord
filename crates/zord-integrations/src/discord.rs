@@ -154,6 +154,7 @@ async fn run_client(
             Instant::now() - Duration::from_secs(3600),
         )),
         rejoin_gen: Arc::new(AtomicU64::new(0)),
+        rejoin_active: Arc::new(AtomicBool::new(false)),
     };
 
     let mut client = match Client::builder(&token, intents)
@@ -233,6 +234,14 @@ struct Bot {
     /// with the bumped value; the rejoin only fires if the counter is still
     /// unchanged after the quiet window (i.e. nobody else joined meanwhile).
     rejoin_gen: Arc<AtomicU64>,
+    /// `true` while a rejoin is *in flight* (between the start of `rejoin()` and
+    /// its end). The `last_rejoin` floor alone can't prevent overlap because it
+    /// isn't stamped until the rejoin finishes — a joiner arriving mid-rejoin
+    /// would see the stale stamp, pass the floor, and schedule a SECOND
+    /// leave+join that interleaves with the first (churn / a transient dead
+    /// connection). A scheduled task bails if this is already set: the in-flight
+    /// rejoin already re-keys everyone present, including this joiner.
+    rejoin_active: Arc<AtomicBool>,
 }
 
 /// Phase 50 debounce tuning. `REJOIN_FLOOR` is the minimum spacing between two
@@ -387,17 +396,30 @@ impl Bot {
     /// becomes decryptable again.
     ///
     /// CRITICAL: the bot's own `leave()` here must NOT be read as "followed user
-    /// left" — we never send `Ended`, and serenity's `voice_state_update` for
-    /// the *bot's* own user id is filtered out in the handler. We also send NO
-    /// `Ended` on any rejoin error: a failed re-key leaves the pre-rejoin call
-    /// intact (worst case the late joiner stays undecryptable), which is
-    /// strictly better than tearing down a working recording.
+    /// left" — we never send a *benign* `Ended` for it, and serenity's
+    /// `voice_state_update` for the *bot's* own user id is filtered out in the
+    /// handler.
+    ///
+    /// Once `leave()` has run the pre-rejoin call is GONE — so a failed re-join
+    /// is NOT recoverable: the bot has left, isn't connected, and would capture
+    /// nothing while `drive_session` kept looping (the session would hang as
+    /// "recording" until the user manually stopped). We therefore FAIL LOUD on a
+    /// rejoin-join failure: send `Ended { error: true }` so the engine ends the
+    /// session and the user is told to restart, instead of hanging silently.
     async fn rejoin(&self, ctx: &Context, guild: GuildId, channel: ChannelId) {
+        // Mark in-flight + stamp the floor at the START (not the end): any
+        // joiner arriving during this rejoin must see "active"/"recent" and bail
+        // rather than schedule an overlapping leave+join. Cleared on the way out.
+        self.rejoin_active.store(true, Ordering::SeqCst);
+        if let Ok(mut t) = self.last_rejoin.lock() {
+            *t = Instant::now();
+        }
         // Surface the brief gap so the user understands the ~1–3 s of silence.
         let _ = self.ev_tx.send(IntegrationEvent::Notice(
             "Someone joined — re-syncing Discord audio…".into(),
         ));
         let Some(manager) = songbird::get(ctx).await else {
+            self.rejoin_active.store(false, Ordering::SeqCst);
             return;
         };
         if let Some(call) = manager.get(guild) {
@@ -411,19 +433,35 @@ impl Bot {
                 tracing::info!("discord: re-keyed DAVE via rejoin (late-joiner capture)");
             }
             Err(e) => {
-                // Log only — see the method doc: no Ended on a failed re-key.
+                // leave() already ran → the call is gone and we failed to get it
+                // back. End the session loudly rather than hang capturing nothing.
                 tracing::warn!("discord: rejoin to re-key DAVE failed: {e:?}");
+                let _ = self.ev_tx.send(IntegrationEvent::Ended {
+                    reason: "lost the voice connection while re-syncing — stop and start recording again".into(),
+                    error: true,
+                });
             }
         }
+        // Re-stamp at the end too so the floor measures from when we're settled,
+        // then clear the in-flight flag (order: stamp before clear, so a joiner
+        // that observes !active also sees a fresh stamp).
         if let Ok(mut t) = self.last_rejoin.lock() {
             *t = Instant::now();
         }
+        self.rejoin_active.store(false, Ordering::SeqCst);
     }
 
     /// A user entered our channel after we connected: schedule a debounced
     /// re-key. Returns immediately; the actual rejoin runs on a spawned task
     /// after a quiet window (so a burst of joiners collapses to one rejoin).
     fn schedule_rejoin(&self, ctx: &Context, guild: GuildId, channel: ChannelId) {
+        // A rejoin already in flight re-keys everyone currently present
+        // (including this joiner) — scheduling another would interleave a second
+        // leave+join with the first. Bail.
+        if self.rejoin_active.load(Ordering::SeqCst) {
+            tracing::debug!("discord: skip rejoin — one already in flight");
+            return;
+        }
         // Debounce floor: a recent rejoin already re-keyed to include everyone
         // present, so skip.
         let since = self
@@ -441,6 +479,7 @@ impl Bot {
         let gen = self.rejoin_gen.clone();
         let ev_tx = self.ev_tx.clone();
         let last_rejoin = self.last_rejoin.clone();
+        let rejoin_active = self.rejoin_active.clone();
         let follow = self.follow;
         let announce = self.announce.clone();
         let ctx = ctx.clone();
@@ -450,7 +489,14 @@ impl Bot {
                 // A newer joiner reset the window; that later task will rejoin.
                 return;
             }
+            // A rejoin may have started during our wait (e.g. an earlier burst's
+            // task fired): re-check the in-flight guard before committing.
+            if rejoin_active.load(Ordering::SeqCst) {
+                return;
+            }
             // Re-build a transient Bot view to run the rejoin (cheap clones).
+            // It SHARES `rejoin_active`/`last_rejoin`/`rejoin_gen` so the guards
+            // above stay coherent with the real handler.
             let bot = Bot {
                 follow,
                 announce,
@@ -459,6 +505,7 @@ impl Bot {
                 joined_chan: Arc::new(std::sync::Mutex::new(Some((guild, channel)))),
                 last_rejoin,
                 rejoin_gen: gen,
+                rejoin_active,
             };
             bot.rejoin(&ctx, guild, channel).await;
         });
@@ -627,6 +674,13 @@ impl VoiceReceiver {
     /// [`Self::announce`] when the mapping does show up. (Trade-off: if this
     /// fires for the followed user, their audio lands on a speaker track, not
     /// "Me" — better than the silent loss it replaces.)
+    //
+    // Phase 50 known limitation (accepted): this keys on `ssrc-N`, not the
+    // user id. After a rejoin a participant gets a fresh SSRC, so a joiner whose
+    // SSRC→user mapping never arrives lands on a SECOND `ssrc-*` track instead
+    // of merging back into their pre-rejoin one — degraded (a split track), not
+    // corrupt, and inherent to the unmapped fallback. The mapped path (`announce`,
+    // keyed by user id) merges correctly.
     fn announce_unmapped(&self, ssrc: u32) {
         if self.0.streams.contains_key(&ssrc) {
             return;
